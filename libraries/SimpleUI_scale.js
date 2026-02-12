@@ -3,12 +3,10 @@
 // Referencia interna a la aplicación Pixi para que los componentes accedan a stage/renderer
 let appRef = null;
 
-// ejecutar setup() o main()..
-let setupMainSelector = false;
-
-// traer puntero a la funcion main()..
-import { main as appMain } from '../app.js';
-import { setup as appSetup } from '../app.js';
+// Callbacks de aplicación estilo Processing: setup() una vez, main() por frame.
+let __userSetup = null;
+let __userMain = null;
+let __didRunSetup = false;
 
 // global var block..
 export let formContainer;
@@ -228,6 +226,16 @@ function updateContainersPadding(container) {
 // Función para inyectar la app desde el módulo principal
 export function setLibApp(appInstance) {
     appRef = appInstance;
+}
+
+/**
+ * Registra callbacks de ciclo de vida estilo Processing.
+ * setup() se ejecuta una sola vez en el primer frame disponible.
+ * main(delta) se ejecuta en cada frame posterior.
+ */
+export function startUI({ setup, main } = {}) {
+    __userSetup = (typeof setup === 'function') ? setup : null;
+    __userMain = (typeof main === 'function') ? main : null;
 }
 
 // --- NUEVA FUNCIÓN: setMode ---
@@ -1708,15 +1716,17 @@ function __setup() {
     };
 
     // --- TICKER ---
-    app.ticker.add(() => {
-        // 1. LLAMADA A LA NUEVA FUNCIÓN MAIN
-        if (!setupMainSelector) {
-            setupMainSelector = true;
-            appSetup();
+    app.ticker.add((delta) => {
+        // 1. Ciclo setup/main estilo Processing
+        if (!__didRunSetup) {
+            // Esperar hasta que la app registre callbacks con startUI(...)
+            if (!__userSetup) return;
+            __didRunSetup = true;
+            __userSetup();
             // Tras construir UI inicial, calcular límites de scroll
             __updateGlobalScrollBounds();
-        } else {
-            appMain();
+        } else if (__userMain) {
+            __userMain(delta);
         }
 
         // 2. Parpadeo del cursor en inputs (sin lógica de scroll global)

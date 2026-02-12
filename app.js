@@ -4,7 +4,7 @@ import {
     UIColumn, UIRow, UIImage, UILabel, UITabs, UISwitch, UIRadioGroup,
     UIProgressBar, UISlider, UIButton, UICheckBox, UITextInput,
     UIDropDown, UITable, UITextArea, UIPopup, UIToast,
-    setMode, setGlobalPadding, UI_GLOBAL_PADDING // <-- NUEVAS IMPORTACIONES
+    setMode, setGlobalPadding, UI_GLOBAL_PADDING, startUI // <-- NUEVAS IMPORTACIONES
 } from './libraries/SimpleUI_scale.js';
 import { NetMessage, SimpleWS } from './libraries/simpleNetwork.js';
 
@@ -324,3 +324,4 @@ function onUIEvent(element, eventType, data) {
 }
 
 setUIEventHandler(onUIEvent);
+startUI({ setup, main });
