@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>PixiJS v7.3.0 - Modular Structure</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #1a1a2e;
+            touch-action: none;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        /* Estilos para los inputs invisibles */
+        .hidden-field {
+            position: absolute;
+            opacity: 0;
+            left: -1000px;
+            top: 0;
+            width: 1px;
+            height: 1px;
+            z-index: -1;
+            /* Importante para que el navegador calcule mejor los saltos de línea lógicos */
+            font-family: Arial;
+            font-size: 16px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+
+<body>
+    <input type="text" id="hidden-input-field" class="hidden-field" autocomplete="off">
+
+    <textarea id="hidden-textarea-field" class="hidden-field" autocomplete="off"></textarea>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.3.0/pixi.min.js"></script>
+    <script type="module" src="./app.js"></script>
+</body>
+
+</html>
