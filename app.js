@@ -1,9 +1,9 @@
 // --- app.js: Lógica de Aplicación --- 
 import {
-    formContainer, UITheme, getTheme, setLibApp, setUIEventHandler,
+    formContainer, fixedContainer, UITheme, getTheme, setLibApp, setUIEventHandler,
     UIColumn, UIRow, UIImage, UILabel, UITabs, UISwitch, UIRadioGroup,
     UIProgressBar, UISlider, UIButton, UICheckBox, UITextInput,
-    UIDropDown, UITable, UITextArea, UIPopup, UIToast,
+    UIDropDown, UITable, UITextArea, UIPopup, UIToast, UIFixed,
     setMode, setGlobalPadding, UI_GLOBAL_PADDING, startUI // <-- NUEVAS IMPORTACIONES
 } from './libraries/SimpleUI_scale.js';
 import { NetMessage, SimpleWS } from './libraries/simpleNetwork.js';
@@ -306,6 +306,33 @@ export function setup() {
 
     // AÑADIR TABS AL FORMULARIO PRINCIPAL
     formContainer.addChild(mainTabs);
+
+    // --- HUD FIJO (fuera del scroll global) ---
+    const hudTopRight = new UIFixed({
+        id: "hud_top_right",
+        anchor: "top-right",
+        direction: "row",
+        gap: 10,
+        offsetX: -20,
+        offsetY: 20
+    });
+    hudTopRight.addItem(new UIButton("btn_hud_map", "Mapa", 0.18, 0x2980b9));
+    hudTopRight.addItem(new UIDropDown("dd_hud_channel", ["Global", "Equipo", "Comercio"], 0.22));
+    fixedContainer.addChild(hudTopRight);
+    hudTopRight.refresh();
+
+    const hudBottomLeft = new UIFixed({
+        id: "hud_bottom_left",
+        anchor: "bottom-left",
+        direction: "column",
+        gap: 8,
+        offsetX: 20,
+        offsetY: -20
+    });
+    hudBottomLeft.addItem(new UIButton("btn_hud_inventory", "Inventario", 0.22, 0x16a085));
+    hudBottomLeft.addItem(new UIButton("btn_hud_craft", "Crafteo", 0.22, 0x8e44ad));
+    fixedContainer.addChild(hudBottomLeft);
+    hudBottomLeft.refresh();
 
     // Log para verificar configuración
     console.log(`Padding global configurado: ${UI_GLOBAL_PADDING}px`);

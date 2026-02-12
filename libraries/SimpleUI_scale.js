@@ -10,6 +10,7 @@ let __didRunSetup = false;
 
 // global var block..
 export let formContainer;
+export let fixedContainer;
 let app;
 let activePopupsCount = 0;
 
@@ -154,6 +155,7 @@ function __updateCanvasFit() {
 
     __applyGlobalScroll();
     __updateGlobalScrollBounds();
+    __refreshFixedLayouts();
 }
 
 function __applyGlobalScroll() {
@@ -184,6 +186,15 @@ function __updateGlobalScrollBounds() {
 
     __globalMaxScrollY = Math.max(0, contentH - safeH + endPadding);
     __applyGlobalScroll();
+}
+
+function __refreshFixedLayouts() {
+    if (!fixedContainer || !fixedContainer.children) return;
+    fixedContainer.children.forEach((child) => {
+        if (child && typeof child.refreshPosition === 'function') {
+            child.refreshPosition();
+        }
+    });
 }
 
 // Tamaño por defecto de la fuente de texto de la ui..
@@ -393,6 +404,108 @@ export class UIRow extends PIXI.Container {
         });
 
         this.w = currentX + this.padding + this.effectivePadding;
+    }
+}
+
+// Contenedor para HUD fijo (no participa en scroll global).
+// Permite anclaje al safe area y layout simple en fila/columna.
+export class UIFixed extends PIXI.Container {
+    constructor(settings = {}) {
+        super();
+        this.id = settings.id || "";
+        this.anchor = settings.anchor || 'top-left';
+        this.direction = settings.direction || 'column'; // 'column' | 'row'
+        this.gap = settings.gap || 10;
+        this.padding = settings.padding || 0;
+        this.offsetX = settings.offsetX || 0;
+        this.offsetY = settings.offsetY || 0;
+
+        this.hasAbsolutePosition = Number.isFinite(settings.x) || Number.isFinite(settings.y);
+        this.absX = Number.isFinite(settings.x) ? settings.x : 0;
+        this.absY = Number.isFinite(settings.y) ? settings.y : 0;
+
+        this.w = 0;
+        this.h = 0;
+    }
+
+    addItem(item) {
+        this.addChild(item);
+        this.refresh();
+    }
+
+    addItems(items) {
+        items.forEach(i => this.addChild(i));
+        this.refresh();
+    }
+
+    refresh() {
+        if (this.direction === 'row') {
+            let currentX = this.padding;
+            let maxH = 0;
+            this.children.forEach((child) => {
+                if (!child.visible) return;
+                const cw = (child.w !== undefined) ? child.w : child.width;
+                const ch = (child.h !== undefined) ? child.h : child.height;
+                child.x = currentX;
+                child.y = this.padding;
+                currentX += cw + this.gap;
+                if (ch > maxH) maxH = ch;
+            });
+            const visibleCount = this.children.filter(c => c.visible).length;
+            const contentW = visibleCount > 0 ? (currentX - this.gap) : this.padding;
+            this.w = contentW + this.padding;
+            this.h = maxH + (this.padding * 2);
+        } else {
+            let currentY = this.padding;
+            let maxW = 0;
+            this.children.forEach((child) => {
+                if (!child.visible) return;
+                const cw = (child.w !== undefined) ? child.w : child.width;
+                const ch = (child.h !== undefined) ? child.h : child.height;
+                child.x = this.padding;
+                child.y = currentY;
+                currentY += ch + this.gap;
+                if (cw > maxW) maxW = cw;
+            });
+            const visibleCount = this.children.filter(c => c.visible).length;
+            const contentH = visibleCount > 0 ? (currentY - this.gap) : this.padding;
+            this.w = maxW + (this.padding * 2);
+            this.h = contentH + this.padding;
+        }
+        this.refreshPosition();
+    }
+
+    refreshPosition() {
+        const safe = getSafeAreaRect();
+        if (this.hasAbsolutePosition) {
+            this.x = this.absX;
+            this.y = this.absY;
+            return;
+        }
+
+        switch (this.anchor) {
+            case 'top-right':
+                this.x = safe.x + safe.width - this.w + this.offsetX;
+                this.y = safe.y + this.offsetY;
+                break;
+            case 'bottom-left':
+                this.x = safe.x + this.offsetX;
+                this.y = safe.y + safe.height - this.h + this.offsetY;
+                break;
+            case 'bottom-right':
+                this.x = safe.x + safe.width - this.w + this.offsetX;
+                this.y = safe.y + safe.height - this.h + this.offsetY;
+                break;
+            case 'center':
+                this.x = safe.x + ((safe.width - this.w) / 2) + this.offsetX;
+                this.y = safe.y + ((safe.height - this.h) / 2) + this.offsetY;
+                break;
+            case 'top-left':
+            default:
+                this.x = safe.x + this.offsetX;
+                this.y = safe.y + this.offsetY;
+                break;
+        }
     }
 }
 
@@ -1641,6 +1754,10 @@ function __setup() {
     // --- SCROLL GLOBAL: viewport + root (en safe area) ---
     __scrollViewport = new PIXI.Container();
     app.stage.addChild(__scrollViewport);
+
+    // --- CAPA FIJA (HUD) fuera del scroll global ---
+    fixedContainer = new PIXI.Container();
+    app.stage.addChild(fixedContainer);
 
     __scrollMask = new PIXI.Graphics();
     __scrollMask.visible = false;
