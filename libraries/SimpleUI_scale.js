@@ -87,8 +87,15 @@ export function setScaleMode(mode) {
 function __updateCanvasFit() {
     if (!app || !app.view) return;
 
-    const vw = window.innerWidth || document.documentElement.clientWidth || canvasWidth;
-    const vh = window.innerHeight || document.documentElement.clientHeight || canvasHeight;
+    // En móvil, visualViewport refleja mejor el área realmente visible
+    // cuando aparecen/desaparecen barras del navegador.
+    const vv = window.visualViewport;
+    const vw = (vv && Number.isFinite(vv.width) && vv.width > 0)
+        ? vv.width
+        : (window.innerWidth || document.documentElement.clientWidth || canvasWidth);
+    const vh = (vv && Number.isFinite(vv.height) && vv.height > 0)
+        ? vv.height
+        : (window.innerHeight || document.documentElement.clientHeight || canvasHeight);
 
     const cw = canvasWidth;
     const ch = canvasHeight;
@@ -173,7 +180,11 @@ function __updateGlobalScrollBounds() {
         // Fallback: height
         contentH = formContainer.height || 0;
     }
-    __globalMaxScrollY = Math.max(0, contentH - safeH);
+    // Margen inferior para que el último elemento no quede pegado al borde.
+    const isTouchLike = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    const endPadding = isTouchLike ? 120 : 60;
+
+    __globalMaxScrollY = Math.max(0, contentH - safeH + endPadding);
     __applyGlobalScroll();
 }
 
@@ -1057,7 +1068,7 @@ export class UITextArea extends PIXI.Container {
     applyTheme() {
         const theme = getTheme();
         this.bg.clear();
-        const borderColor = this.isFocused ? theme.accent : theme.secondary;
+        const borderColor = this.isFocused ? theme.accent : theme.textSec;
         const borderWidth = this.isFocused ? 2 : 1;
         this.bg.lineStyle(borderWidth, borderColor, 1);
         this.bg.beginFill(theme.panel, 0.5);
@@ -1600,15 +1611,21 @@ function __setup() {
     __updateCanvasFit();
     document.body.appendChild(app.view);
 
-    // Recalcular al cambiar tamaño/orientación
-    window.addEventListener('resize', () => {
+    // Recalcular al cambiar tamaño/orientación o viewport visual (móvil)
+    const onViewportChange = () => {
         __updateCanvasFit();
         // Re-layout si procede
         if (formContainer && typeof formContainer.refresh === 'function') {
             try { formContainer.refresh(); } catch (e) { /* noop */ }
         }
         __updateGlobalScrollBounds();
-    });
+    };
+
+    window.addEventListener('resize', onViewportChange);
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', onViewportChange);
+        window.visualViewport.addEventListener('scroll', onViewportChange);
+    }
 
     // Inyectar la instancia de app a la librería UI
     setLibApp(app);
@@ -1927,6 +1944,28 @@ export class UIToast extends PIXI.Container {
     static activeToasts = [];
     static gap = 10;
 
+    static getSafeRect() {
+        const r = getSafeAreaRect();
+        if (!r || !Number.isFinite(r.x) || !Number.isFinite(r.y) || !Number.isFinite(r.width) || !Number.isFinite(r.height)) {
+            return { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
+        }
+        return r;
+    }
+
+    static getToastHeight(t) {
+        const direct = Number(t.toastHeight);
+        if (Number.isFinite(direct) && direct > 0) return direct;
+
+        const bounds = (typeof t.getLocalBounds === 'function') ? t.getLocalBounds() : null;
+        const measured = Number(bounds?.height);
+        if (Number.isFinite(measured) && measured > 0) return measured;
+
+        const fallback = Number(t.height);
+        if (Number.isFinite(fallback) && fallback > 0) return fallback;
+
+        return 72;
+    }
+
     static show(message, type = 'info', duration = 3000) {
         if (!appRef) return;
         const toast = new UIToast(message, type, duration);
@@ -1938,12 +1977,18 @@ export class UIToast extends PIXI.Container {
 
     static recalculatePositions() {
         const bottomMargin = 80;
-        let currentY = canvasHeight - bottomMargin;
+        const safe = this.getSafeRect();
+        let currentY = safe.y + safe.height - bottomMargin;
 
         for (let i = this.activeToasts.length - 1; i >= 0; i--) {
             const t = this.activeToasts[i];
-            t.targetY = currentY - t.height;
-            currentY -= (t.height + this.gap);
+            const h = this.getToastHeight(t);
+
+            t.targetY = currentY - h;
+            if (!Number.isFinite(t.targetY)) {
+                t.targetY = safe.y + safe.height - bottomMargin - h;
+            }
+            currentY -= (h + this.gap);
         }
     }
 
@@ -1972,8 +2017,10 @@ export class UIToast extends PIXI.Container {
 
         this.draw();
 
-        this.x = (canvasWidth - this.width) / 2;
-        this.y = canvasHeight + 50;
+        const safe = UIToast.getSafeRect();
+        const w = Number.isFinite(this.toastWidth) && this.toastWidth > 0 ? this.toastWidth : this.width;
+        this.x = safe.x + ((safe.width - w) / 2);
+        this.y = safe.y + safe.height + 50;
         this.targetY = this.y;
 
         this.lifeTime = 0;
@@ -1988,14 +2035,16 @@ export class UIToast extends PIXI.Container {
         const maxWidth = canvasWidth * 0.8;
 
         if (this.label.width > maxWidth) {
-            if (this.label.style) {
-                this.label.style.wordWrap = true;
-                this.label.style.wordWrapWidth = maxWidth;
+            if (this.label.label && this.label.label.style) {
+                this.label.label.style.wordWrap = true;
+                this.label.label.style.wordWrapWidth = maxWidth;
             }
         }
 
         const w = this.label.width + (padding * 2);
         const h = this.label.height + (padding * 2);
+        this.toastWidth = w;
+        this.toastHeight = h;
         const radius = 30;
 
         this.bg.clear();
@@ -2012,6 +2061,11 @@ export class UIToast extends PIXI.Container {
     }
 
     update(delta) {
+        if (!Number.isFinite(this.targetY)) {
+            const safe = UIToast.getSafeRect();
+            this.targetY = safe.y + safe.height - 160;
+        }
+
         if (Math.abs(this.y - this.targetY) > 1) {
             this.y += (this.targetY - this.y) * 0.2;
         }

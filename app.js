@@ -6,7 +6,7 @@ import {
     UIDropDown, UITable, UITextArea, UIPopup, UIToast,
     setMode, setGlobalPadding, UI_GLOBAL_PADDING // <-- NUEVAS IMPORTACIONES
 } from './libraries/SimpleUI_scale.js';
-import { NetMessage, SimpleWS } from './libraries/SimpleNetwork.js';
+import { NetMessage, SimpleWS } from './libraries/simpleNetwork.js';
 
 let demoProgressBar;
 let progressTime = 0;
@@ -246,10 +246,10 @@ export function setup() {
 
         form.addItem(new UILabel("l_head", "Acceso de Usuario", 20, 0x34495e, true));
         form.addItem(new UILabel("lbl_u", "Usuario:"));
-        form.addItem(new UITextInput("inp_user", "admin", 250));
+        form.addItem(new UITextInput("inp_user", 0.42, "admin"));
 
         form.addItem(new UILabel("lbl_p", "Contraseña:"));
-        form.addItem(new UITextInput("inp_pass", "******", 250));
+        form.addItem(new UITextInput("inp_pass", 0.42, "******", true));
 
         const btnEntrar = new UIButton("btn_enter", "Entrar al Sistema", 0.8);
         form.addItem(btnEntrar);
