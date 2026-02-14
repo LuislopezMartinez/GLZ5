@@ -7,6 +7,7 @@ let appRef = null;
 let __userSetup = null;
 let __userMain = null;
 let __didRunSetup = false;
+let __uiInitialized = false;
 
 // global var block..
 export let formContainer;
@@ -41,7 +42,7 @@ export function setGlobalScrollY(y) {
 
 export function refreshGlobalScrollBounds() {
     __updateGlobalScrollBounds();
-            __scheduleScrollBoundsUpdate();
+    __scheduleScrollBoundsUpdate();
 }
 
 // Recalcula límites en el siguiente frame (útil cuando Text/Graphics aún no han actualizado bounds)
@@ -241,12 +242,31 @@ export function setLibApp(appInstance) {
 
 /**
  * Registra callbacks de ciclo de vida estilo Processing.
- * setup() se ejecuta una sola vez en el primer frame disponible.
- * main(delta) se ejecuta en cada frame posterior.
+ * setup() se ejecuta una sola vez al llamar startUI().
+ * main(delta) se ejecuta en cada frame posterior (tras setup()).
  */
 export function startUI({ setup, main } = {}) {
+    if (__didRunSetup) {
+        console.warn("startUI() ya fue ejecutado. Ignorando llamada duplicada.");
+        return;
+    }
     __userSetup = (typeof setup === 'function') ? setup : null;
     __userMain = (typeof main === 'function') ? main : null;
+    if (!__userSetup) {
+        console.error("startUI(): falta callback setup().");
+        return;
+    }
+    __didRunSetup = true;
+    try {
+        __userSetup();
+    } catch (err) {
+        console.error("Error en setup():", err);
+    }
+    if (!appRef || !__uiInitialized) {
+        console.error("SimpleUI no inicializada. Debes llamar setMode(ancho, alto) dentro de setup().");
+        return;
+    }
+    __updateGlobalScrollBounds();
 }
 
 // --- NUEVA FUNCIÓN: setMode ---
@@ -257,14 +277,19 @@ export function startUI({ setup, main } = {}) {
  * @param {number} height - Alto en píxeles del canvas interno
  */
 export function setMode(width, height) {
-    canvasWidth = width;
-    canvasHeight = height;
-
-    // Si la app ya está creada, destruir y recrear (simplificado)
-    // En la práctica, esto se llama antes de __setup()
-    if (appRef) {
-        console.warn("setMode() debe llamarse antes de que la app inicie. Cambios aplicados en próximo reinicio.");
+    const w = Number(width);
+    const h = Number(height);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+        console.error("setMode(): ancho/alto invalidos.");
+        return;
     }
+    if (__uiInitialized || appRef || app) {
+        console.warn("setMode() solo puede llamarse una vez al inicio.");
+        return;
+    }
+    canvasWidth = Math.round(w);
+    canvasHeight = Math.round(h);
+    __setup();
 }
 
 // --- 0. SISTEMA DE TEMAS ---
@@ -1417,18 +1442,22 @@ export class UITextInput extends PIXI.Container {
         this.applyTheme();
     }
     syncSelection(el) { this.cursorPos = el.selectionStart; this.selStart = el.selectionStart; this.selEnd = el.selectionEnd; }
-    focus() { if (appRef) appRef.stage.emit('blurAllInputs'); this.isFocused = true;
+    focus() {
+        if (appRef) appRef.stage.emit('blurAllInputs'); this.isFocused = true;
         this.domInput.type = (this.isPassword && !this.showPassword) ? 'password' : 'text';
         if (this.isPassword) {
             this.domInput.setAttribute('autocomplete', 'current-password');
             this.domInput.setAttribute('autocapitalize', 'off');
             this.domInput.setAttribute('spellcheck', 'false');
         }
-        this.domInput.value = this.text; this.domInput.focus(); this.domInput.addEventListener('input', this.inputHandler); this.domInput.addEventListener('keydown', this.keyHandler); this.domInput.addEventListener('keyup', this.keyHandler); this.cursorPos = this.text.length; this.domInput.setSelectionRange(this.cursorPos, this.cursorPos); this.applyTheme(); this.updateVisuals(); UIEventHandler(this, "FOCUS", null); }
-    blur() { if (!this.isFocused) return; this.isFocused = false;
+        this.domInput.value = this.text; this.domInput.focus(); this.domInput.addEventListener('input', this.inputHandler); this.domInput.addEventListener('keydown', this.keyHandler); this.domInput.addEventListener('keyup', this.keyHandler); this.cursorPos = this.text.length; this.domInput.setSelectionRange(this.cursorPos, this.cursorPos); this.applyTheme(); this.updateVisuals(); UIEventHandler(this, "FOCUS", null);
+    }
+    blur() {
+        if (!this.isFocused) return; this.isFocused = false;
         // Restore default type so other inputs (sharing the hidden field) behave normally
         this.domInput.type = 'text';
-        this.domInput.removeEventListener('input', this.inputHandler); this.domInput.removeEventListener('keydown', this.keyHandler); this.domInput.removeEventListener('keyup', this.keyHandler); this.cursorMesh.visible = false; this.applyTheme(); this.updateVisuals(); UIEventHandler(this, "BLUR", null); }
+        this.domInput.removeEventListener('input', this.inputHandler); this.domInput.removeEventListener('keydown', this.keyHandler); this.domInput.removeEventListener('keyup', this.keyHandler); this.cursorMesh.visible = false; this.applyTheme(); this.updateVisuals(); UIEventHandler(this, "BLUR", null);
+    }
     measureWidth(str) { if (!str) return 0; const temp = new PIXI.Text(str, this.displayText.style); const w = temp.width; temp.destroy(); return w; }
     togglePasswordVisibility() {
         if (!this.isPassword) return;
@@ -1438,7 +1467,7 @@ export class UITextInput extends PIXI.Container {
             const s = this.selStart, e = this.selEnd;
             this.domInput.type = (this.isPassword && !this.showPassword) ? 'password' : 'text';
             setTimeout(() => {
-                try { this.domInput.setSelectionRange(s, e); } catch (_) {}
+                try { this.domInput.setSelectionRange(s, e); } catch (_) { }
                 this.syncSelection(this.domInput);
                 this.updateVisuals();
             }, 0);
@@ -1483,10 +1512,12 @@ export class UITextInput extends PIXI.Container {
         this.selectionBg.clear();
         if (this.isFocused && this.selStart !== this.selEnd) { const sX = this.measureWidth(displayValue.substring(0, this.selStart)); const eX = this.measureWidth(displayValue.substring(0, this.selEnd)); this.selectionBg.beginFill(theme.accent, 0.4).drawRect(this.displayText.x + sX, (this.h - this.h * 0.7) / 2, eX - sX, this.h * 0.7).endFill(); }
     }
-    applyTheme() { const theme = getTheme(); const borderColor = this.isFocused ? theme.accent : theme.inputBorder; this.bg.clear().lineStyle(2, borderColor).beginFill(theme.inputBg).drawRoundedRect(0, 0, this.w, this.h, 5).endFill();
+    applyTheme() {
+        const theme = getTheme(); const borderColor = this.isFocused ? theme.accent : theme.inputBorder; this.bg.clear().lineStyle(2, borderColor).beginFill(theme.inputBg).drawRoundedRect(0, 0, this.w, this.h, 5).endFill();
         this.cursorMesh.clear().beginFill(theme.accent).drawRect(0, 0, 2, this.h * 0.6).endFill();
         this.renderEyeIcon();
-        this.updateVisuals(); }
+        this.updateVisuals();
+    }
 }
 
 export class UIDropDown extends PIXI.Container {
@@ -1718,11 +1749,13 @@ export class UITable extends PIXI.Container {
 }
 
 function __setup() {
+    if (__uiInitialized) return;
     // Crear aplicación con resolución FIJA (no resizeTo)
     app = new PIXI.Application({
         width: canvasWidth,
         height: canvasHeight,
         background: UITheme.dark.bg,
+        backgroundAlpha: 0,
         antialias: true,
         resolution: window.devicePixelRatio || 1,
         autoDensity: true
@@ -1834,15 +1867,8 @@ function __setup() {
 
     // --- TICKER ---
     app.ticker.add((delta) => {
-        // 1. Ciclo setup/main estilo Processing
-        if (!__didRunSetup) {
-            // Esperar hasta que la app registre callbacks con startUI(...)
-            if (!__userSetup) return;
-            __didRunSetup = true;
-            __userSetup();
-            // Tras construir UI inicial, calcular límites de scroll
-            __updateGlobalScrollBounds();
-        } else if (__userMain) {
+        // 1. Ciclo main(delta) por frame tras setup()
+        if (__didRunSetup && __userMain) {
             __userMain(delta);
         }
 
@@ -1858,6 +1884,7 @@ function __setup() {
     });
 
     refreshAllThemes();
+    __uiInitialized = true;
 }
 
 // --- Funciones auxiliares de la aplicación ---
@@ -2231,6 +2258,3 @@ export class UIToast extends PIXI.Container {
         }
     }
 }
-
-// Iniciar aplicación
-__setup();

@@ -12,7 +12,9 @@ export class Simple3D {
         this.chunkSize = 16;
         this.viewDistanceChunks = 3;
         this.chunkQueue = [];
+        this.chunkQueueKeys = new Set();
         this.chunks = new Map();
+        this.chunkCenter = { cx: 0, cz: 0 };
         this.generatedChunks = 0;
         this.maxHeightSeen = -Infinity;
         this.minHeightSeen = Infinity;
@@ -24,6 +26,20 @@ export class Simple3D {
         this.fixedTerrainMeshes = [];
         this.waterMesh = null;
         this.spawnMarker = null;
+        this.characterRig = null;
+        this.characterClass = 'rogue';
+        this.characterAnimTime = 0;
+        this.emoticonMesh = null;
+        this.emoticonTexture = null;
+        this.activeEmoticon = 'neutral';
+        this.emoticonExpireAt = 0;
+        this.localPlayerId = null;
+        this.remotePlayers = new Map();
+        this.pendingNetworkPosition = null;
+        this.lastNetworkGridKey = '';
+        this.pendingNetworkClassChange = null;
+        this.localNameTag = null;
+        this.localHealth = { hp: 1000, maxHp: 1000 };
 
         this.renderer = null;
         this.scene = null;
@@ -38,7 +54,7 @@ export class Simple3D {
         this.keys = new Set();
         this.gridStep = 1;
         this.gridMoveDuration = 0.14;
-        this.playerGroundOffset = 1.15;
+        this.playerGroundOffset = 0.5;
         this.actor = {
             x: 0, y: 0, z: 0, yaw: 0,
             moving: false,
@@ -56,10 +72,14 @@ export class Simple3D {
         this.orthoHalfSize = 18;
         this.topDownHeight = 40;
         // DEBUG CAMERA CONTROLS START
-        this.debugCameraControlsEnabled = true;
-        this.debugCamera = { zoom: 18, tiltOffsetZ: 8 };
+        this.debugCameraControlsEnabled = false;
+        this.debugCamera = { zoom: 8, tiltOffsetZ: 45 };
         this.debugCameraUi = null;
         // DEBUG CAMERA CONTROLS END
+        // DEBUG CHARACTER CONTROLS START
+        this.debugCharacterControlsEnabled = false;
+        this.debugCharacterUi = null;
+        // DEBUG CHARACTER CONTROLS END
 
         this.onResize = this.onResize.bind(this);
         this.onKeyDown = this.onKeyDown.bind(this);
@@ -81,7 +101,9 @@ export class Simple3D {
         this.seedHash = this.hashSeed(this.params.seed);
         this.floatingLayout = this.buildFloatingLayout(this.params);
         this.chunkQueue = [];
+        this.chunkQueueKeys = new Set();
         this.chunks = new Map();
+        this.chunkCenter = { cx: 0, cz: 0 };
         this.generatedChunks = 0;
         this.maxHeightSeen = -Infinity;
         this.minHeightSeen = Infinity;
@@ -99,6 +121,16 @@ export class Simple3D {
             targetZ: this.spawn.z
         };
         this.snapActorToGrid();
+        this.lastNetworkGridKey = `${Math.round(this.actor.x)},${Math.round(this.actor.z)}`;
+        this.pendingNetworkPosition = {
+            x: Math.round(this.actor.x),
+            y: Number(this.actor.y.toFixed(2)),
+            z: Math.round(this.actor.z),
+        };
+        this.characterClass = this.resolveCharacterClass(this.player);
+        this.characterAnimTime = 0;
+        this.activeEmoticon = 'neutral';
+        this.emoticonExpireAt = 0;
 
         this.ensureRenderer(THREE);
         this.setupScene(THREE);
@@ -122,6 +154,10 @@ export class Simple3D {
         }
 
         this.updateThirdPersonController(safeDt);
+        this.updateChunkStreaming();
+        this.updateCharacterAnimation(safeDt);
+        this.updateEmoticonState();
+        this.updateRemotePlayers(safeDt);
         this.updateLights();
         this.renderer.render(this.scene, this.camera);
     }
@@ -159,7 +195,9 @@ export class Simple3D {
         this.params = null;
         this.floatingLayout = null;
         this.chunkQueue = [];
+        this.chunkQueueKeys.clear();
         this.chunks = new Map();
+        this.chunkCenter = { cx: 0, cz: 0 };
         this.generatedChunks = 0;
         this.maxHeightSeen = -Infinity;
         this.minHeightSeen = Infinity;
@@ -204,7 +242,20 @@ export class Simple3D {
         this.fixedTerrainMeshes = [];
         this.waterMesh = null;
         this.spawnMarker = null;
+        this.characterRig = null;
+        this.emoticonMesh = null;
+        this.emoticonTexture = null;
+        this.activeEmoticon = 'neutral';
+        this.emoticonExpireAt = 0;
+        this.localPlayerId = null;
+        this.remotePlayers.clear();
+        this.pendingNetworkPosition = null;
+        this.lastNetworkGridKey = '';
+        this.pendingNetworkClassChange = null;
+        this.localNameTag = null;
+        this.localHealth = { hp: 1000, maxHp: 1000 };
         this.removeDebugCameraUi();
+        this.removeDebugCharacterUi();
     }
 
     getDebugInfo() {
@@ -229,6 +280,8 @@ export class Simple3D {
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer.toneMappingExposure = 1.22;
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
         this.worldCanvas = this.renderer.domElement;
         this.worldCanvas.style.position = 'fixed';
@@ -247,7 +300,7 @@ export class Simple3D {
         this.scene.background = new THREE.Color(0xb8def2);
         this.scene.fog = new THREE.Fog(0xb8def2, 110, 520);
 
-        const aspect = Math.max(1, window.innerWidth / Math.max(window.innerHeight, 1));
+        const aspect = window.innerWidth / Math.max(window.innerHeight, 1);
         if (this.useTopDownCamera) {
             const d = this.debugCamera.zoom;
             this.camera = new THREE.OrthographicCamera(-d * aspect, d * aspect, d, -d, 0.1, 3000);
@@ -273,6 +326,16 @@ export class Simple3D {
 
         this.dirLight = new THREE.DirectionalLight(0xfff6d9, 1.15);
         this.dirLight.position.set(72, 140, 58);
+        this.dirLight.castShadow = true;
+        this.dirLight.shadow.mapSize.width = 1024;
+        this.dirLight.shadow.mapSize.height = 1024;
+        this.dirLight.shadow.camera.near = 10;
+        this.dirLight.shadow.camera.far = 260;
+        this.dirLight.shadow.camera.left = -80;
+        this.dirLight.shadow.camera.right = 80;
+        this.dirLight.shadow.camera.top = 80;
+        this.dirLight.shadow.camera.bottom = -80;
+        this.dirLight.shadow.bias = -0.00015;
         this.scene.add(this.dirLight);
 
         this.fillLight = new THREE.DirectionalLight(0xd5e9ff, 0.48);
@@ -285,25 +348,21 @@ export class Simple3D {
         this.terrainGroup = new THREE.Group();
         this.scene.add(this.terrainGroup);
 
-        const avatar = new THREE.Mesh(
-            new THREE.BoxGeometry(0.9, 0.9, 0.9),
-            new THREE.MeshStandardMaterial({
-                color: 0xff6a00,
-                emissive: 0x3d1800,
-                roughness: 0.65,
-                metalness: 0.06
-            })
-        );
-        avatar.castShadow = true;
-        avatar.receiveShadow = true;
+        const avatar = this.createVoxelCharacter(THREE, this.characterClass, true);
+        this.characterRig = avatar;
         this.spawnMarker = avatar;
         this.spawnMarker.position.set(this.spawn.x, this.spawn.y, this.spawn.z);
         this.scene.add(this.spawnMarker);
+        const localName = this.player?.username || 'Jugador';
+        this.localNameTag = this.createNameTag(THREE, localName, this.localHealth.hp, this.localHealth.maxHp);
+        this.scene.add(this.localNameTag.sprite);
         this.createDebugCameraUi();
+        this.createDebugCharacterUi();
 
         window.addEventListener('resize', this.onResize);
         window.addEventListener('keydown', this.onKeyDown);
         window.addEventListener('keyup', this.onKeyUp);
+        this.resize(window.innerWidth, window.innerHeight);
     }
 
     clearObject(obj) {
@@ -312,8 +371,15 @@ export class Simple3D {
             this.clearObject(child);
             if (child.geometry) child.geometry.dispose();
             if (child.material) {
-                if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
-                else child.material.dispose();
+                if (Array.isArray(child.material)) {
+                    child.material.forEach((m) => {
+                        if (m.map) m.map.dispose();
+                        m.dispose();
+                    });
+                } else {
+                    if (child.material.map) child.material.map.dispose();
+                    child.material.dispose();
+                }
             }
         }
     }
@@ -339,6 +405,15 @@ export class Simple3D {
             const nextGround = this.sampleGroundY(nextX, nextZ);
             actor.yaw = moveInput.yaw;
             if (nextGround !== null) {
+                const nextGridKey = `${Math.round(nextX)},${Math.round(nextZ)}`;
+                if (nextGridKey !== this.lastNetworkGridKey) {
+                    this.lastNetworkGridKey = nextGridKey;
+                    this.pendingNetworkPosition = {
+                        x: Math.round(nextX),
+                        y: Number((nextGround + this.playerGroundOffset).toFixed(2)),
+                        z: Math.round(nextZ),
+                    };
+                }
                 actor.moving = true;
                 actor.moveProgress = 0;
                 actor.moveFromX = actor.x;
@@ -368,17 +443,48 @@ export class Simple3D {
         const targetZ = actor.z;
         const desiredCamX = this.useTopDownCamera ? targetX : (targetX + this.cameraFollowOffsetX);
         const desiredCamZ = this.useTopDownCamera ? (targetZ + this.debugCamera.tiltOffsetZ) : (targetZ + this.cameraFollowOffsetZ);
-        const desiredCamY = this.useTopDownCamera ? (targetY + this.topDownHeight) : (targetY + this.cameraHeight);
+        const flatLookY = (this.params?.hubHeight ?? 58) + 0.5;
+        const desiredCamY = this.useTopDownCamera ? (flatLookY + this.topDownHeight) : (targetY + this.cameraHeight);
         const followLerp = Math.min(1, 8 * safeDt);
 
-        this.camera.position.x += (desiredCamX - this.camera.position.x) * followLerp;
-        this.camera.position.y += (desiredCamY - this.camera.position.y) * followLerp;
-        this.camera.position.z += (desiredCamZ - this.camera.position.z) * followLerp;
-        this.camera.lookAt(targetX, targetY, targetZ);
+        if (this.useTopDownCamera) {
+            this.camera.position.set(desiredCamX, desiredCamY, desiredCamZ);
+            this.camera.lookAt(targetX, flatLookY, targetZ);
+        } else {
+            this.camera.position.x += (desiredCamX - this.camera.position.x) * followLerp;
+            this.camera.position.y += (desiredCamY - this.camera.position.y) * followLerp;
+            this.camera.position.z += (desiredCamZ - this.camera.position.z) * followLerp;
+            this.camera.lookAt(targetX, targetY, targetZ);
+        }
         if (this.spawnMarker) {
             this.spawnMarker.position.set(actor.x, actor.y, actor.z);
             this.spawnMarker.rotation.y = actor.yaw;
         }
+        this.updateNameTagPosition(this.localNameTag?.sprite, actor.x, actor.y, actor.z);
+        this.updateNetworkPositionPending();
+    }
+
+    updateNetworkPositionPending() {
+        const gx = Math.round(this.actor.x);
+        const gz = Math.round(this.actor.z);
+        const key = `${gx},${gz}`;
+        if (key === this.lastNetworkGridKey) return;
+        this.lastNetworkGridKey = key;
+        this.pendingNetworkPosition = {
+            x: gx,
+            y: Number(this.actor.y.toFixed(2)),
+            z: gz,
+        };
+    }
+
+    setLocalPlayerId(id) {
+        this.localPlayerId = id ?? null;
+    }
+
+    pullPendingNetworkPosition() {
+        const p = this.pendingNetworkPosition;
+        this.pendingNetworkPosition = null;
+        return p;
     }
 
     // DEBUG CAMERA CONTROLS START
@@ -449,6 +555,699 @@ export class Simple3D {
     }
     // DEBUG CAMERA CONTROLS END
 
+    // DEBUG CHARACTER CONTROLS START
+    createDebugCharacterUi() {
+        if (!this.debugCharacterControlsEnabled || this.debugCharacterUi) return;
+        const panel = document.createElement('div');
+        panel.id = 'debug-character-controls';
+        panel.style.position = 'fixed';
+        panel.style.top = '126px';
+        panel.style.right = '12px';
+        panel.style.zIndex = '35';
+        panel.style.padding = '10px';
+        panel.style.borderRadius = '10px';
+        panel.style.background = 'rgba(11, 19, 31, 0.86)';
+        panel.style.border = '1px solid rgba(255,255,255,0.22)';
+        panel.style.color = '#e6edf5';
+        panel.style.fontFamily = 'Consolas, monospace';
+        panel.style.fontSize = '12px';
+        panel.style.pointerEvents = 'auto';
+        panel.style.userSelect = 'none';
+        panel.innerHTML = `
+            <div style="font-weight:700;margin-bottom:8px;">DEBUG CLASS</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+                <button data-class="rogue">Rogue</button>
+                <button data-class="tank">Tank</button>
+                <button data-class="mage">Mage</button>
+                <button data-class="healer">Healer</button>
+            </div>
+        `;
+        const buttons = panel.querySelectorAll('button');
+        buttons.forEach((b) => {
+            b.style.padding = '6px 8px';
+            b.style.borderRadius = '6px';
+            b.style.border = '1px solid rgba(255,255,255,0.25)';
+            b.style.background = '#183954';
+            b.style.color = '#f3f8ff';
+            b.style.cursor = 'pointer';
+        });
+        panel.addEventListener('click', (ev) => {
+            const cls = ev?.target?.dataset?.class;
+            if (!cls) return;
+            this.setCharacterClass(cls);
+        });
+        document.body.appendChild(panel);
+        this.debugCharacterUi = panel;
+    }
+
+    removeDebugCharacterUi() {
+        if (!this.debugCharacterUi) return;
+        if (this.debugCharacterUi.parentElement) {
+            this.debugCharacterUi.parentElement.removeChild(this.debugCharacterUi);
+        }
+        this.debugCharacterUi = null;
+    }
+    // DEBUG CHARACTER CONTROLS END
+
+    resolveCharacterClass(player) {
+        const key = (player?.character_class || player?.class || player?.skin_id || '').toString().toLowerCase();
+        if (['rogue', 'tank', 'mage', 'healer'].includes(key)) return key;
+        if (key.includes('tank')) return 'tank';
+        if (key.includes('mage')) return 'mage';
+        if (key.includes('heal')) return 'healer';
+        return 'rogue';
+    }
+
+    setCharacterClass(cls) {
+        const THREE = window.THREE;
+        if (!THREE) return;
+        if (!['rogue', 'tank', 'mage', 'healer'].includes(cls)) return;
+        if (this.characterClass === cls && this.spawnMarker) return;
+        this.characterClass = cls;
+        this.characterAnimTime = 0;
+        this.pendingNetworkClassChange = cls;
+        if (this.spawnMarker && this.scene) {
+            this.scene.remove(this.spawnMarker);
+            this.clearObject(this.spawnMarker);
+        }
+        const avatar = this.createVoxelCharacter(THREE, this.characterClass, true);
+        this.characterRig = avatar;
+        this.spawnMarker = avatar;
+        this.spawnMarker.position.set(this.actor.x, this.actor.y, this.actor.z);
+        this.spawnMarker.rotation.y = this.actor.yaw;
+        if (this.scene) this.scene.add(this.spawnMarker);
+        this.updateNameTagPosition(this.localNameTag?.sprite, this.actor.x, this.actor.y, this.actor.z);
+        this.setEmoticon(this.activeEmoticon || 'neutral');
+    }
+
+    createNameTag(THREE, text, hp = 1000, maxHp = 1000) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 768;
+        canvas.height = 192;
+        const ctx = canvas.getContext('2d', { alpha: true });
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.magFilter = THREE.NearestFilter;
+        tex.minFilter = THREE.NearestFilter;
+        tex.generateMipmaps = false;
+
+        const mat = new THREE.SpriteMaterial({
+            map: tex,
+            transparent: true,
+            depthWrite: false,
+            depthTest: false,
+            alphaTest: 0.35
+        });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.set(3.35, 0.86, 1);
+        sprite.renderOrder = 100;
+        const tag = {
+            sprite,
+            canvas,
+            ctx,
+            texture: tex,
+            name: (text || 'Jugador').toString().slice(0, 24),
+            hp: Math.max(0, Number(hp) || 0),
+            maxHp: Math.max(1, Number(maxHp) || 1)
+        };
+        this.drawNameTag(tag);
+        return tag;
+    }
+
+    drawNameTag(tag) {
+        if (!tag || !tag.ctx || !tag.canvas || !tag.texture) return;
+        const { ctx, canvas } = tag;
+        const w = canvas.width;
+        const h = canvas.height;
+        const hp = Math.max(0, Math.min(tag.maxHp, tag.hp));
+        const pct = hp / tag.maxHp;
+
+        ctx.clearRect(0, 0, w, h);
+
+        const padX = 24;
+        const padY = 18;
+        const rrW = w - (padX * 2);
+        const rrH = h - (padY * 2);
+        const radius = 22;
+        ctx.fillStyle = 'rgba(0,0,0,0.42)';
+        ctx.beginPath();
+        ctx.moveTo(padX + radius, padY);
+        ctx.lineTo(padX + rrW - radius, padY);
+        ctx.quadraticCurveTo(padX + rrW, padY, padX + rrW, padY + radius);
+        ctx.lineTo(padX + rrW, padY + rrH - radius);
+        ctx.quadraticCurveTo(padX + rrW, padY + rrH, padX + rrW - radius, padY + rrH);
+        ctx.lineTo(padX + radius, padY + rrH);
+        ctx.quadraticCurveTo(padX, padY + rrH, padX, padY + rrH - radius);
+        ctx.lineTo(padX, padY + radius);
+        ctx.quadraticCurveTo(padX, padY, padX + radius, padY);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.font = '800 64px "Arial", "Segoe UI", Tahoma, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 6;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.miterLimit = 2;
+        ctx.strokeStyle = 'rgba(0,0,0,0.96)';
+        ctx.strokeText(tag.name, 52, 56);
+        ctx.fillStyle = '#f3f8ff';
+        ctx.fillText(tag.name, 52, 56);
+
+        const hpLabel = `${Math.round(hp)}/${Math.round(tag.maxHp)}`;
+        ctx.font = '800 50px "Segoe UI", Tahoma, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 5;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.miterLimit = 2;
+        ctx.strokeStyle = 'rgba(0,0,0,0.96)';
+        ctx.strokeText(hpLabel, w - 52, 56);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(hpLabel, w - 52, 56);
+
+        const barX = 50;
+        const barY = 100;
+        const barW = w - 100;
+        const barH = 58;
+        ctx.fillStyle = 'rgba(0,0,0,0.68)';
+        ctx.fillRect(barX - 4, barY - 4, barW + 8, barH + 8);
+        ctx.fillStyle = '#2b2f36';
+        ctx.fillRect(barX, barY, barW, barH);
+
+        const fillW = Math.max(0, Math.floor(barW * pct));
+        ctx.fillStyle = pct > 0.5 ? '#35d86a' : (pct > 0.2 ? '#f3c44f' : '#e85b5b');
+        ctx.fillRect(barX, barY, fillW, barH);
+
+        tag.texture.needsUpdate = true;
+    }
+
+    setLocalHealth(hp, maxHp = 1000) {
+        this.localHealth.maxHp = Math.max(1, Number(maxHp) || 1000);
+        this.localHealth.hp = Math.max(0, Math.min(this.localHealth.maxHp, Number(hp) || 0));
+        if (this.localNameTag) {
+            this.localNameTag.hp = this.localHealth.hp;
+            this.localNameTag.maxHp = this.localHealth.maxHp;
+            this.drawNameTag(this.localNameTag);
+        }
+    }
+
+    updateNameTagPosition(tag, x, y, z) {
+        if (!tag) return;
+        tag.position.set(x, y + 3.5, z);
+    }
+
+    pullPendingClassChange() {
+        const c = this.pendingNetworkClassChange;
+        this.pendingNetworkClassChange = null;
+        return c;
+    }
+
+    normalizeEmoticonName(name = 'neutral') {
+        const key = (name || 'neutral').toString().toLowerCase();
+        const allowed = new Set(['neutral', 'happy', 'angry', 'sad', 'surprised', 'cool', 'love', 'dead']);
+        return allowed.has(key) ? key : 'neutral';
+    }
+
+    findEmoticonTextureFromRig(rig) {
+        let tex = null;
+        if (!rig) return tex;
+        rig.traverse((node) => {
+            if (tex) return;
+            if (node?.userData?.tag !== 'emoticon_face') return;
+            const map = node?.material?.map || null;
+            if (map) tex = map;
+        });
+        return tex;
+    }
+
+    upsertRemotePlayer(player) {
+        const THREE = window.THREE;
+        if (!THREE || !this.scene || !player || player.id == null) return;
+        if (this.localPlayerId != null && Number(player.id) === Number(this.localPlayerId)) return;
+        const pid = String(player.id);
+        const pos = player.position || { x: 0, y: 60, z: 0 };
+        const cls = this.resolveCharacterClass({ skin_id: player.character_class || player.rol || 'rogue' });
+        const existing = this.remotePlayers.get(pid);
+        if (existing) {
+            if (existing.classId !== cls) {
+                this.setRemotePlayerClass(pid, cls);
+            }
+            existing.targetPos.set(Number(pos.x) || 0, Number(pos.y) || this.actor.y, Number(pos.z) || 0);
+            if (player.active_emotion) {
+                this.setRemotePlayerEmotion(pid, player.active_emotion, 0);
+            }
+            return;
+        }
+        const rig = this.createVoxelCharacter(THREE, cls, false);
+        rig.position.set(Number(pos.x) || 0, Number(pos.y) || this.actor.y, Number(pos.z) || 0);
+        this.scene.add(rig);
+        const emoticonTexture = this.findEmoticonTextureFromRig(rig);
+        const nameTag = this.createNameTag(THREE, player.username || `P${pid}`, player.hp ?? 1000, player.max_hp ?? 1000);
+        this.updateNameTagPosition(nameTag.sprite, rig.position.x, rig.position.y, rig.position.z);
+        this.scene.add(nameTag.sprite);
+        const remoteEmotion = this.normalizeEmoticonName(player.active_emotion || 'neutral');
+        if (emoticonTexture) this.applyEmoticonFrameToTexture(emoticonTexture, remoteEmotion);
+        this.remotePlayers.set(pid, {
+            id: pid,
+            classId: cls,
+            rig,
+            emoticonTexture,
+            activeEmoticon: remoteEmotion,
+            emoticonExpireAt: 0,
+            nameTag,
+            moveFromPos: new THREE.Vector3(rig.position.x, rig.position.y, rig.position.z),
+            targetPos: new THREE.Vector3(rig.position.x, rig.position.y, rig.position.z),
+            moveProgress: 1,
+            moving: false
+        });
+    }
+
+    setRemotePlayerClass(playerId, classId) {
+        const THREE = window.THREE;
+        if (!THREE || playerId == null) return;
+        const key = String(playerId);
+        const rp = this.remotePlayers.get(key);
+        if (!rp) return;
+        const cls = this.resolveCharacterClass({ skin_id: classId || rp.classId || 'rogue' });
+        if (rp.classId === cls) return;
+        const keepPos = rp.rig.position.clone();
+        const keepRot = rp.rig.rotation.y;
+        const keepEmotion = rp.activeEmoticon || 'neutral';
+        const keepExpireAt = rp.emoticonExpireAt || 0;
+        if (this.scene) this.scene.remove(rp.rig);
+        this.clearObject(rp.rig);
+        const nextRig = this.createVoxelCharacter(THREE, cls, false);
+        nextRig.position.copy(keepPos);
+        nextRig.rotation.y = keepRot;
+        if (this.scene) this.scene.add(nextRig);
+        rp.rig = nextRig;
+        rp.classId = cls;
+        rp.emoticonTexture = this.findEmoticonTextureFromRig(nextRig);
+        rp.activeEmoticon = keepEmotion;
+        rp.emoticonExpireAt = keepExpireAt;
+        if (rp.emoticonTexture) this.applyEmoticonFrameToTexture(rp.emoticonTexture, keepEmotion);
+    }
+
+    setRemotePlayerEmotion(playerId, emotion = 'neutral', durationMs = 0) {
+        if (playerId == null) return;
+        const rp = this.remotePlayers.get(String(playerId));
+        if (!rp) return;
+        const next = this.normalizeEmoticonName(emotion);
+        rp.activeEmoticon = next;
+        if (rp.emoticonTexture) this.applyEmoticonFrameToTexture(rp.emoticonTexture, next);
+        if (Number.isFinite(durationMs) && durationMs > 0) {
+            rp.emoticonExpireAt = this.elapsed + (durationMs / 1000);
+        } else {
+            rp.emoticonExpireAt = 0;
+        }
+    }
+
+    setRemotePlayerTarget(playerId, position) {
+        if (playerId == null || !position) return;
+        const rp = this.remotePlayers.get(String(playerId));
+        if (!rp) return;
+        const tx = Number(position.x) || 0;
+        const ty = Number(position.y) || this.actor.y;
+        const tz = Number(position.z) || 0;
+        const dx = tx - rp.rig.position.x;
+        const dz = tz - rp.rig.position.z;
+        if ((Math.abs(dx) + Math.abs(dz)) <= 0.001) return;
+        rp.rig.rotation.y = Math.atan2(dx, dz);
+        rp.moveFromPos.copy(rp.rig.position);
+        rp.targetPos.set(tx, ty, tz);
+        rp.moveProgress = 0;
+        rp.moving = true;
+    }
+
+    removeRemotePlayer(playerId) {
+        if (playerId == null) return;
+        const key = String(playerId);
+        const rp = this.remotePlayers.get(key);
+        if (!rp) return;
+        if (this.scene) this.scene.remove(rp.rig);
+        if (this.scene && rp.nameTag?.sprite) this.scene.remove(rp.nameTag.sprite);
+        this.clearObject(rp.rig);
+        if (rp.nameTag?.texture) rp.nameTag.texture.dispose();
+        if (rp.nameTag?.sprite?.material) rp.nameTag.sprite.material.dispose();
+        this.remotePlayers.delete(key);
+    }
+
+    updateRemotePlayers(dt = 0.016) {
+        if (!this.remotePlayers || this.remotePlayers.size === 0) return;
+        for (const rp of this.remotePlayers.values()) {
+            if (rp.moving) {
+                const duration = Math.max(0.01, this.gridMoveDuration);
+                rp.moveProgress = Math.min(1, rp.moveProgress + (dt / duration));
+                const t = rp.moveProgress;
+                rp.rig.position.lerpVectors(rp.moveFromPos, rp.targetPos, t);
+                if (t >= 1) {
+                    rp.rig.position.copy(rp.targetPos);
+                    rp.moving = false;
+                }
+            }
+            if (rp.emoticonExpireAt > 0 && this.elapsed >= rp.emoticonExpireAt) {
+                rp.emoticonExpireAt = 0;
+                if (rp.activeEmoticon !== 'neutral') {
+                    rp.activeEmoticon = 'neutral';
+                    if (rp.emoticonTexture) this.applyEmoticonFrameToTexture(rp.emoticonTexture, 'neutral');
+                }
+            }
+            this.updateNameTagPosition(rp.nameTag?.sprite, rp.rig.position.x, rp.rig.position.y, rp.rig.position.z);
+        }
+    }
+
+    ensureEmoticonAtlas(THREE) {
+        if (Simple3D._emoticonAtlasCanvas && Simple3D._emoticonIndexMap) return;
+        const cols = 4;
+        const rows = 2;
+        const cell = 128;
+        const canvas = document.createElement('canvas');
+        canvas.width = cols * cell;
+        canvas.height = rows * cell;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const entries = [
+            ['neutral', '😐'],
+            ['happy', '🙂'],
+            ['angry', '😠'],
+            ['sad', '😢'],
+            ['surprised', '😮'],
+            ['cool', '😎'],
+            ['love', '😍'],
+            ['dead', '💀']
+        ];
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = '92px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
+        entries.forEach((entry, i) => {
+            const x = (i % cols) * cell + (cell * 0.5);
+            const y = Math.floor(i / cols) * cell + (cell * 0.52);
+            ctx.fillText(entry[1], x, y);
+        });
+
+        const map = {};
+        entries.forEach((entry, i) => {
+            map[entry[0]] = i;
+        });
+
+        Simple3D._emoticonAtlasCanvas = canvas;
+        Simple3D._emoticonIndexMap = map;
+        Simple3D._emoticonGrid = { cols, rows };
+    }
+
+    createEmoticonFace(THREE, bindToLocal = false) {
+        this.ensureEmoticonAtlas(THREE);
+        const atlasCanvas = Simple3D._emoticonAtlasCanvas;
+        const tex = new THREE.CanvasTexture(atlasCanvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.magFilter = THREE.NearestFilter;
+        tex.minFilter = THREE.NearestFilter;
+        tex.generateMipmaps = false;
+        const cols = Simple3D._emoticonGrid.cols;
+        const rows = Simple3D._emoticonGrid.rows;
+        tex.repeat.set(1 / cols, 1 / rows);
+        tex.needsUpdate = true;
+        const mat = new THREE.MeshBasicMaterial({
+            map: tex,
+            transparent: true,
+            alphaTest: 0.25,
+            depthWrite: false
+        });
+        const plane = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.8), mat);
+        plane.position.set(0, 0.02, 0.415);
+        plane.renderOrder = 4;
+        plane.userData.tag = 'emoticon_face';
+        if (bindToLocal) {
+            this.emoticonTexture = tex;
+            this.emoticonMesh = plane;
+            this.applyEmoticonFrame('neutral');
+        }
+        return plane;
+    }
+
+    applyEmoticonFrameToTexture(texture, name = 'neutral') {
+        if (!texture) return;
+        const key = this.normalizeEmoticonName(name);
+        const map = Simple3D._emoticonIndexMap || {};
+        const cols = Simple3D._emoticonGrid?.cols || 4;
+        const rows = Simple3D._emoticonGrid?.rows || 2;
+        const idx = Number.isInteger(map[key]) ? map[key] : map.neutral || 0;
+        const col = idx % cols;
+        const row = Math.floor(idx / cols);
+        texture.repeat.set(1 / cols, 1 / rows);
+        texture.offset.set(col / cols, 1 - ((row + 1) / rows));
+        texture.needsUpdate = true;
+    }
+
+    applyEmoticonFrame(name) {
+        if (!this.emoticonTexture) return;
+        this.applyEmoticonFrameToTexture(this.emoticonTexture, name);
+    }
+
+    setEmoticon(name = 'neutral', durationMs = 0) {
+        const next = this.normalizeEmoticonName(name);
+        this.activeEmoticon = next;
+        this.applyEmoticonFrame(next);
+        if (Number.isFinite(durationMs) && durationMs > 0) {
+            this.emoticonExpireAt = this.elapsed + (durationMs / 1000);
+        } else {
+            this.emoticonExpireAt = 0;
+        }
+    }
+
+    setEmotion(name = 'neutral', durationMs = 0) {
+        this.setEmoticon(name, durationMs);
+    }
+
+    updateEmoticonState() {
+        if (this.emoticonExpireAt > 0 && this.elapsed >= this.emoticonExpireAt) {
+            this.emoticonExpireAt = 0;
+            if (this.activeEmoticon !== 'neutral') this.setEmoticon('neutral', 0);
+        }
+    }
+
+    createVoxelCharacter(THREE, cls = 'rogue', bindEmoticonToLocal = false) {
+        const paletteMap = {
+            rogue: { body: 0x1f2429, accent: 0x7ff15a, glow: 0x3adf3d, trim: 0x101419 },
+            tank: { body: 0x4c3528, accent: 0xc8922e, glow: 0xff7a2b, trim: 0x2a1c14 },
+            mage: { body: 0x4a2a78, accent: 0xf0c53f, glow: 0xc45dff, trim: 0x2f174e },
+            healer: { body: 0xe7ecef, accent: 0x16b895, glow: 0x33f2b1, trim: 0xa7b2bc }
+        };
+        const profileMap = {
+            rogue: {
+                torso: [0.78, 0.88, 0.56],
+                head: [0.64, 0.66, 0.64],
+                arm: [0.23, 0.78, 0.23],
+                leg: [0.28, 0.84, 0.28],
+                shoulderOffset: 0.56
+            },
+            tank: {
+                torso: [1.12, 1.0, 0.78],
+                head: [0.7, 0.66, 0.66],
+                arm: [0.34, 0.86, 0.34],
+                leg: [0.42, 0.84, 0.42],
+                shoulderOffset: 0.78
+            },
+            mage: {
+                torso: [0.82, 0.86, 0.54],
+                head: [0.62, 0.66, 0.62],
+                arm: [0.22, 0.8, 0.22],
+                leg: [0.26, 0.82, 0.26],
+                shoulderOffset: 0.6
+            },
+            healer: {
+                torso: [0.84, 0.9, 0.58],
+                head: [0.64, 0.68, 0.64],
+                arm: [0.24, 0.8, 0.24],
+                leg: [0.28, 0.84, 0.28],
+                shoulderOffset: 0.6
+            }
+        };
+        const c = paletteMap[cls] || paletteMap.rogue;
+        const profile = profileMap[cls] || profileMap.rogue;
+
+        const makeMat = (color, emissive = 0x000000, rough = 0.68) => (
+            new THREE.MeshStandardMaterial({ color, emissive, roughness: rough, metalness: 0.06 })
+        );
+        const part = (w, h, d, mat, x, y, z, tag = null) => {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+            m.position.set(x, y, z);
+            m.castShadow = true;
+            m.receiveShadow = true;
+            if (tag) m.userData.tag = tag;
+            return m;
+        };
+
+        const root = new THREE.Group();
+        root.userData.classId = cls;
+        const bodyMat = makeMat(c.body);
+        const accentMat = makeMat(c.accent);
+        const trimMat = makeMat(c.trim);
+        const glowMat = makeMat(c.accent, c.glow, 0.45);
+        const softGlowMat = makeMat(c.accent, c.glow, 0.54);
+
+        const torso = part(profile.torso[0], profile.torso[1], profile.torso[2], bodyMat, 0, 0.95, 0, 'torso');
+        const chestPlate = part(profile.torso[0] * 0.9, 0.24, 0.16, accentMat, 0, 1.05, 0.25, 'chest');
+        const belt = part(profile.torso[0] * 0.94, 0.12, profile.torso[2] * 0.92, trimMat, 0, 0.62, 0, 'belt');
+        const head = part(profile.head[0], profile.head[1], profile.head[2], accentMat, 0, 1.78, 0, 'head');
+        const armL = part(profile.arm[0], profile.arm[1], profile.arm[2], bodyMat, -profile.shoulderOffset, 0.96, 0, 'arm_l');
+        const armR = part(profile.arm[0], profile.arm[1], profile.arm[2], bodyMat, profile.shoulderOffset, 0.96, 0, 'arm_r');
+        const legSpread = cls === 'tank' ? 0.26 : 0.2;
+        const legL = part(profile.leg[0], profile.leg[1], profile.leg[2], trimMat, -legSpread, 0.35, 0, 'leg_l');
+        const legR = part(profile.leg[0], profile.leg[1], profile.leg[2], trimMat, legSpread, 0.35, 0, 'leg_r');
+        const bootL = part(profile.leg[0] * 1.08, 0.16, profile.leg[2] * 1.24, trimMat, -legSpread, -0.08, 0.05, 'boot_l');
+        const bootR = part(profile.leg[0] * 1.08, 0.16, profile.leg[2] * 1.24, trimMat, legSpread, -0.08, 0.05, 'boot_r');
+        const backTrim = part(profile.torso[0] * 0.78, 0.28, 0.14, trimMat, 0, 0.92, -0.3, 'back_trim');
+        head.add(this.createEmoticonFace(THREE, bindEmoticonToLocal));
+        root.add(torso, chestPlate, belt, head, armL, armR, legL, legR, bootL, bootR, backTrim);
+
+        if (cls === 'rogue') {
+            head.add(part(0.1, 0.22, 0.1, accentMat, -0.36, 0.17, -0.06, 'ear_l'));
+            head.add(part(0.1, 0.22, 0.1, accentMat, 0.36, 0.17, -0.06, 'ear_r'));
+            root.add(part(0.86, 0.2, 0.76, trimMat, 0, 1.54, -0.08, 'hood'));
+            root.add(part(0.72, 0.68, 0.12, trimMat, 0, 1.08, -0.44, 'cloak_back'));
+            root.add(part(0.26, 0.08, 0.3, softGlowMat, -0.5, 0.74, 0.24, 'dagger_l'));
+            root.add(part(0.26, 0.08, 0.3, softGlowMat, 0.5, 0.74, 0.24, 'dagger_r'));
+            root.add(part(0.16, 0.16, 0.16, glowMat, -0.24, 1.02, 0.34, 'gem_l'));
+            root.add(part(0.16, 0.16, 0.16, glowMat, 0.24, 1.02, 0.34, 'gem_r'));
+        } else if (cls === 'tank') {
+            head.add(part(0.18, 0.14, 0.16, trimMat, -0.38, 0.13, -0.04, 'ear_l'));
+            head.add(part(0.18, 0.14, 0.16, trimMat, 0.38, 0.13, -0.04, 'ear_r'));
+            root.add(part(0.46, 0.3, 0.62, accentMat, -0.86, 1.1, 0, 'shoulder_l'));
+            root.add(part(0.46, 0.3, 0.62, accentMat, 0.86, 1.1, 0, 'shoulder_r'));
+            root.add(part(0.46, 0.24, 0.12, glowMat, 0, 1.04, 0.38, 'core'));
+            root.add(part(0.36, 0.2, 0.24, trimMat, 0, 1.34, 0.28, 'helmet_brow'));
+            root.add(part(0.18, 0.68, 0.52, trimMat, -0.98, 0.92, -0.02, 'shield_l'));
+            root.add(part(0.18, 0.68, 0.52, trimMat, 0.98, 0.92, -0.02, 'shield_r'));
+        } else if (cls === 'mage') {
+            head.add(part(0.08, 0.24, 0.08, glowMat, -0.34, 0.2, -0.04, 'ear_l'));
+            head.add(part(0.08, 0.24, 0.08, glowMat, 0.34, 0.2, -0.04, 'ear_r'));
+            root.add(part(0.72, 0.16, 0.72, accentMat, 0, 2.06, 0, 'hat_base'));
+            root.add(part(0.42, 0.36, 0.42, trimMat, 0, 2.28, 0, 'hat_mid'));
+            root.add(part(0.2, 0.42, 0.2, glowMat, 0, 2.62, 0, 'hat_tip'));
+            root.add(part(0.66, 0.72, 0.12, trimMat, 0, 1.04, -0.42, 'cape_back'));
+            const orbL = part(0.18, 0.18, 0.18, glowMat, -0.94, 1.24, 0, 'orb_l');
+            const orbR = part(0.18, 0.18, 0.18, glowMat, 0.94, 1.24, 0, 'orb_r');
+            const tome = part(0.38, 0.1, 0.32, accentMat, 0.52, 0.72, 0.18, 'tome');
+            root.add(orbL, orbR, tome);
+        } else if (cls === 'healer') {
+            head.add(part(0.12, 0.18, 0.12, accentMat, -0.34, 0.15, -0.05, 'ear_l'));
+            head.add(part(0.12, 0.18, 0.12, accentMat, 0.34, 0.15, -0.05, 'ear_r'));
+            root.add(part(0.42, 0.12, 0.14, glowMat, 0, 1.14, 0.34, 'cross_h'));
+            root.add(part(0.14, 0.42, 0.14, glowMat, 0, 1.14, 0.34, 'cross_v'));
+            root.add(part(0.2, 1.02, 0.2, accentMat, 0.78, 0.82, -0.12, 'staff'));
+            root.add(part(0.28, 0.18, 0.28, softGlowMat, 0.78, 1.48, -0.12, 'staff_head'));
+            root.add(part(0.96, 0.08, 0.1, softGlowMat, 0, 2.34, 0, 'halo'));
+            root.add(part(0.12, 0.62, 0.3, trimMat, -0.42, 0.92, -0.32, 'sash_l'));
+            root.add(part(0.12, 0.62, 0.3, trimMat, 0.42, 0.92, -0.32, 'sash_r'));
+        }
+        return root;
+    }
+
+    updateCharacterAnimation(dt) {
+        if (!this.spawnMarker) return;
+        this.characterAnimTime += dt;
+        const t = this.characterAnimTime;
+        const classId = (this.spawnMarker?.userData?.classId || this.characterClass || 'rogue').toString().toLowerCase();
+        const classAnim = {
+            rogue: { gaitSpeed: 12.8, moveAmp: 0.7, idleAmp: 0.15 },
+            tank: { gaitSpeed: 8.2, moveAmp: 0.38, idleAmp: 0.09 },
+            mage: { gaitSpeed: 9.8, moveAmp: 0.42, idleAmp: 0.12 },
+            healer: { gaitSpeed: 10.2, moveAmp: 0.46, idleAmp: 0.11 }
+        };
+        const anim = classAnim[classId] || classAnim.rogue;
+        const moveAmp = this.actor.moving ? anim.moveAmp : anim.idleAmp;
+        const armSwing = Math.sin(t * anim.gaitSpeed) * moveAmp;
+        const legSwing = Math.sin(t * anim.gaitSpeed + Math.PI) * moveAmp;
+        const idleBob = Math.sin(t * 4.2) * 0.035;
+
+        const updateByTag = (tag, fn) => {
+            this.spawnMarker.traverse((node) => {
+                if (node?.userData?.tag === tag) fn(node);
+            });
+        };
+        updateByTag('head', (n) => { n.position.y = 1.78 + idleBob; });
+        updateByTag('arm_l', (n) => { n.rotation.x = armSwing; });
+        updateByTag('arm_r', (n) => { n.rotation.x = -armSwing; });
+        updateByTag('leg_l', (n) => { n.rotation.x = legSwing; });
+        updateByTag('leg_r', (n) => { n.rotation.x = -legSwing; });
+        updateByTag('boot_l', (n) => { n.rotation.x = legSwing * 0.28; });
+        updateByTag('boot_r', (n) => { n.rotation.x = -legSwing * 0.28; });
+        updateByTag('belt', (n) => { n.rotation.y = Math.sin(t * 2.4) * 0.05; });
+        updateByTag('orb_l', (n) => {
+            n.position.y = 1.24 + Math.sin(t * 5.6) * 0.15;
+            n.position.z = Math.cos(t * 4.2) * 0.2;
+            n.position.x = -0.94 + Math.sin(t * 3.6) * 0.08;
+        });
+        updateByTag('orb_r', (n) => {
+            n.position.y = 1.24 + Math.sin((t * 5.6) + Math.PI) * 0.15;
+            n.position.z = Math.cos((t * 4.2) + Math.PI) * 0.2;
+            n.position.x = 0.94 + Math.sin((t * 3.6) + Math.PI) * 0.08;
+        });
+        updateByTag('dagger_l', (n) => {
+            n.rotation.y = 0.45 + Math.sin(t * 12.5) * 0.22;
+            n.position.z = 0.24 + Math.sin(t * 8.2) * 0.05;
+        });
+        updateByTag('dagger_r', (n) => {
+            n.rotation.y = -0.45 + Math.sin((t * 12.5) + Math.PI) * 0.22;
+            n.position.z = 0.24 + Math.sin((t * 8.2) + Math.PI) * 0.05;
+        });
+        updateByTag('cloak_back', (n) => {
+            n.rotation.x = 0.08 + Math.sin(t * 5.2) * 0.08 + (this.actor.moving ? 0.16 : 0);
+        });
+        updateByTag('shoulder_l', (n) => {
+            n.rotation.z = Math.sin(t * 3.6) * 0.06;
+        });
+        updateByTag('shoulder_r', (n) => {
+            n.rotation.z = -Math.sin(t * 3.6) * 0.06;
+        });
+        updateByTag('shield_l', (n) => {
+            n.rotation.y = Math.sin(t * 2.3) * 0.08;
+        });
+        updateByTag('shield_r', (n) => {
+            n.rotation.y = -Math.sin(t * 2.3) * 0.08;
+        });
+        updateByTag('core', (n) => {
+            const s = 1 + (Math.sin(t * 6.2) * 0.07);
+            n.scale.set(s, s, s);
+        });
+        updateByTag('hat_tip', (n) => {
+            n.rotation.z = Math.sin(t * 2.8) * 0.1;
+        });
+        updateByTag('cape_back', (n) => {
+            n.rotation.x = 0.12 + Math.sin(t * 3.8) * 0.08 + (this.actor.moving ? 0.1 : 0);
+        });
+        updateByTag('tome', (n) => {
+            n.rotation.y = Math.sin(t * 3.4) * 0.3;
+            n.position.y = 0.72 + Math.sin(t * 5.6) * 0.07;
+        });
+        updateByTag('staff', (n) => {
+            n.rotation.z = Math.sin(t * 4.2) * 0.06;
+        });
+        updateByTag('staff_head', (n) => {
+            const s = 1 + (Math.sin(t * 7.2) * 0.1);
+            n.scale.set(s, s, s);
+        });
+        updateByTag('halo', (n) => {
+            n.rotation.y += dt * 1.8;
+            n.position.y = 2.34 + Math.sin(t * 2.2) * 0.05;
+        });
+        updateByTag('sash_l', (n) => {
+            n.rotation.x = 0.18 + Math.sin(t * 5) * 0.1;
+        });
+        updateByTag('sash_r', (n) => {
+            n.rotation.x = 0.18 + Math.sin((t * 5) + Math.PI) * 0.1;
+        });
+        updateByTag('cross_v', (n) => { n.rotation.z = Math.sin(t * 3.2) * 0.1; });
+        updateByTag('cross_h', (n) => { n.rotation.z = Math.sin(t * 3.2) * 0.1; });
+    }
+
     getGridMoveInput() {
         if (this.keys.has('ArrowUp') || this.keys.has('KeyW')) return { dx: 0, dz: -1, yaw: Math.PI };
         if (this.keys.has('ArrowDown') || this.keys.has('KeyS')) return { dx: 0, dz: 1, yaw: 0 };
@@ -480,17 +1279,7 @@ export class Simple3D {
     }
 
     updateLights() {
-        if (!this.dirLight) return;
-        const t = this.elapsed * 0.05;
-        const r = 140;
-        this.dirLight.position.x = Math.cos(t) * r;
-        this.dirLight.position.z = Math.sin(t) * r;
-        this.dirLight.position.y = 120 + (Math.sin(t * 0.7) * 20);
-        if (this.fillLight) {
-            this.fillLight.position.x = -Math.cos(t * 0.7) * 110;
-            this.fillLight.position.z = -Math.sin(t * 0.7) * 110;
-            this.fillLight.position.y = 80 + (Math.cos(t * 0.4) * 8);
-        }
+        // Luces estaticas para reducir costo de sombras.
     }
 
     buildTerrainParams(world, terrainConfig = null) {
@@ -586,11 +1375,55 @@ export class Simple3D {
         const cx = Math.floor(this.spawn.x / this.chunkSize);
         const cz = Math.floor(this.spawn.z / this.chunkSize);
         this.viewDistanceChunks = this.params.viewDistanceChunks;
-        for (let dz = -this.viewDistanceChunks; dz <= this.viewDistanceChunks; dz += 1) {
-            for (let dx = -this.viewDistanceChunks; dx <= this.viewDistanceChunks; dx += 1) {
-                this.chunkQueue.push({ cx: cx + dx, cz: cz + dz });
+        this.chunkCenter = { cx, cz };
+        this.enqueueChunksAround(cx, cz, this.viewDistanceChunks);
+    }
+
+    enqueueChunk(cx, cz) {
+        const key = this.chunkKey(cx, cz);
+        if (this.chunks.has(key)) return;
+        if (this.chunkQueueKeys.has(key)) return;
+        this.chunkQueue.push({ cx, cz });
+        this.chunkQueueKeys.add(key);
+    }
+
+    enqueueChunksAround(cx, cz, radius) {
+        const candidates = [];
+        for (let dz = -radius; dz <= radius; dz += 1) {
+            for (let dx = -radius; dx <= radius; dx += 1) {
+                candidates.push({
+                    cx: cx + dx,
+                    cz: cz + dz,
+                    dist2: (dx * dx) + (dz * dz)
+                });
             }
         }
+        candidates.sort((a, b) => a.dist2 - b.dist2);
+        for (const c of candidates) {
+            this.enqueueChunk(c.cx, c.cz);
+        }
+    }
+
+    unloadFarChunks(cx, cz, keepRadius) {
+        let removedAny = false;
+        for (const [key, chunk] of this.chunks.entries()) {
+            const dcx = Math.abs(chunk.cx - cx);
+            const dcz = Math.abs(chunk.cz - cz);
+            if (dcx > keepRadius || dcz > keepRadius) {
+                this.chunks.delete(key);
+                removedAny = true;
+            }
+        }
+        if (removedAny) this.terrainDirty = true;
+    }
+
+    updateChunkStreaming() {
+        const cx = Math.floor(this.actor.x / this.chunkSize);
+        const cz = Math.floor(this.actor.z / this.chunkSize);
+        if (cx === this.chunkCenter.cx && cz === this.chunkCenter.cz) return;
+        this.chunkCenter = { cx, cz };
+        this.enqueueChunksAround(cx, cz, this.viewDistanceChunks);
+        this.unloadFarChunks(cx, cz, this.viewDistanceChunks + 1);
     }
 
     processChunkQueue(maxPerTick) {
@@ -598,6 +1431,7 @@ export class Simple3D {
         while (remaining > 0 && this.chunkQueue.length > 0) {
             const next = this.chunkQueue.shift();
             const key = this.chunkKey(next.cx, next.cz);
+            this.chunkQueueKeys.delete(key);
             if (!this.chunks.has(key)) {
                 const chunk = this.generateChunk(next.cx, next.cz);
                 this.chunks.set(key, chunk);
@@ -750,6 +1584,7 @@ export class Simple3D {
             fire: 0xd64541,
             lava: 0xd64541,
             earth: 0x8a6848,
+            bridge: 0x6f4f3f,
             sand: 0xb08a52,
             wind: 0x4f8ed6,
             snow: 0xcad8e8,
@@ -911,6 +1746,7 @@ export class Simple3D {
             fire: 0xd64541,
             lava: 0xd64541,
             earth: 0x8a6848,
+            bridge: 0x6f4f3f,
             sand: 0xb08a52,
             wind: 0x4f8ed6,
             snow: 0xcad8e8,
@@ -939,11 +1775,11 @@ export class Simple3D {
         const meshes = new Map();
         const indices = new Map();
         for (const [biome, count] of counts.entries()) {
-            const mat = new THREE.MeshBasicMaterial({ color: biomeColors[biome] || 0x6ab85f });
+            const mat = new THREE.MeshLambertMaterial({ color: biomeColors[biome] || 0x6ab85f });
             const mesh = new THREE.InstancedMesh(boxGeo, mat, count);
             mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
             mesh.castShadow = false;
-            mesh.receiveShadow = false;
+            mesh.receiveShadow = true;
             mesh.frustumCulled = false;
             meshes.set(biome, mesh);
             indices.set(biome, 0);

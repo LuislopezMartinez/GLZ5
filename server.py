@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import mysql.connector
 from mysql.connector import Error
@@ -63,11 +63,28 @@ def build_fixed_world_terrain(config: dict) -> tuple[dict, dict]:
             for z in range(cz - half_size, cz + half_size + 1):
                 terrain_cells[f"{x},{z}"] = biome
 
+    def fill_rect(x1: int, x2: int, z1: int, z2: int, biome: str):
+        xa, xb = sorted((x1, x2))
+        za, zb = sorted((z1, z2))
+        for x in range(xa, xb + 1):
+            for z in range(za, zb + 1):
+                terrain_cells[f"{x},{z}"] = biome
+
     fill_square(0, 0, hub_half, "stone")
     fill_square(0, ring_distance, island_half, "fire")
     fill_square(0, -ring_distance, island_half, "earth")
     fill_square(ring_distance, 0, island_half, "wind")
     fill_square(-ring_distance, 0, island_half, "grass")
+
+    bridge_half = 2
+    # Norte
+    fill_rect(-bridge_half, bridge_half, hub_half + 1, ring_distance - island_half - 1, "bridge")
+    # Sur
+    fill_rect(-bridge_half, bridge_half, -hub_half - 1, -ring_distance + island_half + 1, "bridge")
+    # Este
+    fill_rect(hub_half + 1, ring_distance - island_half - 1, -bridge_half, bridge_half, "bridge")
+    # Oeste
+    fill_rect(-hub_half - 1, -ring_distance + island_half + 1, -bridge_half, bridge_half, "bridge")
 
     terrain_config = {
         "chunk_size": 16,
@@ -80,6 +97,7 @@ def build_fixed_world_terrain(config: dict) -> tuple[dict, dict]:
         "island_half_size": island_half,
         "ring_distance": ring_distance,
         "platform_gap": gap,
+        "bridge_half_width": bridge_half,
         "island_count": 4,
         "biome_mode": "CardinalFixed",
         "npc_slots": max(0, min(20, int(config.get("npc_slots") or 4))),
@@ -761,17 +779,92 @@ class DatabaseManager:
 
 
 class SimpleWsServer:
-    def __init__(self, host: str, port: int, db: DatabaseManager, log_fn):
+    def __init__(self, host: str, port: int, db: DatabaseManager, log_fn, network_settings=None, network_event_cb=None):
         self.host = host
         self.port = port
         self.db = db
         self.log = log_fn
+        self.network_settings = network_settings if isinstance(network_settings, dict) else {}
+        self.network_event_cb = network_event_cb
         self.loop: asyncio.AbstractEventLoop | None = None
         self.thread: threading.Thread | None = None
         self.stop_event: asyncio.Event | None = None
         self.server = None
         self.clients: set = set()
         self.sessions: dict = {}
+
+    def _network_config_payload(self) -> dict:
+        timeout_ms = self.network_settings.get("client_request_timeout_ms", 12000)
+        try:
+            timeout_ms = max(500, int(timeout_ms))
+        except (TypeError, ValueError):
+            timeout_ms = 12000
+        return {"client_request_timeout_ms": timeout_ms}
+
+    def _peer_label(self, ws) -> str:
+        sess = self.sessions.get(ws) or {}
+        user = sess.get("username")
+        peer = getattr(ws, "remote_address", None)
+        if isinstance(peer, tuple) and len(peer) >= 2:
+            host, port = peer[0], peer[1]
+            if user:
+                return f"{user}@{host}:{port}"
+            return f"{host}:{port}"
+        if user:
+            return user
+        return "unknown"
+
+    def _emit_network_event(self, direction: str, action: str, src: str, dst: str, req_id, payload, raw_len: int):
+        if not self.network_event_cb:
+            return
+        try:
+            self.network_event_cb(
+                {
+                    "ts_iso": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                    "dir": direction,
+                    "action": (action or "unknown"),
+                    "src": src,
+                    "dst": dst,
+                    "req_id": req_id,
+                    "payload": payload,
+                    "raw_len": int(raw_len or 0),
+                }
+            )
+        except Exception:
+            pass
+
+    def _session_world_player_payload(self, sess: dict) -> dict:
+        pos = sess.get("position") or {"x": 0.0, "y": 60.0, "z": 0.0}
+        return {
+            "id": sess.get("user_id"),
+            "username": sess.get("username"),
+            "rol": sess.get("rol") or "user",
+            "character_class": sess.get("character_class") or "rogue",
+            "active_emotion": sess.get("active_emotion") or "neutral",
+            "position": {
+                "x": float(pos.get("x", 0.0)),
+                "y": float(pos.get("y", 60.0)),
+                "z": float(pos.get("z", 0.0)),
+            },
+        }
+
+    async def _broadcast_world_event(self, world_name: str, action: str, payload: dict, exclude=None):
+        dead = []
+        for client in self.clients:
+            if exclude is not None and client == exclude:
+                continue
+            sess = self.sessions.get(client) or {}
+            if not sess.get("in_world"):
+                continue
+            if sess.get("world_name") != world_name:
+                continue
+            try:
+                await self._send(client, {"id": None, "action": action, "payload": payload})
+            except Exception:
+                dead.append(client)
+        for client in dead:
+            self.clients.discard(client)
+            self.sessions.pop(client, None)
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -835,7 +928,17 @@ class SimpleWsServer:
                 pass
 
     async def _send(self, ws, message: dict):
-        await ws.send(json.dumps(message, ensure_ascii=False))
+        encoded = json.dumps(message, ensure_ascii=False)
+        await ws.send(encoded)
+        self._emit_network_event(
+            "TX",
+            message.get("action"),
+            "server",
+            self._peer_label(ws),
+            message.get("id"),
+            message.get("payload"),
+            len(encoded.encode("utf-8")),
+        )
 
     async def _send_response(self, ws, req_id, action: str, payload: dict):
         await self._send(ws, {"id": req_id, "action": action, "payload": payload})
@@ -869,6 +972,13 @@ class SimpleWsServer:
             session = self.sessions.pop(websocket, None)
             self.clients.discard(websocket)
             if session:
+                if session.get("in_world") and session.get("world_name"):
+                    await self._broadcast_world_event(
+                        session["world_name"],
+                        "world_player_left",
+                        {"id": session.get("user_id"), "username": session.get("username")},
+                        exclude=websocket,
+                    )
                 try:
                     self.db.set_online_status(session["user_id"], False)
                 except Exception as exc:
@@ -883,12 +993,30 @@ class SimpleWsServer:
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
+            self._emit_network_event(
+                "RX",
+                "invalid_json",
+                self._peer_label(websocket),
+                "server",
+                None,
+                {"raw": raw},
+                len(raw.encode("utf-8")),
+            )
             await self._send_error(websocket, None, "error", "JSON inválido")
             return
 
         req_id = msg.get("id")
         action = msg.get("action")
         payload = msg.get("payload") or {}
+        self._emit_network_event(
+            "RX",
+            action,
+            self._peer_label(websocket),
+            "server",
+            req_id,
+            payload,
+            len(raw.encode("utf-8")),
+        )
 
         if not action:
             await self._send_error(websocket, req_id, "error", "Falta campo action")
@@ -1055,13 +1183,29 @@ class SimpleWsServer:
 
                 client_ip = websocket.remote_address[0] if websocket.remote_address else None
                 self.db.set_online_status(user["id"], True, client_ip)
-                self.sessions[websocket] = {"user_id": user["id"], "username": username}
+                role_key = (user.get("rol") or "user").lower()
+                default_class = {
+                    "admin": "tank",
+                    "moderator": "mage",
+                    "user": "rogue",
+                }.get(role_key, "rogue")
+                self.sessions[websocket] = {
+                    "user_id": user["id"],
+                    "username": username,
+                    "rol": user.get("rol") or "user",
+                    "character_class": default_class,
+                    "active_emotion": "neutral",
+                    "in_world": False,
+                    "world_name": None,
+                    "position": {"x": 0.0, "y": 60.0, "z": 0.0},
+                }
                 await self._send_response(
                     websocket,
                     req_id,
                     action,
                     {
                         "ok": True,
+                        "network_config": self._network_config_payload(),
                         "user": {
                             "id": user["id"],
                             "username": user["username"],
@@ -1084,6 +1228,13 @@ class SimpleWsServer:
                     await self._send_response(websocket, req_id, action, {"ok": True, "message": "Sin sesión"})
                     return
 
+                if session.get("in_world") and session.get("world_name"):
+                    await self._broadcast_world_event(
+                        session["world_name"],
+                        "world_player_left",
+                        {"id": session.get("user_id"), "username": session.get("username")},
+                        exclude=websocket,
+                    )
                 self.db.set_online_status(session["user_id"], False)
                 await self._send_response(websocket, req_id, action, {"ok": True})
                 await self._broadcast_event(
@@ -1197,6 +1348,18 @@ class SimpleWsServer:
                 spawn_hint = terrain_config.get("spawn_hint") or {"x": 0.0, "y": 60.0, "z": 0.0}
                 if user_row.get("last_pos_y") is None or float(spawn_y) > 200:
                     spawn_y = float(spawn_hint.get("y", 60.0))
+                session_pos = {"x": float(spawn_x), "y": float(spawn_y), "z": float(spawn_z)}
+                session["position"] = session_pos
+
+                other_players = []
+                for ws, sess in self.sessions.items():
+                    if ws == websocket:
+                        continue
+                    if not sess.get("in_world"):
+                        continue
+                    if sess.get("world_name") != world["world_name"]:
+                        continue
+                    other_players.append(self._session_world_player_payload(sess))
 
                 await self._send_response(
                     websocket,
@@ -1204,6 +1367,7 @@ class SimpleWsServer:
                     action,
                     {
                         "ok": True,
+                        "network_config": self._network_config_payload(),
                         "server_time_utc": utc_now().isoformat(),
                         "world": {
                             "id": world["id"],
@@ -1225,20 +1389,144 @@ class SimpleWsServer:
                             "platform_gap": world.get("platform_gap") or "Media",
                         },
                         "terrain_config": {**terrain_config, "terrain_cells": terrain_cells},
-                        "spawn": {"x": spawn_x, "y": spawn_y, "z": spawn_z},
+                        "spawn": session_pos,
                         "player": {
                             "id": user_row["id"],
                             "username": user_row["username"],
                             "full_name": user_row["full_name"],
                             "rol": user_row["rol"],
+                            "character_class": session.get("character_class") or "rogue",
+                            "active_emotion": session.get("active_emotion") or "neutral",
                             "coins": int(user_row.get("coins") or 0),
-                            "position": {"x": spawn_x, "y": spawn_y, "z": spawn_z},
+                            "position": session_pos,
                         },
+                        "other_players": other_players,
                     },
+                )
+                await self._broadcast_world_event(
+                    world["world_name"],
+                    "world_player_joined",
+                    self._session_world_player_payload(session),
+                    exclude=websocket,
+                )
+                await self._broadcast_world_event(
+                    world["world_name"],
+                    "world_player_moved",
+                    {
+                        "id": session.get("user_id"),
+                        "username": session.get("username"),
+                        "rol": session.get("rol") or "user",
+                        "character_class": session.get("character_class") or "rogue",
+                        "active_emotion": session.get("active_emotion") or "neutral",
+                        "position": session_pos,
+                    },
+                    exclude=websocket,
                 )
                 self.log(
                     f"[WORLD] Entrada al mundo: user={session['username']} world={world['world_name']} "
-                    f"spawn=({spawn_x:.2f}, {spawn_y:.2f}, {spawn_z:.2f})"
+                    f"spawn=({session_pos['x']:.2f}, {session_pos['y']:.2f}, {session_pos['z']:.2f})"
+                )
+                return
+
+            if action == "world_move":
+                session = self.sessions.get(websocket)
+                if not session or not session.get("in_world") or not session.get("world_name"):
+                    await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                pos = payload.get("position") or {}
+                x = float(pos.get("x", 0.0))
+                y = float(pos.get("y", 60.0))
+                z = float(pos.get("z", 0.0))
+                session["position"] = {"x": x, "y": y, "z": z}
+                await self._send_response(websocket, req_id, action, {"ok": True})
+                await self._broadcast_world_event(
+                    session["world_name"],
+                    "world_player_moved",
+                    {
+                        "id": session.get("user_id"),
+                        "username": session.get("username"),
+                        "rol": session.get("rol") or "user",
+                        "character_class": session.get("character_class") or "rogue",
+                        "active_emotion": session.get("active_emotion") or "neutral",
+                        "position": {"x": x, "y": y, "z": z},
+                    },
+                    exclude=websocket,
+                )
+                return
+
+            if action == "world_set_class":
+                session = self.sessions.get(websocket)
+                if not session or not session.get("in_world") or not session.get("world_name"):
+                    await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                cls = (payload.get("character_class") or "").strip().lower()
+                if cls not in {"rogue", "tank", "mage", "healer"}:
+                    await self._send_error(websocket, req_id, action, "Clase invalida")
+                    return
+                session["character_class"] = cls
+                await self._send_response(websocket, req_id, action, {"ok": True, "character_class": cls})
+                await self._broadcast_world_event(
+                    session["world_name"],
+                    "world_player_class_changed",
+                    {
+                        "id": session.get("user_id"),
+                        "character_class": cls,
+                    },
+                    exclude=websocket,
+                )
+                return
+
+            if action == "world_chat":
+                session = self.sessions.get(websocket)
+                if not session or not session.get("in_world") or not session.get("world_name"):
+                    await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                text = (payload.get("message") or "").strip()
+                if not text:
+                    await self._send_error(websocket, req_id, action, "Mensaje vacio")
+                    return
+                if len(text) > 240:
+                    text = text[:240]
+                await self._send_response(websocket, req_id, action, {"ok": True})
+                await self._broadcast_world_event(
+                    session["world_name"],
+                    "world_chat_message",
+                    {
+                        "id": session.get("user_id"),
+                        "username": session.get("username") or "desconocido",
+                        "message": text,
+                        "server_time_utc": utc_now().isoformat(),
+                    },
+                    exclude=None,
+                )
+                return
+
+            if action == "world_set_emotion":
+                session = self.sessions.get(websocket)
+                if not session or not session.get("in_world") or not session.get("world_name"):
+                    await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                emotion = (payload.get("emotion") or "neutral").strip().lower()
+                if emotion not in {"neutral", "happy", "angry", "sad", "surprised", "cool", "love", "dead"}:
+                    emotion = "neutral"
+                duration_ms = int(payload.get("duration_ms") or 0)
+                duration_ms = max(0, min(duration_ms, 10_000))
+                session["active_emotion"] = emotion
+                await self._send_response(
+                    websocket,
+                    req_id,
+                    action,
+                    {"ok": True, "emotion": emotion, "duration_ms": duration_ms},
+                )
+                await self._broadcast_world_event(
+                    session["world_name"],
+                    "world_player_emotion",
+                    {
+                        "id": session.get("user_id"),
+                        "emotion": emotion,
+                        "duration_ms": duration_ms,
+                    },
+                    exclude=None,
                 )
                 return
 
@@ -1261,7 +1549,7 @@ class ServerGui:
         self.server: SimpleWsServer | None = None
         self.db_manager: DatabaseManager | None = None
 
-        self.ws_host = tk.StringVar(value="127.0.0.1")
+        self.ws_host = tk.StringVar(value="0.0.0.0")
         self.ws_port = tk.StringVar(value="8765")
         self.db_host = tk.StringVar(value="127.0.0.1")
         self.db_port = tk.StringVar(value="3306")
@@ -1307,6 +1595,20 @@ class ServerGui:
         self.admin_user_info_text = None
         self.admin_users_listbox = None
         self.admin_actor_name = tk.StringVar(value="server_admin")
+        self.network_client_request_timeout_ms = tk.StringVar(value="12000")
+        self.network_monitor_text = None
+        self.network_actions_listbox = None
+        self.network_event_queue: queue.Queue[dict] = queue.Queue()
+        self.network_known_actions: list[str] = []
+        self.network_action_set: set[str] = set()
+        self.network_expanded_actions: set[str] = set()
+        self.network_monitor_line_count = 0
+        self.network_monitor_max_lines = 6000
+        self.network_settings = {"client_request_timeout_ms": 12000}
+        self.network_settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "network_settings.json")
+        self.network_monitor_paused = False
+        self.network_pause_btn = None
+        self._load_network_settings_from_json()
 
         self._build()
         self._poll_logs()
@@ -1319,10 +1621,12 @@ class ServerGui:
         world_tab = tk.Frame(notebook, padx=10, pady=10)
         items_tab = tk.Frame(notebook, padx=10, pady=10)
         admin_tab = tk.Frame(notebook, padx=10, pady=10)
+        network_tab = tk.Frame(notebook, padx=10, pady=10)
         notebook.add(server_tab, text="Servidor")
         notebook.add(world_tab, text="Mundo")
         notebook.add(items_tab, text="Items")
         notebook.add(admin_tab, text="Admin")
+        notebook.add(network_tab, text="Network")
 
         tk.Label(server_tab, text="Servidor WebSocket", font=("Segoe UI", 10, "bold")).grid(
             row=0, column=0, sticky="w", pady=(0, 8)
@@ -1579,6 +1883,51 @@ class ServerGui:
         admin_tab.grid_columnconfigure(2, weight=1)
         admin_tab.grid_columnconfigure(5, weight=1)
         admin_tab.grid_rowconfigure(7, weight=1)
+
+        tk.Label(network_tab, text="Configuracion de Red", font=("Segoe UI", 11, "bold")).grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 10)
+        )
+        tk.Label(network_tab, text="Client request timeout (ms):").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Entry(network_tab, textvariable=self.network_client_request_timeout_ms, width=16).grid(
+            row=1, column=1, sticky="w", pady=4
+        )
+        tk.Button(network_tab, text="Aplicar", command=self.apply_network_settings, width=12).grid(
+            row=1, column=2, sticky="w", padx=(6, 0), pady=4
+        )
+
+        tk.Label(network_tab, text="Actions detectadas", font=("Segoe UI", 10, "bold")).grid(
+            row=2, column=0, sticky="w", pady=(12, 4)
+        )
+        tk.Label(network_tab, text="Monitor de red (tiempo real)", font=("Segoe UI", 10, "bold")).grid(
+            row=2, column=1, columnspan=3, sticky="w", pady=(12, 4)
+        )
+        monitor_btn_row = tk.Frame(network_tab)
+        monitor_btn_row.grid(row=2, column=3, sticky="e", pady=(12, 4))
+        self.network_pause_btn = tk.Button(monitor_btn_row, text="Pausar", width=10, command=self.network_toggle_pause)
+        self.network_pause_btn.pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(monitor_btn_row, text="Limpiar", width=10, command=self.network_clear_monitor).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(monitor_btn_row, text="Exportar", width=10, command=self.network_export_monitor).pack(side=tk.LEFT)
+        self.network_actions_listbox = tk.Listbox(network_tab, width=36, height=28, selectmode=tk.MULTIPLE, exportselection=False)
+        self.network_actions_listbox.grid(row=3, column=0, sticky="nsew", padx=(0, 8))
+        self.network_actions_listbox.bind("<<ListboxSelect>>", self.on_network_actions_changed)
+
+        actions_btn_row = tk.Frame(network_tab)
+        actions_btn_row.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        tk.Button(actions_btn_row, text="Seleccionar todo", width=16, command=self.network_select_all_actions).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        tk.Button(actions_btn_row, text="Limpiar seleccion", width=16, command=self.network_clear_actions_selection).pack(
+            side=tk.LEFT
+        )
+
+        self.network_monitor_text = scrolledtext.ScrolledText(network_tab, width=110, height=32, state=tk.DISABLED)
+        self.network_monitor_text.grid(row=3, column=1, columnspan=3, rowspan=2, sticky="nsew")
+
+        network_tab.grid_columnconfigure(0, weight=0)
+        network_tab.grid_columnconfigure(1, weight=1)
+        network_tab.grid_columnconfigure(2, weight=1)
+        network_tab.grid_columnconfigure(3, weight=1)
+        network_tab.grid_rowconfigure(3, weight=1)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -2148,6 +2497,174 @@ class ServerGui:
         except Error as exc:
             messagebox.showerror("Error MySQL", f"No se pudo forzar logout:\n{exc}")
 
+    def _coerce_network_timeout(self, raw_value, fallback=12000) -> int:
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            parsed = int(fallback)
+        return max(500, min(120000, parsed))
+
+    def _load_network_settings_from_json(self):
+        timeout_ms = self._coerce_network_timeout(self.network_settings.get("client_request_timeout_ms", 12000), 12000)
+        if os.path.exists(self.network_settings_file):
+            try:
+                with open(self.network_settings_file, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                raw_settings = data.get("network_settings") if isinstance(data, dict) else None
+                if not isinstance(raw_settings, dict) and isinstance(data, dict):
+                    raw_settings = data
+                if isinstance(raw_settings, dict):
+                    timeout_ms = self._coerce_network_timeout(raw_settings.get("client_request_timeout_ms"), timeout_ms)
+            except Exception:
+                self.log_queue.put(
+                    f"{datetime.now().strftime('%H:%M:%S')} [NETWORK] No se pudo leer {self.network_settings_file}, usando defaults."
+                )
+        self.network_settings["client_request_timeout_ms"] = timeout_ms
+        self.network_client_request_timeout_ms.set(str(timeout_ms))
+
+    def _save_network_settings_to_json(self, show_error=False) -> bool:
+        payload = {
+            "network_settings": dict(self.network_settings),
+            "updated_at_utc": utc_now().isoformat(),
+        }
+        try:
+            with open(self.network_settings_file, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+            return True
+        except Exception as exc:
+            if show_error:
+                messagebox.showerror("Network", f"No se pudo guardar configuracion en JSON:\n{exc}")
+            self.log(f"[NETWORK] Error guardando JSON local: {exc}")
+            return False
+
+    def apply_network_settings(self):
+        timeout_raw = self.network_client_request_timeout_ms.get().strip()
+        if not timeout_raw:
+            messagebox.showerror("Network", "Timeout invalido. Debe ser entero en ms.")
+            return
+        timeout_ms = self._coerce_network_timeout(timeout_raw, 12000)
+        self.network_client_request_timeout_ms.set(str(timeout_ms))
+        self.network_settings["client_request_timeout_ms"] = timeout_ms
+        self._save_network_settings_to_json(show_error=True)
+        if self.server:
+            self.server.network_settings["client_request_timeout_ms"] = timeout_ms
+        self.log(f"[NETWORK] client_request_timeout_ms actualizado a {timeout_ms}")
+
+    def enqueue_network_event(self, event: dict):
+        self.network_event_queue.put(event or {})
+
+    def network_toggle_pause(self):
+        self.network_monitor_paused = not self.network_monitor_paused
+        if self.network_pause_btn:
+            self.network_pause_btn.configure(text="Reanudar" if self.network_monitor_paused else "Pausar")
+        state = "pausado" if self.network_monitor_paused else "activo"
+        self.log(f"[NETWORK] Monitor {state}")
+
+    def network_clear_monitor(self):
+        if not self.network_monitor_text:
+            return
+        self.network_monitor_text.configure(state=tk.NORMAL)
+        self.network_monitor_text.delete("1.0", tk.END)
+        self.network_monitor_text.configure(state=tk.DISABLED)
+        self.network_monitor_line_count = 0
+
+    def network_export_monitor(self):
+        if not self.network_monitor_text:
+            return
+        content = self.network_monitor_text.get("1.0", tk.END).strip()
+        if not content:
+            messagebox.showwarning("Network", "No hay contenido para exportar.")
+            return
+        default_name = f"network_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        out_path = filedialog.asksaveasfilename(
+            title="Exportar monitor de red",
+            defaultextension=".log",
+            filetypes=[("Log files", "*.log"), ("Text files", "*.txt"), ("All files", "*.*")],
+            initialfile=default_name,
+        )
+        if not out_path:
+            return
+        try:
+            with open(out_path, "w", encoding="utf-8") as fh:
+                fh.write(content + "\n")
+            self.log(f"[NETWORK] Monitor exportado a {out_path}")
+            messagebox.showinfo("Network", f"Monitor exportado:\n{out_path}")
+        except Exception as exc:
+            messagebox.showerror("Network", f"No se pudo exportar monitor:\n{exc}")
+
+    def _register_network_action(self, action: str):
+        key = (action or "unknown").strip() or "unknown"
+        if key in self.network_action_set:
+            return
+        self.network_action_set.add(key)
+        self.network_known_actions.append(key)
+        if self.network_actions_listbox:
+            idx = len(self.network_known_actions)
+            self.network_actions_listbox.insert(tk.END, f"{idx:03d} | {key}")
+
+    def on_network_actions_changed(self, _event=None):
+        if not self.network_actions_listbox:
+            return
+        selected_indices = set(self.network_actions_listbox.curselection())
+        expanded = set()
+        for idx, action in enumerate(self.network_known_actions):
+            if idx in selected_indices:
+                expanded.add(action)
+        self.network_expanded_actions = expanded
+
+    def network_select_all_actions(self):
+        if not self.network_actions_listbox:
+            return
+        self.network_actions_listbox.select_set(0, tk.END)
+        self.on_network_actions_changed()
+
+    def network_clear_actions_selection(self):
+        if not self.network_actions_listbox:
+            return
+        self.network_actions_listbox.selection_clear(0, tk.END)
+        self.on_network_actions_changed()
+
+    def _safe_json_dumps(self, value) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        except Exception:
+            return str(value)
+
+    def _append_network_monitor_text(self, text: str):
+        if not self.network_monitor_text:
+            return
+        self.network_monitor_text.configure(state=tk.NORMAL)
+        self.network_monitor_text.insert(tk.END, text + "\n")
+        self.network_monitor_text.see(tk.END)
+        self.network_monitor_line_count += 1
+        if self.network_monitor_line_count > self.network_monitor_max_lines:
+            trim_to = max(1, self.network_monitor_max_lines // 5)
+            self.network_monitor_text.delete("1.0", f"{trim_to}.0")
+            self.network_monitor_line_count = max(0, self.network_monitor_line_count - trim_to)
+        self.network_monitor_text.configure(state=tk.DISABLED)
+
+    def _render_network_event(self, event: dict):
+        ts = event.get("ts_iso") or datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        direction = event.get("dir") or "?"
+        action = (event.get("action") or "unknown").strip() or "unknown"
+        src = event.get("src") or "?"
+        dst = event.get("dst") or "?"
+        req_id = event.get("req_id")
+        req_text = req_id if req_id is not None else "-"
+        raw_len = event.get("raw_len") or 0
+        payload = event.get("payload")
+
+        self._register_network_action(action)
+
+        header = f"{ts} | {direction} | {action} | {src} -> {dst} | req={req_text} | bytes={raw_len}"
+        if action in self.network_expanded_actions:
+            payload_text = self._safe_json_dumps(payload)
+            self._append_network_monitor_text(header)
+            self._append_network_monitor_text(payload_text)
+            self._append_network_monitor_text("-" * 96)
+        else:
+            self._append_network_monitor_text(header)
+
     def log(self, message: str):
         self.log_queue.put(f"{datetime.now().strftime('%H:%M:%S')} {message}")
 
@@ -2161,6 +2678,15 @@ class ServerGui:
                 self.log_box.configure(state=tk.DISABLED)
         except queue.Empty:
             pass
+        if not self.network_monitor_paused:
+            try:
+                processed = 0
+                while processed < 300:
+                    evt = self.network_event_queue.get_nowait()
+                    self._render_network_event(evt)
+                    processed += 1
+            except queue.Empty:
+                pass
         self.root.after(150, self._poll_logs)
 
     def start_server(self):
@@ -2169,6 +2695,14 @@ class ServerGui:
         except ValueError:
             messagebox.showerror("Error", "Puerto WS invalido")
             return
+        timeout_raw = self.network_client_request_timeout_ms.get().strip()
+        if not timeout_raw:
+            messagebox.showerror("Network", "Client request timeout (ms) invalido")
+            return
+        timeout_ms = self._coerce_network_timeout(timeout_raw, 12000)
+        self.network_client_request_timeout_ms.set(str(timeout_ms))
+        self.network_settings["client_request_timeout_ms"] = timeout_ms
+        self._save_network_settings_to_json(show_error=True)
 
         db = self.db_manager or self._build_db_manager()
         if not db:
@@ -2178,7 +2712,14 @@ class ServerGui:
             messagebox.showinfo("Servidor", "El servidor ya está en ejecución")
             return
 
-        self.server = SimpleWsServer(self.ws_host.get().strip(), ws_port, db, self.log)
+        self.server = SimpleWsServer(
+            self.ws_host.get().strip(),
+            ws_port,
+            db,
+            self.log,
+            network_settings=self.network_settings,
+            network_event_cb=self.enqueue_network_event,
+        )
         self.server.start()
         self.log(
             f"[INIT] Host WS={self.ws_host.get().strip()}:{ws_port} | "
@@ -2192,6 +2733,7 @@ class ServerGui:
         self.log("[INIT] Señal de apagado enviada.")
 
     def on_close(self):
+        self._save_network_settings_to_json(show_error=False)
         self.stop_server()
         self.root.after(300, self.root.destroy)
 

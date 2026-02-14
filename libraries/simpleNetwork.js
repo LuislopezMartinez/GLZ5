@@ -48,9 +48,10 @@ export class NetMessage {
 }
 
 export class SimpleWS {
-    constructor(url) {
+    constructor(url, options = {}) {
         this.url = url;
         this.socket = null;
+        this.requestTimeoutMs = Math.max(500, Number(options.requestTimeoutMs) || 12000);
 
         // 1. Mapa para RESPUESTAS (Request -> Response)
         this.pendingRequests = new Map();
@@ -62,13 +63,40 @@ export class SimpleWS {
         NetMessage.sender = this;
     }
 
+    flushPendingRequests(reason = "Conexion cerrada") {
+        for (const [msgId, pending] of this.pendingRequests.entries()) {
+            if (pending?.timer) clearTimeout(pending.timer);
+            if (pending?.reject) pending.reject(new Error(`${reason} (request: ${msgId})`));
+        }
+        this.pendingRequests.clear();
+    }
+
     connect() {
         return new Promise((resolve, reject) => {
+            let settled = false;
             this.socket = new WebSocket(this.url);
-            this.socket.onopen = () => { console.log(`Conectado a ${this.url}`); resolve(); };
+            this.socket.onopen = () => {
+                settled = true;
+                console.log(`Conectado a ${this.url}`);
+                resolve();
+            };
             this.socket.onmessage = (event) => this.handleIncoming(event);
-            this.socket.onerror = (err) => { console.error("Error WS", err); reject(err); };
-            this.socket.onclose = () => console.warn("Conexión cerrada");
+            this.socket.onerror = (err) => {
+                console.error("Error WS", err);
+                this.flushPendingRequests("Error de socket");
+                if (!settled) {
+                    settled = true;
+                    reject(new Error("Error WS durante la conexion"));
+                }
+            };
+            this.socket.onclose = () => {
+                console.warn("Conexión cerrada");
+                this.flushPendingRequests("Socket cerrado");
+                if (!settled) {
+                    settled = true;
+                    reject(new Error("Conexion cerrada antes de completar handshake"));
+                }
+            };
         });
     }
 
@@ -97,8 +125,19 @@ export class SimpleWS {
             // Generador de ID compatible con todo
             const msgId = Date.now().toString(36) + Math.random().toString(36).substr(2);
             netMessage.id = msgId;
-            this.pendingRequests.set(msgId, resolve);
-            this.socket.send(netMessage.toString());
+            const timer = setTimeout(() => {
+                if (!this.pendingRequests.has(msgId)) return;
+                this.pendingRequests.delete(msgId);
+                reject(new Error(`Timeout esperando respuesta para '${netMessage.action}'`));
+            }, this.requestTimeoutMs);
+            this.pendingRequests.set(msgId, { resolve, reject, timer, action: netMessage.action });
+            try {
+                this.socket.send(netMessage.toString());
+            } catch (err) {
+                clearTimeout(timer);
+                this.pendingRequests.delete(msgId);
+                reject(err);
+            }
         });
     }
 
@@ -108,8 +147,9 @@ export class SimpleWS {
 
         // CASO A: Es una RESPUESTA a algo que preguntamos (tiene ID y lo estamos esperando)
         if (msg.id && this.pendingRequests.has(msg.id)) {
-            const resolve = this.pendingRequests.get(msg.id);
-            resolve(msg);
+            const pending = this.pendingRequests.get(msg.id);
+            if (pending?.timer) clearTimeout(pending.timer);
+            pending.resolve(msg);
             this.pendingRequests.delete(msg.id);
             return;
         }
