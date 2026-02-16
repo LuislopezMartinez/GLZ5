@@ -11,13 +11,18 @@ import {
     startUI
 } from './libraries/SimpleUI.dom.js';
 import { NetMessage, SimpleWS } from './libraries/simpleNetwork.js';
-import { Simple3D } from './Simple3D.js';
+import { Simple3D } from './libraries/Simple3D.js';
+import { CharacterSelectScene } from './libraries/CharacterSelectScene.js';
+import { InventoryUi } from './libraries/InventoryUi.js';
+
+const CLIENT_PROTOCOL_VERSION = '1.0.0';
 
 let ws = null;
 let simple3D = new Simple3D();
 let clientState = 'AUTH';
 let worldData = null;
 let rootLayout = null;
+let authRoot = null;
 
 let titleLabel = null;
 let statusLabel = null;
@@ -30,8 +35,13 @@ let worldSpawnLabel = null;
 let worldTerrainLabel = null;
 let worldGenLabel = null;
 let worldRuntimeLabel = null;
+let worldLeaveBtn = null;
 let actionBarRoot = null;
 let actionSlots = [];
+let actionSlotLabels = [];
+let utilityBarRoot = null;
+let inventoryUi = null;
+let pendingInventoryPayload = null;
 let chatRoot = null;
 let chatToggleBtn = null;
 let chatMessagesEl = null;
@@ -39,6 +49,25 @@ let chatInputEl = null;
 let chatMinBtn = null;
 let chatOpen = true;
 let worldHudReady = false;
+let characterPanelEl = null;
+let characterSceneWrapEl = null;
+let characterSceneInfoEl = null;
+let characterDeleteBtnEl = null;
+let characterRefreshBtnEl = null;
+let characterCreateBtnEl = null;
+let characterCreateModalEl = null;
+let characterNameInputEl = null;
+let characterModelSelectEl = null;
+let characterModelPrevBtnEl = null;
+let characterModelNextBtnEl = null;
+let characterModelValueEl = null;
+let characterEnterBtnEl = null;
+let characterSelectedId = null;
+let characterSelectedSlotIndex = 0;
+let characterMaxSlots = 3;
+let characterCatalog = { models: [] };
+let characterRows = [];
+let characterSelect3d = null;
 let movePadRoot = null;
 let movePadBase = null;
 let movePadStick = null;
@@ -49,6 +78,16 @@ let movePadSuppressClickUntil = 0;
 let emotionToggleBtn = null;
 let emotionPanel = null;
 let emotionOpen = false;
+let collectBarRoot = null;
+let collectBarFill = null;
+let collectBarLabel = null;
+let biomeBannerRoot = null;
+let biomeBannerTitle = null;
+let biomeBannerSub = null;
+let biomeBannerHideTimer = null;
+let biomeBannerLastBiome = '';
+let biomeBannerLastAt = 0;
+let serverProtocolInfo = { protocol_version: null, server_build: null };
 
 function getDetectedWsUrl() {
     const host = (window.location.hostname || '').trim();
@@ -78,6 +117,7 @@ function setCurrentUser(text, color = 0x3498db) {
 function setClientState(nextState, customText = null) {
     clientState = nextState;
     if (nextState === 'AUTH') setStatus(customText || 'Estado: autenticacion', 0x95a5a6);
+    if (nextState === 'CHAR_SELECT') setStatus(customText || 'Selecciona o crea personaje', 0x5dade2);
     if (nextState === 'LOADING_WORLD') setStatus(customText || 'Cargando mundo...', 0xf39c12);
     if (nextState === 'IN_WORLD') setStatus(customText || 'Dentro del mundo', 0x27ae60);
 }
@@ -85,12 +125,124 @@ function setClientState(nextState, customText = null) {
 function applyNetworkConfig(config) {
     if (!ws || !config) return;
     const timeoutMs = Number(config.client_request_timeout_ms);
-    if (!Number.isFinite(timeoutMs) || timeoutMs < 500) return;
-    ws.requestTimeoutMs = Math.round(timeoutMs);
+    if (Number.isFinite(timeoutMs) && timeoutMs >= 500) {
+        ws.requestTimeoutMs = Math.round(timeoutMs);
+    }
+    const serverProto = (config.protocol_version || '').toString().trim();
+    const serverBuild = (config.server_build || '').toString().trim();
+    if (serverProto) serverProtocolInfo.protocol_version = serverProto;
+    if (serverBuild) serverProtocolInfo.server_build = serverBuild;
+    if (serverProto && serverProto !== CLIENT_PROTOCOL_VERSION) {
+        UIToast.show(
+            `Version protocolo distinta (cliente ${CLIENT_PROTOCOL_VERSION} / servidor ${serverProto})`,
+            'warning',
+            4200
+        );
+    }
 }
 
 function isMobileUi() {
     return window.matchMedia('(max-width: 900px), (pointer: coarse)').matches;
+}
+
+function hotbarSlotSizePx() {
+    return isMobileUi() ? 52 : 54;
+}
+
+function styleUtilitySlotButton(btn, tone = 'blue') {
+    if (!btn) return;
+    let bg = 'linear-gradient(180deg, rgba(30,117,177,0.96), rgba(18,77,125,0.96))';
+    let color = '#ecf7ff';
+    if (tone === 'green') {
+        bg = 'linear-gradient(180deg, rgba(31,141,100,0.96), rgba(20,98,70,0.96))';
+        color = '#ecfff6';
+    } else if (tone === 'red') {
+        bg = 'linear-gradient(180deg, rgba(192,65,50,0.96), rgba(143,43,34,0.96))';
+        color = '#ffecec';
+    } else if (tone === 'cyan') {
+        bg = 'linear-gradient(180deg, rgba(44,110,166,0.96), rgba(24,72,117,0.96))';
+        color = '#ecf7ff';
+    }
+    const slotPx = hotbarSlotSizePx();
+    btn.style.position = 'relative';
+    btn.style.width = `${slotPx}px`;
+    btn.style.height = `${slotPx}px`;
+    btn.style.minWidth = `${slotPx}px`;
+    btn.style.minHeight = `${slotPx}px`;
+    btn.style.padding = '0';
+    btn.style.border = '1px solid rgba(176, 208, 237, 0.42)';
+    btn.style.borderRadius = '8px';
+    btn.style.background = bg;
+    btn.style.color = color;
+    btn.style.fontSize = '12px';
+    btn.style.fontWeight = '800';
+    btn.style.lineHeight = '1';
+    btn.style.cursor = 'pointer';
+    btn.style.display = 'flex';
+    btn.style.alignItems = 'center';
+    btn.style.justifyContent = 'center';
+    btn.style.textAlign = 'center';
+    btn.style.userSelect = 'none';
+    btn.style.webkitUserSelect = 'none';
+    btn.style.webkitTouchCallout = 'none';
+    btn.style.touchAction = 'manipulation';
+}
+
+function createUtilityBarUi(host) {
+    if (utilityBarRoot) return;
+    const bar = document.createElement('div');
+    utilityBarRoot = bar;
+    bar.style.position = 'fixed';
+    bar.style.left = '50%';
+    bar.style.bottom = '74px';
+    bar.style.transform = 'translateX(-50%)';
+    bar.style.zIndex = '43';
+    bar.style.pointerEvents = 'auto';
+    bar.style.userSelect = 'none';
+    bar.style.background = 'rgba(6, 14, 28, 0.82)';
+    bar.style.border = '1px solid rgba(149, 181, 212, 0.38)';
+    bar.style.borderRadius = '14px';
+    bar.style.padding = '6px';
+    bar.style.boxShadow = '0 8px 18px rgba(0,0,0,0.32)';
+    bar.style.backdropFilter = 'blur(2px)';
+    bar.style.display = 'grid';
+    bar.style.gap = '4px';
+    host.appendChild(bar);
+}
+
+function mountUtilityButtons() {
+    if (!utilityBarRoot) return;
+    const btns = [];
+    if (chatToggleBtn) btns.push({ el: chatToggleBtn, tone: 'blue' });
+    if (emotionToggleBtn) btns.push({ el: emotionToggleBtn, tone: 'green' });
+    if (inventoryUi?.getButtonEl?.()) btns.push({ el: inventoryUi.getButtonEl(), tone: 'cyan' });
+    if (worldLeaveBtn?.el) btns.push({ el: worldLeaveBtn.el, tone: 'red' });
+
+    utilityBarRoot.innerHTML = '';
+    const slotPx = hotbarSlotSizePx();
+    const cols = 5;
+    utilityBarRoot.style.gridTemplateColumns = `repeat(${cols}, ${slotPx}px)`;
+    btns.forEach((row) => {
+        const b = row.el;
+        styleUtilitySlotButton(b, row.tone);
+        b.style.position = 'relative';
+        b.style.left = 'auto';
+        b.style.right = 'auto';
+        b.style.top = 'auto';
+        b.style.bottom = 'auto';
+        b.style.margin = '0';
+        utilityBarRoot.appendChild(b);
+    });
+    while (utilityBarRoot.childElementCount < 5) {
+        const filler = document.createElement('div');
+        filler.style.width = `${slotPx}px`;
+        filler.style.height = `${slotPx}px`;
+        filler.style.border = '1px dashed rgba(176, 208, 237, 0.22)';
+        filler.style.borderRadius = '8px';
+        filler.style.background = 'linear-gradient(180deg, rgba(12,28,49,0.35), rgba(8,18,34,0.45))';
+        filler.style.pointerEvents = 'none';
+        utilityBarRoot.appendChild(filler);
+    }
 }
 
 function addChatLine(text, kind = 'system') {
@@ -110,15 +262,124 @@ function addChatLine(text, kind = 'system') {
     chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
 }
 
-function useActionSlot(index) {
+function applyInventoryPayload(invRaw) {
+    if (!inventoryUi) {
+        pendingInventoryPayload = invRaw || null;
+        return;
+    }
+    inventoryUi.applyPayload(invRaw || null);
+    pendingInventoryPayload = null;
+}
+
+async function refreshInventory() {
+    if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) return;
+    try {
+        const resp = await new NetMessage('inventory_get').send();
+        if (resp?.payload?.ok) {
+            applyInventoryPayload(resp.payload.inventory);
+        }
+    } catch (err) {
+        console.warn('inventory_get error', err);
+    }
+}
+
+async function inventoryMove(fromIdx, toIdx) {
+    if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) return false;
+    try {
+        const resp = await new NetMessage('inventory_move')
+            .set('from_slot', Number(fromIdx))
+            .set('to_slot', Number(toIdx))
+            .send();
+        if (!resp?.payload?.ok) {
+            UIToast.show(resp?.payload?.error || 'No se pudo mover item', 'warning', 1200);
+            return false;
+        }
+        applyInventoryPayload(resp.payload.inventory);
+        return true;
+    } catch (err) {
+        console.error(err);
+        UIToast.show('Error de red en inventory_move', 'error', 1200);
+        return false;
+    }
+}
+
+async function inventorySplit(fromIdx, toIdx) {
+    if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) return false;
+    try {
+        const resp = await new NetMessage('inventory_split')
+            .set('from_slot', Number(fromIdx))
+            .set('to_slot', Number(toIdx))
+            .send();
+        if (!resp?.payload?.ok) {
+            UIToast.show(resp?.payload?.error || 'No se pudo dividir stack', 'warning', 1200);
+            return false;
+        }
+        applyInventoryPayload(resp.payload.inventory);
+        return true;
+    } catch (err) {
+        console.error(err);
+        UIToast.show('Error de red en inventory_split', 'error', 1200);
+        return false;
+    }
+}
+
+async function inventoryShiftClick(fromIdx) {
+    if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) return false;
+    try {
+        const resp = await new NetMessage('inventory_shift_click')
+            .set('from_slot', Number(fromIdx))
+            .send();
+        if (!resp?.payload?.ok) {
+            UIToast.show(resp?.payload?.error || 'No se pudo mover item', 'warning', 1200);
+            return false;
+        }
+        applyInventoryPayload(resp.payload.inventory);
+        return true;
+    } catch (err) {
+        console.error(err);
+        UIToast.show('Error de red en inventory_shift_click', 'error', 1200);
+        return false;
+    }
+}
+
+async function useActionSlot(index) {
     if (clientState !== 'IN_WORLD') return;
-    const slot = actionSlots[index];
-    if (!slot) return;
-    slot.style.transform = 'translateY(-1px)';
-    setTimeout(() => { slot.style.transform = ''; }, 120);
-    const title = slot.dataset.skill || `Skill ${index + 1}`;
-    UIToast.show(`Usaste ${title}`, 'info', 900);
-    addChatLine(`Habilidad activada: ${title}`, 'system');
+    const idx = Number(index);
+    const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || 8);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= hotbarSlots) return;
+    const s = inventoryUi?.getSlotData?.(idx) || null;
+    if (!s.item_code || (Number(s.quantity) || 0) <= 0) return;
+    if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) return;
+    try {
+        const resp = await new NetMessage('inventory_use')
+            .set('slot_index', idx)
+            .send();
+        if (!resp?.payload?.ok) {
+            UIToast.show(resp?.payload?.error || 'No se pudo usar item', 'warning', 1300);
+            return;
+        }
+        applyInventoryPayload(resp.payload.inventory);
+        const effect = resp.payload.effect || {};
+        const itemName = resp.payload.item_name || inventoryUi?.getItemDisplayName?.(resp.payload.used_item) || '';
+        const effectType = (effect.type || '').toString().toLowerCase();
+        if (effectType === 'heal') {
+            const hp = Number(effect.applied_hp);
+            const maxHp = Number(effect.max_hp);
+            if (Number.isFinite(hp) && Number.isFinite(maxHp)) {
+                simple3D.setLocalHealth?.(hp, maxHp);
+            }
+            UIToast.show(`Consumiste ${itemName}: +vida`, 'success', 1200);
+        } else if (effectType === 'invisibility' || effectType === 'stealth') {
+            UIToast.show(`Consumiste ${itemName}: invisibilidad`, 'info', 1300);
+        } else if (effectType === 'buff' || effectType === 'boost') {
+            UIToast.show(`Consumiste ${itemName}: potenciador`, 'info', 1300);
+        } else {
+            UIToast.show(`Consumiste ${itemName}`, 'info', 1200);
+        }
+    } catch (err) {
+        console.error(err);
+        UIToast.show('Error de red en inventory_use', 'error', 1200);
+    }
 }
 
 function setMoveDirectionState(direction, active) {
@@ -172,8 +433,26 @@ function isMovePadBlockedTarget(target) {
     if (chatToggleBtn?.contains(target)) return true;
     if (emotionToggleBtn?.contains(target)) return true;
     if (emotionPanel?.contains(target)) return true;
+    if (inventoryUi?.contains?.(target)) return true;
+    if (collectBarRoot?.contains(target)) return true;
     if (worldPanel?.el?.contains && worldPanel.el.contains(target)) return true;
     return false;
+}
+
+function tryCollectDecorFromPointer(ev) {
+    if (clientState !== 'IN_WORLD') return;
+    if (inventoryUi?.isOpen?.()) return;
+    if (!ev || ev.button !== 0) return;
+    if (performance.now() < movePadSuppressClickUntil) return;
+    if (isMovePadBlockedTarget(ev.target)) return;
+    const x = Number(ev.clientX);
+    const y = Number(ev.clientY);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const started = simple3D.tryCollectDecorFromScreenPoint?.(x, y);
+    if (started) {
+        ev.preventDefault();
+        ev.stopPropagation();
+    }
 }
 
 function showMovePadAt(x, y) {
@@ -206,16 +485,9 @@ function updateMovePadPointer(clientX, clientY) {
 }
 
 function startMovePadPointer(ev) {
-    if (isMobileUi()) return;
-    if (clientState !== 'IN_WORLD') return;
-    if (movePadPointerId !== null) return;
-    if (isMovePadBlockedTarget(ev.target)) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    movePadPointerId = ev.pointerId;
-    movePadOrigin = { x: ev.clientX, y: ev.clientY };
-    showMovePadAt(ev.clientX, ev.clientY);
-    updateMovePadPointer(ev.clientX, ev.clientY);
+    // El movepad por pointer en desktop interferia con el nuevo control de camara.
+    // Para movil usamos la ruta tactil (touchstart/touchmove/touchend).
+    return;
 }
 
 function movePadPointer(ev) {
@@ -330,16 +602,15 @@ function updateChatVisibility() {
     if (!chatRoot || !chatToggleBtn) return;
     const mobile = isMobileUi();
     if (mobile) {
-        chatToggleBtn.style.display = chatOpen ? 'none' : '';
+        chatToggleBtn.style.display = '';
         chatRoot.style.display = chatOpen ? '' : 'none';
-        if (emotionToggleBtn) emotionToggleBtn.style.display = chatOpen ? 'none' : '';
         if (chatOpen && emotionOpen) closeEmotionPanel();
         chatToggleBtn.textContent = 'Chat';
         requestAnimationFrame(() => applyWorldHudLayout());
         return;
     }
     chatRoot.style.display = chatOpen ? '' : 'none';
-    chatToggleBtn.style.display = chatOpen ? 'none' : '';
+    chatToggleBtn.style.display = '';
     if (emotionToggleBtn) emotionToggleBtn.style.display = '';
     chatToggleBtn.textContent = 'Chat';
     requestAnimationFrame(() => applyWorldHudLayout());
@@ -348,7 +619,9 @@ function updateChatVisibility() {
 function applyWorldHudLayout() {
     if (!actionBarRoot || !chatRoot) return;
     const mobile = isMobileUi();
-    actionBarRoot.style.gridTemplateColumns = mobile ? 'repeat(4, 52px)' : 'repeat(8, 54px)';
+    const slotPx = hotbarSlotSizePx();
+    mountUtilityButtons();
+    actionBarRoot.style.gridTemplateColumns = mobile ? `repeat(4, ${slotPx}px)` : `repeat(8, ${slotPx}px)`;
     actionBarRoot.style.width = 'fit-content';
     actionBarRoot.style.bottom = mobile ? '10px' : '14px';
     actionBarRoot.style.padding = mobile ? '5px' : '6px';
@@ -358,7 +631,47 @@ function applyWorldHudLayout() {
     const barHeight = Math.ceil(actionBarRoot.getBoundingClientRect().height || (mobile ? 148 : 82));
     const barRect = actionBarRoot.getBoundingClientRect();
     const safeGap = mobile ? 10 : 12;
-    const chatBottom = barBottom + barHeight + safeGap;
+    let utilityExtraBottom = 0;
+
+    if (utilityBarRoot) {
+        utilityBarRoot.style.display = 'grid';
+        utilityBarRoot.style.gridTemplateColumns = `repeat(5, ${slotPx}px)`;
+        utilityBarRoot.style.padding = mobile ? '5px' : '6px';
+        utilityBarRoot.style.gap = mobile ? '4px' : '4px';
+        const inlineGap = 8;
+        const viewportW = Math.max(0, window.innerWidth || 0);
+        const sideMargin = 8;
+        const utilWidth = Math.ceil(utilityBarRoot.getBoundingClientRect().width || (5 * slotPx + 30));
+        const leftSpace = Math.max(0, barRect.left - sideMargin);
+        const rightSpace = Math.max(0, viewportW - barRect.right - sideMargin);
+        const canInlineRight = rightSpace >= (utilWidth + inlineGap);
+        const canInlineLeft = leftSpace >= (utilWidth + inlineGap);
+
+        if (canInlineRight || canInlineLeft) {
+            utilityBarRoot.style.transform = 'none';
+            utilityBarRoot.style.bottom = `${barBottom}px`;
+            if (canInlineRight) {
+                utilityBarRoot.style.left = `${Math.round(barRect.right + inlineGap)}px`;
+            } else {
+                utilityBarRoot.style.left = `${Math.round(barRect.left - inlineGap - utilWidth)}px`;
+            }
+            utilityBarRoot.style.right = 'auto';
+        } else {
+            utilityBarRoot.style.left = '50%';
+            utilityBarRoot.style.right = 'auto';
+            utilityBarRoot.style.transform = 'translateX(-50%)';
+            utilityBarRoot.style.bottom = `${barBottom + barHeight + 8}px`;
+            const utilH = Math.ceil(utilityBarRoot.getBoundingClientRect().height || (slotPx + 14));
+            utilityExtraBottom = utilH + 8;
+        }
+    }
+
+    const chatBottom = barBottom + barHeight + safeGap + utilityExtraBottom;
+
+    if (collectBarRoot) {
+        collectBarRoot.style.width = mobile ? 'min(86vw, 340px)' : 'min(44vw, 360px)';
+        collectBarRoot.style.bottom = `${barBottom + barHeight + 10 + utilityExtraBottom}px`;
+    }
 
     if (mobile) {
         chatRoot.style.left = '10px';
@@ -378,73 +691,27 @@ function applyWorldHudLayout() {
         chatMessagesEl.style.height = mobile ? '132px' : '210px';
     }
     if (chatMinBtn) chatMinBtn.textContent = mobile ? 'Cerrar' : 'Min';
-    const btnBottom = barBottom + Math.max(0, Math.round((barHeight - 38) * 0.5));
-    const sideGap = 12;
-    const rowGap = 8;
-    const stackGap = 6;
-    const leftMargin = 10;
-    const chatBtnRect = chatToggleBtn?.getBoundingClientRect();
-    const emoBtnRect = emotionToggleBtn?.getBoundingClientRect();
-    const chatBtnW = Math.ceil(chatBtnRect?.width || 62);
-    const chatBtnH = Math.ceil(chatBtnRect?.height || 38);
-    const emoBtnW = Math.ceil(emoBtnRect?.width || 62);
-    const emoBtnH = Math.ceil(emoBtnRect?.height || 38);
-    const rowWidth = chatBtnW + rowGap + emoBtnW;
-    const colWidth = Math.max(chatBtnW, emoBtnW);
-    const canRowLeft = barRect.left >= (leftMargin + sideGap + rowWidth);
-    const canColLeft = barRect.left >= (leftMargin + sideGap + colWidth);
-    const viewportW = Math.max(0, window.innerWidth || 0);
-    const rightSpace = Math.max(0, viewportW - barRect.right);
-    const canRowRight = rightSpace >= (sideGap + rowWidth + leftMargin);
-    const canColRight = rightSpace >= (sideGap + colWidth + leftMargin);
-    let chatBtnLeft = Math.max(leftMargin, Math.round(barRect.left - sideGap - rowWidth));
-    let emoBtnLeft = chatBtnLeft + chatBtnW + rowGap;
-    let chatBtnBottom = btnBottom;
-    let emoBtnBottom = btnBottom;
 
-    if (canRowLeft) {
-        chatBtnLeft = Math.max(leftMargin, Math.round(barRect.left - sideGap - rowWidth));
-        emoBtnLeft = chatBtnLeft + chatBtnW + rowGap;
-    } else if (canRowRight) {
-        chatBtnLeft = Math.round(barRect.right + sideGap);
-        emoBtnLeft = chatBtnLeft + chatBtnW + rowGap;
-    } else if (canColLeft) {
-        const colLeft = Math.max(leftMargin, Math.round(barRect.left - sideGap - colWidth));
-        chatBtnLeft = colLeft;
-        emoBtnLeft = colLeft;
-        emoBtnBottom = btnBottom + chatBtnH + stackGap;
-    } else if (canColRight) {
-        const colLeft = Math.round(barRect.right + sideGap);
-        chatBtnLeft = colLeft;
-        emoBtnLeft = colLeft;
-        emoBtnBottom = btnBottom + chatBtnH + stackGap;
-    } else {
-        const fallbackLeft = Math.max(leftMargin, Math.round(barRect.left));
-        chatBtnLeft = fallbackLeft;
-        emoBtnLeft = fallbackLeft;
-        chatBtnBottom = barBottom + barHeight + safeGap;
-        emoBtnBottom = chatBtnBottom + chatBtnH + stackGap;
+    if (worldPanel?.el) worldPanel.el.style.display = 'none';
+    if (worldLeaveBtn?.el) {
+        worldLeaveBtn.el.style.opacity = mobile ? '0.88' : '0.94';
+    }
+    if (worldRuntimeLabel?.el) {
+        worldRuntimeLabel.el.style.fontSize = mobile ? '11px' : '12px';
+        worldRuntimeLabel.el.style.opacity = mobile ? '0.82' : '0.9';
     }
 
-    if (chatToggleBtn) {
-        chatToggleBtn.style.left = `${chatBtnLeft}px`;
-        chatToggleBtn.style.bottom = `${chatBtnBottom}px`;
-        chatToggleBtn.style.top = 'auto';
-        chatToggleBtn.style.right = 'auto';
-    }
-    if (emotionToggleBtn) {
-        emotionToggleBtn.style.top = 'auto';
-        emotionToggleBtn.style.bottom = `${emoBtnBottom}px`;
-        emotionToggleBtn.style.left = `${emoBtnLeft}px`;
-        emotionToggleBtn.style.right = 'auto';
-    }
+    if (inventoryUi) inventoryUi.refreshLayout();
     if (emotionPanel) {
         const panelRect = emotionPanel.getBoundingClientRect();
         const panelW = Math.ceil(panelRect?.width || 190);
+        const utilRect = utilityBarRoot?.getBoundingClientRect();
+        const desiredLeft = Math.round(utilRect?.left || 10);
         const maxPanelLeft = Math.max(10, Math.round((window.innerWidth || 0) - panelW - 10));
-        const panelLeft = Math.max(10, Math.min(emoBtnLeft, maxPanelLeft));
+        const panelLeft = Math.max(10, Math.min(desiredLeft, maxPanelLeft));
+        const panelBottom = utilRect ? Math.max(16, Math.round(window.innerHeight - utilRect.top + 8)) : (barBottom + barHeight + 16);
         emotionPanel.style.top = 'auto';
-        emotionPanel.style.bottom = `${emoBtnBottom + emoBtnH + 8}px`;
+        emotionPanel.style.bottom = `${panelBottom}px`;
         emotionPanel.style.left = `${panelLeft}px`;
         emotionPanel.style.right = 'auto';
     }
@@ -474,38 +741,35 @@ function createActionBarUi(host) {
     bar.style.boxShadow = '0 8px 18px rgba(0,0,0,0.32)';
     bar.style.backdropFilter = 'blur(2px)';
     bar.style.display = 'grid';
-    bar.style.gridTemplateColumns = isMobileUi() ? 'repeat(4, 52px)' : 'repeat(8, 54px)';
+    const slotPx = hotbarSlotSizePx();
+    bar.style.gridTemplateColumns = isMobileUi() ? `repeat(4, ${slotPx}px)` : `repeat(8, ${slotPx}px)`;
     bar.style.gap = '4px';
     bar.style.width = 'fit-content';
-
-    const skills = ['Golpe', 'Carga', 'Escudo', 'Corte', 'Aura', 'Dash', 'Pocion', 'Totem'];
     actionSlots = [];
-    skills.forEach((skill, idx) => {
+    actionSlotLabels = [];
+    for (let idx = 0; idx < 8; idx += 1) {
         const slot = document.createElement('button');
         slot.type = 'button';
-        slot.dataset.skill = skill;
+        slot.dataset.slotIndex = `${idx}`;
         slot.style.position = 'relative';
-        slot.style.width = isMobileUi() ? '52px' : '54px';
-        slot.style.height = isMobileUi() ? '52px' : '54px';
+        slot.style.width = `${slotPx}px`;
+        slot.style.height = `${slotPx}px`;
         slot.style.borderRadius = '8px';
         slot.style.border = '1px solid rgba(176, 208, 237, 0.4)';
         slot.style.background = 'linear-gradient(180deg, rgba(19,44,76,0.92), rgba(12,28,49,0.95))';
         slot.style.color = '#e9f3ff';
-        slot.style.fontSize = isMobileUi() ? '10px' : '10px';
-        slot.style.fontWeight = '700';
         slot.style.cursor = 'pointer';
-        slot.style.display = 'flex';
-        slot.style.alignItems = 'flex-end';
-        slot.style.justifyContent = 'center';
         slot.style.padding = '3px';
         slot.style.overflow = 'hidden';
-        slot.style.textAlign = 'center';
-        slot.style.lineHeight = '1.05';
         slot.style.transition = 'transform 0.12s ease';
-        slot.textContent = skill;
-        const key = `${idx + 1}`;
+        slot.style.display = 'flex';
+        slot.style.alignItems = 'center';
+        slot.style.justifyContent = 'center';
+        slot.style.touchAction = 'manipulation';
+        slot.addEventListener('click', () => useActionSlot(idx));
+
         const keyTag = document.createElement('span');
-        keyTag.textContent = key;
+        keyTag.textContent = `${idx + 1}`;
         keyTag.style.position = 'absolute';
         keyTag.style.left = '4px';
         keyTag.style.top = '3px';
@@ -514,12 +778,56 @@ function createActionBarUi(host) {
         keyTag.style.opacity = '0.9';
         keyTag.style.color = '#9fd5ff';
         slot.appendChild(keyTag);
-        slot.addEventListener('click', () => useActionSlot(idx));
+
+        const label = document.createElement('div');
+        label.style.position = 'absolute';
+        label.style.left = '2px';
+        label.style.right = '2px';
+        label.style.bottom = '2px';
+        label.style.fontSize = '9px';
+        label.style.lineHeight = '1.05';
+        label.style.textAlign = 'center';
+        label.style.fontWeight = '700';
+        label.style.color = '#e9f3ff';
+        label.style.textShadow = '0 1px 2px rgba(0,0,0,0.7)';
+        slot.appendChild(label);
+
+        const qty = document.createElement('div');
+        qty.style.position = 'absolute';
+        qty.style.right = '4px';
+        qty.style.top = '3px';
+        qty.style.fontSize = '10px';
+        qty.style.fontWeight = '800';
+        qty.style.color = '#dff8ff';
+        qty.style.textShadow = '0 1px 2px rgba(0,0,0,0.9)';
+        slot.appendChild(qty);
+
         actionSlots.push(slot);
+        actionSlotLabels.push({ label, qty });
         bar.appendChild(slot);
-    });
+    }
     host.appendChild(bar);
+    if (inventoryUi) inventoryUi.bindActionBar(actionSlots, actionSlotLabels);
     requestAnimationFrame(() => applyWorldHudLayout());
+}
+
+function createInventoryUi(host) {
+    if (inventoryUi) return;
+    inventoryUi = new InventoryUi({
+        isMobileUi,
+        getSlotSizePx: hotbarSlotSizePx,
+        onRefreshRequested: refreshInventory,
+        onUseSlot: useActionSlot,
+        onMove: inventoryMove,
+        onSplit: inventorySplit,
+        onShiftClick: inventoryShiftClick,
+        onNoSplitTarget: () => UIToast.show('No hay destino para dividir stack', 'warning', 1100),
+        onOpenChanged: () => requestAnimationFrame(() => applyWorldHudLayout()),
+    });
+    inventoryUi.createUi(host);
+    inventoryUi.bindActionBar(actionSlots, actionSlotLabels);
+    if (pendingInventoryPayload) applyInventoryPayload(pendingInventoryPayload);
+    mountUtilityButtons();
 }
 
 function createMovePadUi(host) {
@@ -645,6 +953,196 @@ function createEmotionUi(host) {
 
     host.appendChild(emotionToggleBtn);
     host.appendChild(emotionPanel);
+    mountUtilityButtons();
+}
+
+function createCollectUi(host) {
+    if (collectBarRoot) return;
+    collectBarRoot = document.createElement('div');
+    collectBarRoot.style.position = 'fixed';
+    collectBarRoot.style.left = '50%';
+    collectBarRoot.style.bottom = '92px';
+    collectBarRoot.style.transform = 'translateX(-50%)';
+    collectBarRoot.style.zIndex = '43';
+    collectBarRoot.style.display = 'none';
+    collectBarRoot.style.width = isMobileUi() ? 'min(86vw, 340px)' : 'min(44vw, 360px)';
+    collectBarRoot.style.maxWidth = '360px';
+    collectBarRoot.style.padding = '8px 10px';
+    collectBarRoot.style.borderRadius = '10px';
+    collectBarRoot.style.background = 'rgba(7, 16, 31, 0.92)';
+    collectBarRoot.style.border = '1px solid rgba(149, 181, 212, 0.38)';
+    collectBarRoot.style.boxShadow = '0 8px 18px rgba(0,0,0,0.3)';
+    collectBarRoot.style.backdropFilter = 'blur(2px)';
+    collectBarRoot.style.pointerEvents = 'none';
+
+    collectBarLabel = document.createElement('div');
+    collectBarLabel.textContent = 'Recolectando... 0%';
+    collectBarLabel.style.fontSize = '12px';
+    collectBarLabel.style.fontWeight = '700';
+    collectBarLabel.style.color = '#dff5ff';
+    collectBarLabel.style.marginBottom = '6px';
+    collectBarRoot.appendChild(collectBarLabel);
+
+    const track = document.createElement('div');
+    track.style.width = '100%';
+    track.style.height = '10px';
+    track.style.borderRadius = '999px';
+    track.style.overflow = 'hidden';
+    track.style.background = 'rgba(37, 54, 79, 0.92)';
+    track.style.border = '1px solid rgba(143, 176, 207, 0.34)';
+
+    collectBarFill = document.createElement('div');
+    collectBarFill.style.width = '0%';
+    collectBarFill.style.height = '100%';
+    collectBarFill.style.borderRadius = '999px';
+    collectBarFill.style.background = 'linear-gradient(90deg, #55d08b, #8cf0b5)';
+    collectBarFill.style.transition = 'width 0.05s linear';
+    track.appendChild(collectBarFill);
+    collectBarRoot.appendChild(track);
+
+    host.appendChild(collectBarRoot);
+}
+
+function biomePresentation(biomeRaw) {
+    const b = (biomeRaw || '').toString().toLowerCase();
+    const map = {
+        grass: {
+            title: 'Bioma de la Pradera',
+            subtitle: 'Campos vivos y viento sereno.',
+            color: '#68d98c',
+        },
+        earth: {
+            title: 'Bioma de la Tierra',
+            subtitle: 'Suelo antiguo y energia estable.',
+            color: '#d9b36a',
+        },
+        stone: {
+            title: 'Bioma de la Piedra',
+            subtitle: 'Roca firme y eco mineral.',
+            color: '#98a9bc',
+        },
+        fire: {
+            title: 'Bioma del Fuego',
+            subtitle: 'Calor intenso y brasas eternas.',
+            color: '#ff8a4d',
+        },
+        wind: {
+            title: 'Bioma del Trueno',
+            subtitle: 'El aire vibra con energia electrica.',
+            color: '#f2da58',
+        },
+        bridge: {
+            title: 'Bioma del Agua',
+            subtitle: 'Bruma humeda y corrientes profundas.',
+            color: '#61c7ff',
+        },
+    };
+    return map[b] || {
+        title: `Bioma: ${biomeRaw || 'Desconocido'}`,
+        subtitle: 'Territorio inexplorado.',
+        color: '#9ec3e9',
+    };
+}
+
+function createBiomeBannerUi(host) {
+    if (biomeBannerRoot) return;
+    const root = document.createElement('div');
+    biomeBannerRoot = root;
+    root.style.position = 'fixed';
+    root.style.left = '50%';
+    root.style.top = '18px';
+    root.style.transform = 'translate(-50%, -8px)';
+    root.style.zIndex = '44';
+    root.style.display = 'none';
+    root.style.opacity = '0';
+    root.style.pointerEvents = 'none';
+    root.style.minWidth = '240px';
+    root.style.maxWidth = 'min(86vw, 520px)';
+    root.style.padding = '10px 16px';
+    root.style.borderRadius = '13px';
+    root.style.background = 'rgba(8, 18, 34, 0.86)';
+    root.style.border = '1px solid rgba(150, 197, 233, 0.45)';
+    root.style.boxShadow = '0 8px 22px rgba(0,0,0,0.35)';
+    root.style.backdropFilter = 'blur(3px)';
+    root.style.textAlign = 'center';
+    root.style.transition = 'opacity 180ms ease, transform 180ms ease';
+
+    const title = document.createElement('div');
+    biomeBannerTitle = title;
+    title.style.fontSize = isMobileUi() ? '18px' : '20px';
+    title.style.fontWeight = '800';
+    title.style.lineHeight = '1.05';
+    title.style.letterSpacing = '0.2px';
+
+    const sub = document.createElement('div');
+    biomeBannerSub = sub;
+    sub.style.marginTop = '4px';
+    sub.style.fontSize = isMobileUi() ? '12px' : '13px';
+    sub.style.fontWeight = '600';
+    sub.style.color = '#d9ebff';
+    sub.style.opacity = '0.95';
+
+    root.appendChild(title);
+    root.appendChild(sub);
+    host.appendChild(root);
+}
+
+function showBiomeBanner(biomeKeyRaw) {
+    if (!biomeBannerRoot || !biomeBannerTitle || !biomeBannerSub) return;
+    const biomeKey = (biomeKeyRaw || '').toString().toLowerCase();
+    if (!biomeKey || biomeKey === 'void') return;
+    const now = performance.now();
+    if (biomeBannerLastBiome === biomeKey && (now - biomeBannerLastAt) < 800) return;
+    biomeBannerLastBiome = biomeKey;
+    biomeBannerLastAt = now;
+
+    const p = biomePresentation(biomeKey);
+    biomeBannerTitle.textContent = p.title;
+    biomeBannerSub.textContent = p.subtitle;
+    biomeBannerTitle.style.color = p.color;
+    biomeBannerRoot.style.borderColor = `${p.color}88`;
+    biomeBannerRoot.style.top = isMobileUi() ? '12px' : '18px';
+    biomeBannerRoot.style.display = '';
+    biomeBannerRoot.style.opacity = '0';
+    biomeBannerRoot.style.transform = 'translate(-50%, -8px)';
+    requestAnimationFrame(() => {
+        if (!biomeBannerRoot) return;
+        biomeBannerRoot.style.opacity = '1';
+        biomeBannerRoot.style.transform = 'translate(-50%, 0)';
+    });
+
+    if (biomeBannerHideTimer) clearTimeout(biomeBannerHideTimer);
+    biomeBannerHideTimer = setTimeout(() => {
+        if (!biomeBannerRoot) return;
+        biomeBannerRoot.style.opacity = '0';
+        biomeBannerRoot.style.transform = 'translate(-50%, -8px)';
+        setTimeout(() => {
+            if (!biomeBannerRoot) return;
+            biomeBannerRoot.style.display = 'none';
+        }, 210);
+        biomeBannerHideTimer = null;
+    }, 5000);
+}
+
+function updateCollectUi() {
+    if (!collectBarRoot || !collectBarFill || !collectBarLabel) return;
+    if (clientState !== 'IN_WORLD') {
+        collectBarRoot.style.display = 'none';
+        return;
+    }
+    const state = simple3D.getVegetationCollectUiState?.() || {};
+    const active = !!state.active;
+    const pct = Math.max(0, Math.min(100, Math.round((Number(state.progress) || 0) * 100)));
+
+    if (!active) {
+        collectBarRoot.style.display = 'none';
+        collectBarFill.style.width = '0%';
+        collectBarLabel.textContent = 'Recolectando... 0%';
+        return;
+    }
+    collectBarRoot.style.display = '';
+    collectBarFill.style.width = `${pct}%`;
+    collectBarLabel.textContent = `Recolectando... ${pct}%`;
 }
 
 function createChatUi(host) {
@@ -785,6 +1283,7 @@ function createChatUi(host) {
 
     host.appendChild(panel);
     host.appendChild(chatToggleBtn);
+    mountUtilityButtons();
     requestAnimationFrame(() => applyWorldHudLayout());
     updateChatVisibility();
 }
@@ -793,8 +1292,12 @@ function ensureWorldHud() {
     if (worldHudReady) return;
     const host = document.body;
     createActionBarUi(host);
+    createUtilityBarUi(host);
     createChatUi(host);
     createEmotionUi(host);
+    createCollectUi(host);
+    createBiomeBannerUi(host);
+    createInventoryUi(host);
     createMovePadUi(host);
 
     window.addEventListener('resize', () => {
@@ -807,9 +1310,14 @@ function ensureWorldHud() {
         const target = ev.target;
         const tag = (target?.tagName || '').toLowerCase();
         if (tag === 'input' || tag === 'textarea') return;
+        if (ev.key.toLowerCase() === 'i') {
+            inventoryUi?.toggleOpen?.();
+            return;
+        }
         if (!/^[1-8]$/.test(ev.key)) return;
         const idx = Number(ev.key) - 1;
-        if (idx >= 0 && idx < actionSlots.length) useActionSlot(idx);
+        const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || 8);
+        if (idx >= 0 && idx < hotbarSlots) useActionSlot(idx);
     });
     window.addEventListener('pointerdown', startMovePadPointer, { passive: false });
     window.addEventListener('pointermove', movePadPointer, { passive: false });
@@ -819,6 +1327,7 @@ function ensureWorldHud() {
     window.addEventListener('touchmove', movePadTouch, { passive: false });
     window.addEventListener('touchend', endMovePadTouch, { passive: false });
     window.addEventListener('touchcancel', endMovePadTouch, { passive: false });
+    window.addEventListener('pointerdown', tryCollectDecorFromPointer, true);
     window.addEventListener('click', suppressGhostClickFromMovePad, true);
     window.addEventListener('contextmenu', suppressLongPressUiGestures, true);
     window.addEventListener('selectstart', suppressLongPressUiGestures, true);
@@ -830,10 +1339,18 @@ function setWorldHudVisible(visible) {
     ensureWorldHud();
     setWorldTouchInteractionMode(!!visible);
     if (actionBarRoot) actionBarRoot.style.display = visible ? 'grid' : 'none';
+    if (utilityBarRoot) utilityBarRoot.style.display = visible ? 'grid' : 'none';
     if (chatRoot) chatRoot.style.display = visible ? '' : 'none';
     if (chatToggleBtn) chatToggleBtn.style.display = visible ? '' : 'none';
     if (emotionToggleBtn) emotionToggleBtn.style.display = visible ? '' : 'none';
+    if (inventoryUi) inventoryUi.setVisible(visible);
     if (emotionPanel) emotionPanel.style.display = visible && emotionOpen ? 'grid' : 'none';
+    if (collectBarRoot) collectBarRoot.style.display = 'none';
+    if (biomeBannerRoot) biomeBannerRoot.style.display = 'none';
+    if (biomeBannerHideTimer) {
+        clearTimeout(biomeBannerHideTimer);
+        biomeBannerHideTimer = null;
+    }
     if (movePadRoot) movePadRoot.style.display = 'none';
     if (visible) {
         chatOpen = !isMobileUi();
@@ -841,6 +1358,7 @@ function setWorldHudVisible(visible) {
         applyWorldHudLayout();
         updateChatVisibility();
     } else {
+        inventoryUi?.close?.();
         resetMovePadInteraction();
         closeEmotionPanel();
     }
@@ -852,7 +1370,7 @@ function setWorldUiMode(inWorld) {
     if (statusLabel) statusLabel.visible = showAuth;
     if (currentUserLabel) currentUserLabel.visible = showAuth;
     if (authTabs) authTabs.visible = showAuth;
-    if (worldPanel) worldPanel.visible = inWorld;
+    if (worldPanel) worldPanel.visible = false;
     setWorldHudVisible(inWorld);
 }
 
@@ -870,12 +1388,15 @@ function showWorldPanel(payload) {
         world: payload.world,
         player: payload.player,
         spawn: payload.spawn,
-        terrainConfig: payload.terrain_config
+        terrainConfig: payload.terrain_config,
+        decor: payload.decor,
+        worldLoot: payload.world_loot
     });
     simple3D.setEmoticon(payload?.player?.active_emotion || 'neutral', 0);
     simple3D.setLocalPlayerId(payload?.player?.id);
     const others = Array.isArray(payload?.other_players) ? payload.other_players : [];
     others.forEach((p) => simple3D.upsertRemotePlayer(p));
+    applyInventoryPayload(payload?.inventory || null);
     setWorldUiMode(true);
 
     if (worldHeadLabel) {
@@ -942,12 +1463,17 @@ async function ensureConnected(url) {
                 id: p.id,
                 username: p.username || `P${p.id}`,
                 rol: p.rol || 'user',
+                model_key: p.model_key || '',
                 character_class: p.character_class || 'rogue',
                 active_emotion: p.active_emotion || 'neutral',
+                animation_state: p.animation_state || 'idle',
                 position: p.position || { x: 0, y: 60, z: 0 }
             });
             if (p.position) {
                 simple3D.setRemotePlayerTarget(p.id, p.position);
+            }
+            if (p.animation_state) {
+                simple3D.setRemotePlayerAnimationState?.(p.id, p.animation_state);
             }
             const username = p.username;
             if (username) addChatLine(`${username} entro al mundo.`, 'system');
@@ -959,12 +1485,15 @@ async function ensureConnected(url) {
                     id: p.id,
                     username: p.username || `P${p.id}`,
                     rol: p.rol || 'user',
+                    model_key: p.model_key || '',
                     character_class: p.character_class || 'rogue',
                     active_emotion: p.active_emotion || 'neutral',
+                    animation_state: p.animation_state || 'idle',
                     position: p.position || { x: 0, y: 60, z: 0 }
                 });
             }
-            simple3D.setRemotePlayerTarget(p.id, p.position);
+            if (p.position) simple3D.setRemotePlayerTarget(p.id, p.position);
+            if (p.animation_state) simple3D.setRemotePlayerAnimationState?.(p.id, p.animation_state);
         });
         ws.on('world_player_class_changed', (msg) => {
             const p = msg?.payload || {};
@@ -986,6 +1515,39 @@ async function ensureConnected(url) {
             }
             simple3D.setRemotePlayerEmotion(p.id, p.emotion || 'neutral', Number(p.duration_ms) || 0);
         });
+        ws.on('world_decor_removed', (msg) => {
+            const p = msg?.payload || {};
+            if (!p?.key) return;
+            if (simple3D.removeDecorByKey) simple3D.removeDecorByKey(p.key);
+        });
+        ws.on('world_decor_respawned', (msg) => {
+            const p = msg?.payload || {};
+            const keys = Array.isArray(p?.keys) ? p.keys : [];
+            if (keys.length === 0) return;
+            if (simple3D.respawnDecorKeys) simple3D.respawnDecorKeys(keys);
+        });
+        ws.on('world_decor_regenerated', (msg) => {
+            const p = msg?.payload || {};
+            const slots = Array.isArray(p?.slots) ? p.slots : [];
+            const removed = Array.isArray(p?.removed) ? p.removed : [];
+            if (simple3D.replaceWorldDecor) simple3D.replaceWorldDecor(slots, removed);
+        });
+        ws.on('world_loot_spawned', (msg) => {
+            const p = msg?.payload || {};
+            const entities = Array.isArray(p?.entities) ? p.entities : [];
+            if (entities.length === 0) return;
+            simple3D.applyWorldLootSpawned?.(entities);
+        });
+        ws.on('world_loot_removed', (msg) => {
+            const p = msg?.payload || {};
+            const key = (p?.key || '').toString();
+            if (!key) return;
+            if (key === '__all__') {
+                simple3D.replaceWorldLoot?.([]);
+                return;
+            }
+            simple3D.removeWorldLootKey?.(key);
+        });
         ws.on('world_chat_message', (msg) => {
             const p = msg?.payload || {};
             const username = p?.username || 'desconocido';
@@ -996,8 +1558,9 @@ async function ensureConnected(url) {
 
         ws.socket.onclose = () => {
             setStatus('Conexion WS cerrada', 0xe67e22);
-            if (clientState === 'IN_WORLD') {
+            if (clientState === 'IN_WORLD' || clientState === 'CHAR_SELECT') {
                 hideWorldPanel();
+                hideCharacterSelect();
                 setCurrentUser('Usuario actual: ninguno', 0x3498db);
                 setClientState('AUTH', 'Conexion perdida, vuelve a iniciar sesion');
             }
@@ -1013,26 +1576,258 @@ async function ensureConnected(url) {
     }
 }
 
-async function enterWorld() {
+function setCharacterUiVisible(visible) {
+    if (authTabs) authTabs.visible = !visible;
+    if (characterPanelEl) characterPanelEl.style.display = visible ? '' : 'none';
+    if (rootLayout?.refresh) rootLayout.refresh();
+}
+
+function normalizeCharacterSelectPayload(payload) {
+    const data = payload || {};
+    const maxSlotsRaw = Number(data.max_slots);
+    const maxSlots = Number.isFinite(maxSlotsRaw) ? Math.max(1, Math.min(8, Math.floor(maxSlotsRaw))) : 3;
+    const charsIn = Array.isArray(data.characters) ? data.characters : [];
+    const chars = charsIn.map((r) => ({
+        id: Number(r?.id) || 0,
+        slot_index: Number(r?.slot_index) || 0,
+        char_name: (r?.char_name || '').toString(),
+        model_key: (r?.model_key || '').toString(),
+    })).filter((r) => r.id > 0);
+    chars.sort((a, b) => a.slot_index - b.slot_index);
+    const cat = data.catalog || {};
+    const models = Array.isArray(cat.models) ? cat.models.map((x) => (x || '').toString()).filter(Boolean) : [];
+    return { maxSlots, characters: chars, catalog: { models } };
+}
+
+function resolveCharacterRowBySlot(slotIndex) {
+    const idx = Number(slotIndex) || 0;
+    return characterRows.find((r) => Number(r.slot_index) === idx) || null;
+}
+
+function findCharacterSlotIndexById(characterId) {
+    const row = characterRows.find((r) => Number(r.id) === Number(characterId)) || null;
+    return row ? (Number(row.slot_index) || 0) : -1;
+}
+
+function layoutCharacterCreateModal() {
+    if (!characterCreateModalEl) return;
+    const mobile = isMobileUi() || (window.innerWidth || 0) < 980;
+    if (mobile) {
+        characterCreateModalEl.style.left = '50%';
+        characterCreateModalEl.style.right = 'auto';
+        characterCreateModalEl.style.top = '50%';
+        characterCreateModalEl.style.bottom = 'auto';
+        characterCreateModalEl.style.transform = 'translate(-50%, -50%)';
+        characterCreateModalEl.style.width = 'min(460px, calc(100vw - 40px))';
+        return;
+    }
+    characterCreateModalEl.style.left = 'auto';
+    characterCreateModalEl.style.right = '24px';
+    characterCreateModalEl.style.top = '86px';
+    characterCreateModalEl.style.bottom = 'auto';
+    characterCreateModalEl.style.transform = 'none';
+    characterCreateModalEl.style.width = '420px';
+}
+
+function destroyCharacterSelectScene3d() {
+    if (!characterSelect3d) return;
+    characterSelect3d.destroy();
+    characterSelect3d = null;
+}
+
+function initCharacterSelectScene3d() {
+    if (characterSelect3d || !characterSceneWrapEl) return;
+    characterSelect3d = new CharacterSelectScene({
+        container: characterSceneWrapEl,
+        onSlotSelected: (slotInfo) => {
+            if (characterCreateModalEl && characterCreateModalEl.style.display !== 'none') {
+                characterCreateModalEl.style.display = 'none';
+            }
+            characterSelectedSlotIndex = Number(slotInfo?.idx) || 0;
+            characterSelectedId = slotInfo?.row ? Number(slotInfo.row.id) : null;
+            renderCharacterCards();
+        },
+    });
+}
+
+function refreshCharacterVisualPreview() {
+    if (characterModelValueEl) {
+        characterModelValueEl.textContent = (characterModelSelectEl?.value || '').toString().trim() || 'Sin modelos';
+    }
+    const selectedRow = resolveCharacterRowBySlot(characterSelectedSlotIndex);
+    const modalOpen = !!(characterCreateModalEl && characterCreateModalEl.style.display !== 'none');
+    if (!selectedRow && modalOpen) {
+        renderCharacterCards();
+    }
+}
+
+function refreshCharacterModelChooserUi() {
+    const hasModels = !!(characterModelSelectEl && characterModelSelectEl.options.length > 0);
+    const modelKey = (characterModelSelectEl?.value || '').toString().trim();
+    if (characterModelValueEl) {
+        characterModelValueEl.textContent = hasModels ? modelKey : 'Sin modelos';
+        characterModelValueEl.style.opacity = hasModels ? '1' : '0.7';
+    }
+    if (characterModelPrevBtnEl) characterModelPrevBtnEl.disabled = !hasModels;
+    if (characterModelNextBtnEl) characterModelNextBtnEl.disabled = !hasModels;
+}
+
+function shiftCharacterModel(step = 1) {
+    if (!characterModelSelectEl) return;
+    const total = Number(characterModelSelectEl.options?.length || 0);
+    if (total <= 0) {
+        refreshCharacterModelChooserUi();
+        refreshCharacterVisualPreview();
+        return;
+    }
+    const raw = Number(characterModelSelectEl.selectedIndex);
+    const cur = Number.isFinite(raw) && raw >= 0 ? raw : 0;
+    const next = ((cur + Number(step || 0)) % total + total) % total;
+    characterModelSelectEl.selectedIndex = next;
+    refreshCharacterModelChooserUi();
+    refreshCharacterVisualPreview();
+}
+
+function syncCharacterInputsFromSelected() {
+    const selected = characterRows.find((r) => Number(r.id) === Number(characterSelectedId)) || null;
+    if (selected) {
+        if (characterNameInputEl) characterNameInputEl.value = selected.char_name || '';
+        if (characterModelSelectEl && selected.model_key) characterModelSelectEl.value = selected.model_key;
+    } else {
+        if (characterModelSelectEl && characterModelSelectEl.options.length > 0 && !characterModelSelectEl.value) {
+            characterModelSelectEl.selectedIndex = 0;
+        }
+    }
+    refreshCharacterModelChooserUi();
+    refreshCharacterVisualPreview();
+}
+
+function refreshCharacterSelectInputs() {
+    if (!characterModelSelectEl) return;
+    characterModelSelectEl.innerHTML = '';
+    characterCatalog.models.forEach((m) => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        characterModelSelectEl.appendChild(opt);
+    });
+    syncCharacterInputsFromSelected();
+    refreshCharacterModelChooserUi();
+}
+
+function renderCharacterCards() {
+    initCharacterSelectScene3d();
+    if (characterSelectedId != null) {
+        const slotFromId = findCharacterSlotIndexById(characterSelectedId);
+        if (slotFromId >= 0) characterSelectedSlotIndex = slotFromId;
+    }
+    const selectedRow = resolveCharacterRowBySlot(characterSelectedSlotIndex);
+    if (selectedRow) characterSelectedId = Number(selectedRow.id);
+    else characterSelectedId = null;
+
+    if (characterSceneInfoEl) {
+        if (selectedRow) {
+            characterSceneInfoEl.textContent = `Slot ${Number(characterSelectedSlotIndex) + 1}: ${selectedRow.char_name} | ${selectedRow.model_key}`;
+        } else {
+            characterSceneInfoEl.textContent = `Slot ${Number(characterSelectedSlotIndex) + 1}: vacio`;
+        }
+    }
+    if (characterDeleteBtnEl) characterDeleteBtnEl.style.display = selectedRow ? '' : 'none';
+    if (characterCreateBtnEl) characterCreateBtnEl.style.display = selectedRow ? 'none' : '';
+    if (characterEnterBtnEl) {
+        characterEnterBtnEl.disabled = !(Number(characterSelectedId) > 0);
+        characterEnterBtnEl.style.opacity = characterEnterBtnEl.disabled ? '0.55' : '1';
+    }
+
+    if (!characterSelect3d) return;
+    const modalOpen = !!(characterCreateModalEl && characterCreateModalEl.style.display !== 'none');
+    const previewModelKey = (characterModelSelectEl?.value || '').toString().trim();
+    const slotsData = [0, 1, 2].map((idx) => {
+        const row = resolveCharacterRowBySlot(idx);
+        const isPreviewSlot = (!row
+            && modalOpen
+            && Number(idx) === Number(characterSelectedSlotIndex)
+            && !!previewModelKey);
+        const modelKey = (row?.model_key || (isPreviewSlot ? previewModelKey : '')).toString().trim();
+        return { idx, row, modelKey, isPreview: isPreviewSlot };
+    });
+    characterSelect3d.setSelectedSlot(characterSelectedSlotIndex);
+    characterSelect3d.setSlots(slotsData);
+}
+
+function applyCharacterSelectPayload(payload) {
+    const data = normalizeCharacterSelectPayload(payload);
+    characterMaxSlots = data.maxSlots;
+    characterCatalog = data.catalog;
+    characterRows = data.characters;
+    const keepId = characterRows.some((r) => Number(r.id) === Number(characterSelectedId));
+    if (!keepId) {
+        const fallbackRow = resolveCharacterRowBySlot(characterSelectedSlotIndex) || characterRows[0] || null;
+        characterSelectedId = fallbackRow ? Number(fallbackRow.id) : null;
+    }
+    if (characterSelectedId != null) {
+        const slotFromId = findCharacterSlotIndexById(characterSelectedId);
+        if (slotFromId >= 0) characterSelectedSlotIndex = slotFromId;
+    } else {
+        characterSelectedSlotIndex = Math.max(0, Math.min(2, Number(characterSelectedSlotIndex) || 0));
+    }
+    refreshCharacterSelectInputs();
+    renderCharacterCards();
+    syncCharacterInputsFromSelected();
+}
+
+async function refreshCharacterList() {
+    if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) return;
+    try {
+        const resp = await new NetMessage('character_list').send();
+        if (!resp?.payload?.ok) return;
+        applyCharacterSelectPayload(resp?.payload?.character_select || null);
+    } catch (err) {
+        console.warn('character_list error', err);
+    }
+}
+
+function showCharacterSelect(payload) {
+    applyCharacterSelectPayload(payload || null);
+    setWorldUiMode(false);
+    setCharacterUiVisible(true);
+    layoutCharacterCreateModal();
+    initCharacterSelectScene3d();
+    renderCharacterCards();
+    setClientState('CHAR_SELECT');
+}
+
+function hideCharacterSelect() {
+    destroyCharacterSelectScene3d();
+    setCharacterUiVisible(false);
+}
+
+async function enterWorld(characterId = null) {
     if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) {
         UIToast.show('No hay conexion activa', 'error');
         return false;
     }
+    const charIdNum = Number(characterId || 0);
+    if (!Number.isFinite(charIdNum) || charIdNum <= 0) {
+        UIToast.show('Debes seleccionar un personaje', 'warning', 1400);
+        return false;
+    }
     setClientState('LOADING_WORLD');
     try {
-        const resp = await new NetMessage('enter_world').send();
+        const resp = await new NetMessage('enter_world').set('character_id', charIdNum).send();
         if (!resp?.payload?.ok) {
-            setClientState('AUTH', 'No se pudo entrar al mundo');
+            setClientState('CHAR_SELECT', 'No se pudo entrar al mundo');
             UIToast.show(resp?.payload?.error || 'enter_world fallo', 'error', 3500);
             return false;
         }
         applyNetworkConfig(resp?.payload?.network_config);
+        hideCharacterSelect();
         showWorldPanel(resp.payload);
         UIToast.show(`Entraste a ${resp.payload.world.world_name}`, 'success');
         return true;
     } catch (err) {
         console.error(err);
-        setClientState('AUTH', 'Error al entrar al mundo');
+        setClientState('CHAR_SELECT', 'Error al entrar al mundo');
         UIToast.show('Error de red durante enter_world', 'error');
         return false;
     }
@@ -1047,6 +1842,7 @@ async function performLogout() {
         }
     }
     hideWorldPanel();
+    hideCharacterSelect();
     setCurrentUser('Usuario actual: ninguno', 0x3498db);
     setClientState('AUTH', 'Sesion cerrada');
     UIToast.show('Sesion cerrada', 'info');
@@ -1056,6 +1852,7 @@ export function setup() {
     const defaultWsUrl = getDetectedWsUrl();
     const root = new UIColumn({ gap: 16 });
     rootLayout = root;
+    authRoot = root;
     root.el.style.width = 'min(560px, calc(100vw - 36px))';
     root.el.style.maxWidth = '560px';
     root.el.style.pointerEvents = 'auto';
@@ -1120,7 +1917,7 @@ export function setup() {
                 const user = resp.payload.user || {};
                 setCurrentUser(`Usuario actual: ${user.username || username}`, 0x2ecc71);
                 UIToast.show('Login correcto', 'success');
-                await enterWorld();
+                showCharacterSelect(resp?.payload?.character_select || null);
             } else {
                 UIToast.show(resp?.payload?.error || 'Login fallido', 'error', 3500);
             }
@@ -1212,37 +2009,378 @@ export function setup() {
     authTabs.addTab('Registro', registerCol);
     root.addItem(authTabs);
 
-    worldPanel = new UIColumn({ gap: 7, localPadding: 10 });
-    worldPanel.el.style.background = 'rgba(8, 20, 34, 0.72)';
-    worldPanel.el.style.border = '1px solid rgba(150, 198, 232, 0.35)';
-    worldPanel.el.style.borderRadius = '11px';
-    worldPanel.el.style.backdropFilter = 'blur(2px)';
-    worldPanel.el.style.width = 'min(340px, calc(100vw - 24px))';
-    worldPanel.el.style.maxWidth = '340px';
-    worldPanel.el.style.marginTop = '6px';
-    worldHeadLabel = new UILabel('lbl_world_head', 'Mundo: -', 18, 0x73d5b4, true);
-    worldPlayerLabel = new UILabel('lbl_world_player', 'Jugador: -', 14, 0xeaf3ff, false);
+    characterPanelEl = document.createElement('div');
+    characterPanelEl.style.display = 'none';
+    characterPanelEl.style.position = 'fixed';
+    characterPanelEl.style.left = '0';
+    characterPanelEl.style.top = '0';
+    characterPanelEl.style.width = '100vw';
+    characterPanelEl.style.height = '100vh';
+    characterPanelEl.style.background = 'linear-gradient(180deg, #0c132a 0%, #142642 55%, #101d34 100%)';
+    characterPanelEl.style.color = '#e5f2ff';
+    characterPanelEl.style.zIndex = '40';
+    characterPanelEl.style.pointerEvents = 'auto';
+
+    const cpTop = document.createElement('div');
+    cpTop.style.position = 'absolute';
+    cpTop.style.left = '16px';
+    cpTop.style.top = '14px';
+    cpTop.style.zIndex = '3';
+    cpTop.style.display = 'flex';
+    cpTop.style.flexDirection = 'column';
+    cpTop.style.gap = '5px';
+    characterPanelEl.appendChild(cpTop);
+
+    const cpTitle = document.createElement('div');
+    cpTitle.textContent = 'Seleccion de Personaje';
+    cpTitle.style.fontSize = '28px';
+    cpTitle.style.fontWeight = '900';
+    cpTitle.style.letterSpacing = '0.2px';
+    cpTop.appendChild(cpTitle);
+
+    const cpSub = document.createElement('div');
+    cpSub.textContent = 'Haz click en uno de tus 3 slots para escoger personaje.';
+    cpSub.style.fontSize = '13px';
+    cpSub.style.opacity = '0.9';
+    cpTop.appendChild(cpSub);
+
+    characterSceneWrapEl = document.createElement('div');
+    characterSceneWrapEl.style.position = 'absolute';
+    characterSceneWrapEl.style.left = '0';
+    characterSceneWrapEl.style.top = '0';
+    characterSceneWrapEl.style.width = '100%';
+    characterSceneWrapEl.style.height = '100%';
+    characterSceneWrapEl.style.overflow = 'hidden';
+    characterSceneWrapEl.style.cursor = 'pointer';
+    characterPanelEl.appendChild(characterSceneWrapEl);
+
+    const topRight = document.createElement('div');
+    topRight.style.position = 'absolute';
+    topRight.style.right = '16px';
+    topRight.style.top = '14px';
+    topRight.style.zIndex = '3';
+    topRight.style.display = 'flex';
+    topRight.style.gap = '8px';
+    characterPanelEl.appendChild(topRight);
+
+    characterRefreshBtnEl = document.createElement('button');
+    characterRefreshBtnEl.type = 'button';
+    characterRefreshBtnEl.textContent = 'Refrescar';
+    characterRefreshBtnEl.style.border = '1px solid rgba(164, 202, 234, 0.45)';
+    characterRefreshBtnEl.style.borderRadius = '9px';
+    characterRefreshBtnEl.style.padding = '8px 12px';
+    characterRefreshBtnEl.style.background = 'rgba(34, 87, 132, 0.84)';
+    characterRefreshBtnEl.style.color = '#ecf7ff';
+    characterRefreshBtnEl.style.fontWeight = '700';
+    characterRefreshBtnEl.style.cursor = 'pointer';
+    characterRefreshBtnEl.addEventListener('click', async () => {
+        await refreshCharacterList();
+    });
+    topRight.appendChild(characterRefreshBtnEl);
+
+    characterDeleteBtnEl = document.createElement('button');
+    characterDeleteBtnEl.type = 'button';
+    characterDeleteBtnEl.textContent = 'Borrar';
+    characterDeleteBtnEl.style.border = '1px solid rgba(245, 166, 160, 0.5)';
+    characterDeleteBtnEl.style.borderRadius = '9px';
+    characterDeleteBtnEl.style.padding = '8px 12px';
+    characterDeleteBtnEl.style.background = 'rgba(151, 55, 44, 0.84)';
+    characterDeleteBtnEl.style.color = '#ffeceb';
+    characterDeleteBtnEl.style.fontWeight = '700';
+    characterDeleteBtnEl.style.cursor = 'pointer';
+    characterDeleteBtnEl.style.display = 'none';
+    characterDeleteBtnEl.addEventListener('click', async () => {
+        const row = resolveCharacterRowBySlot(characterSelectedSlotIndex);
+        if (!row) return;
+        if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) return;
+        const ok = window.confirm(`Borrar personaje '${row.char_name}'?`);
+        if (!ok) return;
+        try {
+            const resp = await new NetMessage('character_delete').set('character_id', row.id).send();
+            if (!resp?.payload?.ok) {
+                UIToast.show(resp?.payload?.error || 'No se pudo borrar personaje', 'error', 1800);
+                return;
+            }
+            applyCharacterSelectPayload(resp?.payload?.character_select || null);
+            UIToast.show('Personaje borrado', 'info', 1200);
+        } catch (err) {
+            console.error(err);
+            UIToast.show('Error de red al borrar personaje', 'error', 1400);
+        }
+    });
+    topRight.appendChild(characterDeleteBtnEl);
+
+    const bottomPanel = document.createElement('div');
+    bottomPanel.style.position = 'absolute';
+    bottomPanel.style.left = '50%';
+    bottomPanel.style.bottom = '18px';
+    bottomPanel.style.transform = 'translateX(-50%)';
+    bottomPanel.style.zIndex = '3';
+    bottomPanel.style.display = 'flex';
+    bottomPanel.style.flexDirection = 'column';
+    bottomPanel.style.gap = '8px';
+    bottomPanel.style.alignItems = 'center';
+    characterPanelEl.appendChild(bottomPanel);
+
+    characterSceneInfoEl = document.createElement('div');
+    characterSceneInfoEl.textContent = 'Selecciona un slot';
+    characterSceneInfoEl.style.fontSize = '13px';
+    characterSceneInfoEl.style.fontWeight = '700';
+    characterSceneInfoEl.style.padding = '8px 14px';
+    characterSceneInfoEl.style.borderRadius = '999px';
+    characterSceneInfoEl.style.background = 'rgba(9, 20, 37, 0.78)';
+    characterSceneInfoEl.style.border = '1px solid rgba(158, 197, 229, 0.36)';
+    characterSceneInfoEl.style.backdropFilter = 'blur(2px)';
+    characterSceneInfoEl.style.maxWidth = '90vw';
+    characterSceneInfoEl.style.whiteSpace = 'nowrap';
+    characterSceneInfoEl.style.overflow = 'hidden';
+    characterSceneInfoEl.style.textOverflow = 'ellipsis';
+    bottomPanel.appendChild(characterSceneInfoEl);
+
+    characterEnterBtnEl = document.createElement('button');
+    characterEnterBtnEl.type = 'button';
+    characterEnterBtnEl.textContent = 'Entrar al Mundo';
+    characterEnterBtnEl.style.border = 'none';
+    characterEnterBtnEl.style.borderRadius = '11px';
+    characterEnterBtnEl.style.padding = '13px 26px';
+    characterEnterBtnEl.style.background = 'linear-gradient(180deg, #2da85f, #1f7f48)';
+    characterEnterBtnEl.style.color = '#ecfff2';
+    characterEnterBtnEl.style.fontWeight = '900';
+    characterEnterBtnEl.style.fontSize = '18px';
+    characterEnterBtnEl.style.cursor = 'pointer';
+    characterEnterBtnEl.style.boxShadow = '0 10px 24px rgba(0,0,0,0.32)';
+    characterEnterBtnEl.addEventListener('click', async () => {
+        const id = Number(characterSelectedId || 0);
+        if (!(id > 0)) {
+            UIToast.show('Selecciona un personaje', 'warning', 1300);
+            return;
+        }
+        await enterWorld(id);
+    });
+    bottomPanel.appendChild(characterEnterBtnEl);
+
+    characterCreateBtnEl = document.createElement('button');
+    characterCreateBtnEl.type = 'button';
+    characterCreateBtnEl.textContent = 'Crear Personaje En Este Slot';
+    characterCreateBtnEl.style.border = '1px solid rgba(163, 212, 175, 0.48)';
+    characterCreateBtnEl.style.borderRadius = '9px';
+    characterCreateBtnEl.style.padding = '8px 14px';
+    characterCreateBtnEl.style.background = 'rgba(34, 112, 70, 0.84)';
+    characterCreateBtnEl.style.color = '#ecfff2';
+    characterCreateBtnEl.style.fontWeight = '700';
+    characterCreateBtnEl.style.cursor = 'pointer';
+    characterCreateBtnEl.style.display = 'none';
+    bottomPanel.appendChild(characterCreateBtnEl);
+
+    characterCreateModalEl = document.createElement('div');
+    characterCreateModalEl.style.position = 'absolute';
+    characterCreateModalEl.style.left = 'auto';
+    characterCreateModalEl.style.right = '24px';
+    characterCreateModalEl.style.top = '86px';
+    characterCreateModalEl.style.transform = 'none';
+    characterCreateModalEl.style.zIndex = '5';
+    characterCreateModalEl.style.width = '420px';
+    characterCreateModalEl.style.padding = '14px';
+    characterCreateModalEl.style.borderRadius = '12px';
+    characterCreateModalEl.style.border = '1px solid rgba(150, 187, 220, 0.38)';
+    characterCreateModalEl.style.background = 'rgba(8, 19, 35, 0.94)';
+    characterCreateModalEl.style.boxShadow = '0 16px 38px rgba(0,0,0,0.44)';
+    characterCreateModalEl.style.display = 'none';
+    characterPanelEl.appendChild(characterCreateModalEl);
+
+    const modalTitle = document.createElement('div');
+    modalTitle.textContent = 'Nuevo Personaje';
+    modalTitle.style.fontSize = '17px';
+    modalTitle.style.fontWeight = '800';
+    modalTitle.style.marginBottom = '8px';
+    characterCreateModalEl.appendChild(modalTitle);
+
+    const mkInput = (labelText) => {
+        const wrap = document.createElement('div');
+        wrap.style.display = 'flex';
+        wrap.style.flexDirection = 'column';
+        wrap.style.gap = '5px';
+        wrap.style.marginBottom = '8px';
+        const lbl = document.createElement('label');
+        lbl.textContent = labelText;
+        lbl.style.fontSize = '12px';
+        lbl.style.fontWeight = '700';
+        lbl.style.color = '#cfe6ff';
+        wrap.appendChild(lbl);
+        return { wrap, lbl };
+    };
+
+    const nameBox = mkInput('Nombre');
+    characterNameInputEl = document.createElement('input');
+    characterNameInputEl.type = 'text';
+    characterNameInputEl.placeholder = 'Nombre del personaje';
+    characterNameInputEl.maxLength = 24;
+    characterNameInputEl.style.padding = '9px 10px';
+    characterNameInputEl.style.borderRadius = '8px';
+    characterNameInputEl.style.border = '1px solid rgba(174, 204, 230, 0.4)';
+    characterNameInputEl.style.background = '#eef5fc';
+    characterNameInputEl.style.color = '#0d1a2b';
+    nameBox.wrap.appendChild(characterNameInputEl);
+    characterCreateModalEl.appendChild(nameBox.wrap);
+
+    const modelBox = mkInput('Modelo 3D');
+    characterModelSelectEl = document.createElement('select');
+    characterModelSelectEl.style.display = 'none';
+    modelBox.wrap.appendChild(characterModelSelectEl);
+
+    const modelChooser = document.createElement('div');
+    modelChooser.style.display = 'grid';
+    modelChooser.style.gridTemplateColumns = '40px 1fr 40px';
+    modelChooser.style.gap = '6px';
+    modelChooser.style.alignItems = 'center';
+    modelBox.wrap.appendChild(modelChooser);
+
+    const mkArrowBtn = (text) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = text;
+        b.style.height = '36px';
+        b.style.borderRadius = '8px';
+        b.style.border = '1px solid rgba(174, 204, 230, 0.4)';
+        b.style.background = '#2c6ea7';
+        b.style.color = '#ecf7ff';
+        b.style.fontSize = '18px';
+        b.style.fontWeight = '800';
+        b.style.cursor = 'pointer';
+        return b;
+    };
+    characterModelPrevBtnEl = mkArrowBtn('◀');
+    characterModelNextBtnEl = mkArrowBtn('▶');
+    characterModelValueEl = document.createElement('div');
+    characterModelValueEl.style.height = '36px';
+    characterModelValueEl.style.borderRadius = '8px';
+    characterModelValueEl.style.border = '1px solid rgba(174, 204, 230, 0.4)';
+    characterModelValueEl.style.background = '#eef5fc';
+    characterModelValueEl.style.color = '#0d1a2b';
+    characterModelValueEl.style.padding = '0 10px';
+    characterModelValueEl.style.display = 'flex';
+    characterModelValueEl.style.alignItems = 'center';
+    characterModelValueEl.style.justifyContent = 'center';
+    characterModelValueEl.style.fontSize = '13px';
+    characterModelValueEl.style.fontWeight = '700';
+    characterModelValueEl.style.whiteSpace = 'nowrap';
+    characterModelValueEl.style.overflow = 'hidden';
+    characterModelValueEl.style.textOverflow = 'ellipsis';
+    modelChooser.appendChild(characterModelPrevBtnEl);
+    modelChooser.appendChild(characterModelValueEl);
+    modelChooser.appendChild(characterModelNextBtnEl);
+    characterCreateModalEl.appendChild(modelBox.wrap);
+
+    characterModelPrevBtnEl.addEventListener('click', () => shiftCharacterModel(-1));
+    characterModelNextBtnEl.addEventListener('click', () => shiftCharacterModel(1));
+    characterModelSelectEl.addEventListener('change', () => {
+        refreshCharacterModelChooserUi();
+        refreshCharacterVisualPreview();
+    });
+
+    const modalButtons = document.createElement('div');
+    modalButtons.style.display = 'flex';
+    modalButtons.style.justifyContent = 'flex-end';
+    modalButtons.style.gap = '8px';
+    characterCreateModalEl.appendChild(modalButtons);
+
+    const btnCancelCreate = document.createElement('button');
+    btnCancelCreate.type = 'button';
+    btnCancelCreate.textContent = 'Cancelar';
+    btnCancelCreate.style.border = 'none';
+    btnCancelCreate.style.borderRadius = '8px';
+    btnCancelCreate.style.padding = '8px 12px';
+    btnCancelCreate.style.background = '#5f7388';
+    btnCancelCreate.style.color = '#ecf7ff';
+    btnCancelCreate.style.fontWeight = '700';
+    btnCancelCreate.style.cursor = 'pointer';
+    btnCancelCreate.addEventListener('click', () => {
+        characterCreateModalEl.style.display = 'none';
+        renderCharacterCards();
+    });
+    modalButtons.appendChild(btnCancelCreate);
+
+    const btnCreateChar = document.createElement('button');
+    btnCreateChar.type = 'button';
+    btnCreateChar.textContent = 'Crear';
+    btnCreateChar.style.border = 'none';
+    btnCreateChar.style.borderRadius = '8px';
+    btnCreateChar.style.padding = '8px 14px';
+    btnCreateChar.style.background = '#2b8a58';
+    btnCreateChar.style.color = '#ecfff2';
+    btnCreateChar.style.fontWeight = '800';
+    btnCreateChar.style.cursor = 'pointer';
+    btnCreateChar.addEventListener('click', async () => {
+        const charName = (characterNameInputEl?.value || '').trim();
+        const modelKey = (characterModelSelectEl?.value || '').trim();
+        if (!charName || !modelKey) {
+            UIToast.show('Completa nombre y modelo', 'warning', 1300);
+            return;
+        }
+        if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) return;
+        try {
+            const resp = await new NetMessage('character_create')
+                .set('char_name', charName)
+                .set('model_key', modelKey)
+                .send();
+            if (!resp?.payload?.ok) {
+                UIToast.show(resp?.payload?.error || 'No se pudo crear personaje', 'error', 1800);
+                return;
+            }
+            characterNameInputEl.value = '';
+            characterCreateModalEl.style.display = 'none';
+            applyCharacterSelectPayload(resp?.payload?.character_select || null);
+            const createdId = Number(resp?.payload?.character?.id || 0);
+            if (createdId > 0) {
+                characterSelectedId = createdId;
+                const slotFromId = findCharacterSlotIndexById(createdId);
+                if (slotFromId >= 0) characterSelectedSlotIndex = slotFromId;
+            }
+            renderCharacterCards();
+            UIToast.show('Personaje creado', 'success', 1200);
+        } catch (err) {
+            console.error(err);
+            UIToast.show('Error de red al crear personaje', 'error', 1400);
+        }
+    });
+    modalButtons.appendChild(btnCreateChar);
+
+    characterCreateBtnEl.addEventListener('click', () => {
+        characterNameInputEl.value = '';
+        layoutCharacterCreateModal();
+        characterCreateModalEl.style.display = '';
+        characterNameInputEl.focus();
+        renderCharacterCards();
+    });
+
+    root.el.appendChild(characterPanelEl);
+
+    worldPanel = new UIColumn({ gap: 0, localPadding: 0 });
+    worldHeadLabel = null;
+    worldPlayerLabel = null;
     worldSpawnLabel = null;
     worldTerrainLabel = null;
     worldGenLabel = null;
-    worldRuntimeLabel = new UILabel('lbl_world_runtime', 'Runtime: 0.00s', 14, 0xffda75, true);
-    const worldButtons = new UIRow({ gap: 8, localPadding: 0, marginTop: 4 });
-    const btnLeaveWorld = new UIButton('btn_leave_world', 'Salir del Mundo', 1, 0xc0392b);
+    worldRuntimeLabel = null;
+    const worldButtons = new UIRow({ gap: 0, localPadding: 0, marginTop: 0 });
+    const btnLeaveWorld = new UIButton('btn_leave_world', 'Logout', 1, 0xc0392b);
+    worldLeaveBtn = btnLeaveWorld;
     btnLeaveWorld.el.style.fontSize = '12px';
-    btnLeaveWorld.el.style.padding = '8px 10px';
-    btnLeaveWorld.el.style.borderRadius = '9px';
+    btnLeaveWorld.el.style.padding = '7px 11px';
+    btnLeaveWorld.el.style.borderRadius = '999px';
+    btnLeaveWorld.el.style.opacity = '0.9';
     worldButtons.addItem(btnLeaveWorld);
     btnLeaveWorld.on('pointertap', async () => {
         await performLogout();
     });
-    worldPanel.addItem(worldHeadLabel);
-    worldPanel.addItem(worldPlayerLabel);
-    worldPanel.addItem(worldRuntimeLabel);
     worldPanel.addItem(worldButtons);
     setWorldUiMode(false);
     root.addItem(worldPanel);
 
     formContainer.addChild(root);
+    window.addEventListener('resize', layoutCharacterCreateModal);
+    layoutCharacterCreateModal();
+    requestAnimationFrame(() => applyWorldHudLayout());
     setClientState('AUTH');
 }
 
@@ -1250,13 +2388,55 @@ export function main(delta) {
     if (clientState !== 'IN_WORLD') return;
     const dt = (Number(delta) || 0) / 60;
     simple3D.update(dt);
+    updateCollectUi();
+    const biomeChange = simple3D.pullPendingBiomeChange?.();
+    if (biomeChange?.biome) {
+        showBiomeBanner(biomeChange.biome);
+    }
     const moved = simple3D.pullPendingNetworkPosition();
-    if (moved && ws && ws.socket && ws.socket.readyState === WebSocket.OPEN) {
-        new NetMessage('world_move').set('position', moved).send().catch(() => { });
+    const animState = simple3D.pullPendingNetworkAnimationState?.();
+    if ((moved || animState) && ws && ws.socket && ws.socket.readyState === WebSocket.OPEN) {
+        const msg = new NetMessage('world_move');
+        if (moved) msg.set('position', moved);
+        if (animState) msg.set('animation_state', animState);
+        msg.send().catch(() => { });
     }
     const classChange = simple3D.pullPendingClassChange();
     if (classChange && ws && ws.socket && ws.socket.readyState === WebSocket.OPEN) {
         new NetMessage('world_set_class').set('character_class', classChange).send().catch(() => { });
+    }
+    const decorRemove = simple3D.pullPendingDecorRemove?.();
+    if (decorRemove && ws && ws.socket && ws.socket.readyState === WebSocket.OPEN) {
+        new NetMessage('world_decor_remove')
+            .set('key', decorRemove)
+            .send()
+            .then((resp) => {
+                if (!resp?.payload?.ok) return;
+                if (resp?.payload?.changed) {
+                    simple3D.removeDecorByKey?.(resp?.payload?.key);
+                }
+                const spawned = Array.isArray(resp?.payload?.loot?.spawned) ? resp.payload.loot.spawned : [];
+                if (spawned.length > 0) {
+                    simple3D.applyWorldLootSpawned?.(spawned);
+                }
+            })
+            .catch(() => { });
+    }
+    const lootPickup = simple3D.pullPendingLootPickup?.();
+    if (lootPickup && ws && ws.socket && ws.socket.readyState === WebSocket.OPEN) {
+        new NetMessage('world_loot_pickup')
+            .set('key', lootPickup)
+            .send()
+            .then((resp) => {
+                if (!resp?.payload?.ok) return;
+                if (resp?.payload?.inventory) {
+                    applyInventoryPayload(resp.payload.inventory);
+                }
+                if (!(Number(resp?.payload?.left) > 0)) {
+                    simple3D.removeWorldLootKey?.(resp?.payload?.key);
+                }
+            })
+            .catch(() => { });
     }
     if (worldRuntimeLabel) {
         worldRuntimeLabel.setText(`Runtime: ${simple3D.elapsed.toFixed(2)}s`);

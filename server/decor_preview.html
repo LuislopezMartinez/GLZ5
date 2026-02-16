@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Decor Preview</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #0b1320; color: #dce8f8; font-family: "Segoe UI", Arial, sans-serif; }
+    #hud {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      z-index: 10;
+      background: rgba(8, 16, 30, 0.82);
+      border: 1px solid rgba(120, 150, 196, 0.45);
+      border-radius: 10px;
+      padding: 8px 10px;
+      max-width: min(88vw, 520px);
+      font-size: 13px;
+      line-height: 1.35;
+      backdrop-filter: blur(2px);
+    }
+    #controls {
+      margin-top: 8px;
+      border-top: 1px solid rgba(120, 150, 196, 0.35);
+      padding-top: 8px;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 8px;
+      align-items: center;
+      max-width: 420px;
+    }
+    #controls label { color: #b6d7ff; }
+    #controls select,
+    #controls input[type="range"] {
+      width: 100%;
+    }
+    #exposureValue {
+      margin-left: 6px;
+      color: #dce8f8;
+      min-width: 38px;
+      display: inline-block;
+      text-align: right;
+    }
+    #status { color: #95c6ff; word-break: break-all; }
+    #iconBox {
+      margin-top: 8px;
+      display: none;
+      border-top: 1px solid rgba(120, 150, 196, 0.35);
+      padding-top: 8px;
+    }
+    #iconPreview {
+      width: 96px;
+      height: 96px;
+      object-fit: contain;
+      image-rendering: auto;
+      background: rgba(12, 26, 44, 0.7);
+      border: 1px solid rgba(130, 166, 208, 0.45);
+      border-radius: 8px;
+      display: block;
+    }
+    #tips { margin-top: 6px; color: #b6d7ff; opacity: 0.92; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div id="status">Inicializando visor...</div>
+    <div id="tips">Mouse: rotar / rueda: zoom / click derecho: pan / R: reset</div>
+    <div id="controls">
+      <label for="presetSel">Preset luz</label>
+      <select id="presetSel">
+        <option value="neutral">Neutral</option>
+        <option value="warm">Calido</option>
+        <option value="cool">Frio</option>
+        <option value="night">Noche</option>
+      </select>
+      <label for="expRange">Exposicion</label>
+      <div style="display:flex; align-items:center;">
+        <input id="expRange" type="range" min="0.6" max="2.2" step="0.05" value="1.15">
+        <span id="exposureValue">1.15</span>
+      </div>
+    </div>
+    <div id="iconBox">
+      <div style="margin-bottom:6px;">Icono asociado</div>
+      <img id="iconPreview" alt="Icono">
+    </div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.1/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.1/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+    import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+    import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
+
+    const statusEl = document.getElementById("status");
+    const iconBox = document.getElementById("iconBox");
+    const iconImg = document.getElementById("iconPreview");
+    const presetSel = document.getElementById("presetSel");
+    const expRange = document.getElementById("expRange");
+    const exposureValue = document.getElementById("exposureValue");
+
+    const qp = new URLSearchParams(window.location.search);
+    let modelPath = (qp.get("obj") || "").trim();
+    let iconPath = (qp.get("icon") || "").trim();
+    const wsUrl = (qp.get("ws") || "").trim();
+
+    function setIcon(path) {
+      iconPath = (path || "").trim();
+      if (iconPath) {
+        iconImg.src = `/${iconPath.replace(/^\/+/, "")}`;
+        iconBox.style.display = "block";
+      } else {
+        iconImg.removeAttribute("src");
+        iconBox.style.display = "none";
+      }
+    }
+    setIcon(iconPath);
+
+    if (!modelPath) {
+      statusEl.textContent = "Esperando modelo por WebSocket...";
+    }
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b1320);
+    scene.fog = new THREE.Fog(0x0b1320, 40, 220);
+
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth / Math.max(window.innerHeight, 1), 0.05, 2000);
+    camera.position.set(3.5, 2.4, 4.5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.target.set(0, 0.8, 0);
+
+    const hemi = new THREE.HemisphereLight(0xcfe9ff, 0x273246, 1.0);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xfff6dc, 1.15);
+    dir.position.set(6, 12, 5);
+    dir.castShadow = true;
+    dir.shadow.mapSize.set(1024, 1024);
+    scene.add(dir);
+    const fill = new THREE.DirectionalLight(0x95b8ff, 0.45);
+    fill.position.set(-7, 4, -5);
+    scene.add(fill);
+    // Rim light para separar silueta del fondo.
+    const rim = new THREE.DirectionalLight(0xe6f1ff, 0.55);
+    rim.position.set(-5, 7, 9);
+    scene.add(rim);
+
+    const floor = new THREE.Mesh(
+      new THREE.CircleGeometry(15, 72),
+      new THREE.MeshStandardMaterial({ color: 0x111a2a, roughness: 0.95, metalness: 0.02 })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.receiveShadow = true;
+    scene.add(floor);
+
+    const grid = new THREE.GridHelper(30, 30, 0x2c476f, 0x203550);
+    grid.position.y = 0.001;
+    scene.add(grid);
+
+    const PRESETS = {
+      neutral: {
+        background: 0x0b1320,
+        fog: 0x0b1320,
+        hemiSky: 0xcfe9ff,
+        hemiGround: 0x273246,
+        hemiI: 1.0,
+        key: 0xfff6dc,
+        keyI: 1.15,
+        fill: 0x95b8ff,
+        fillI: 0.45,
+        rim: 0xe6f1ff,
+        rimI: 0.55,
+      },
+      warm: {
+        background: 0x161018,
+        fog: 0x161018,
+        hemiSky: 0xffe9d2,
+        hemiGround: 0x2d2420,
+        hemiI: 1.0,
+        key: 0xffd8a2,
+        keyI: 1.2,
+        fill: 0xffc794,
+        fillI: 0.38,
+        rim: 0xfff0cc,
+        rimI: 0.62,
+      },
+      cool: {
+        background: 0x081527,
+        fog: 0x081527,
+        hemiSky: 0xc7ebff,
+        hemiGround: 0x1b2a3f,
+        hemiI: 1.05,
+        key: 0xcde7ff,
+        keyI: 1.15,
+        fill: 0x8ebcff,
+        fillI: 0.5,
+        rim: 0xdff3ff,
+        rimI: 0.68,
+      },
+      night: {
+        background: 0x040a14,
+        fog: 0x040a14,
+        hemiSky: 0x7fa6d1,
+        hemiGround: 0x101b2e,
+        hemiI: 0.68,
+        key: 0xa9c6ff,
+        keyI: 0.88,
+        fill: 0x5f86c9,
+        fillI: 0.33,
+        rim: 0xb6d5ff,
+        rimI: 0.55,
+      },
+    };
+
+    function applyLightingPreset(name) {
+      const p = PRESETS[name] || PRESETS.neutral;
+      scene.background = new THREE.Color(p.background);
+      scene.fog = new THREE.Fog(p.fog, 40, 220);
+      floor.material.color.setHex((p.background ^ 0x060607) & 0xffffff);
+      if (Array.isArray(grid.material)) {
+        for (const m of grid.material) {
+          if (m && m.color) m.color.setHex(p.fill);
+        }
+      } else if (grid.material && grid.material.color) {
+        grid.material.color.setHex(p.fill);
+      }
+      hemi.color.setHex(p.hemiSky);
+      hemi.groundColor.setHex(p.hemiGround);
+      hemi.intensity = p.hemiI;
+      dir.color.setHex(p.key);
+      dir.intensity = p.keyI;
+      fill.color.setHex(p.fill);
+      fill.intensity = p.fillI;
+      rim.color.setHex(p.rim);
+      rim.intensity = p.rimI;
+    }
+
+    function applyExposure(v) {
+      const value = Math.max(0.6, Math.min(2.2, Number(v) || 1.15));
+      renderer.toneMappingExposure = value;
+      expRange.value = value.toFixed(2);
+      exposureValue.textContent = value.toFixed(2);
+    }
+
+    presetSel.addEventListener("change", () => applyLightingPreset(presetSel.value));
+    expRange.addEventListener("input", () => applyExposure(expRange.value));
+    applyLightingPreset("neutral");
+    applyExposure(1.15);
+
+    function fitToObject(root) {
+      const box = new THREE.Box3().setFromObject(root);
+      if (box.isEmpty()) return;
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      box.getSize(size);
+      box.getCenter(center);
+      const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+
+      root.position.sub(center);
+      root.position.y += (size.y * 0.5);
+
+      const dist = maxDim * 1.8;
+      camera.position.set(dist * 0.9, dist * 0.65, dist * 1.05);
+      camera.near = Math.max(0.01, dist / 200);
+      camera.far = Math.max(200, dist * 40);
+      camera.updateProjectionMatrix();
+      controls.target.set(0, size.y * 0.35, 0);
+      controls.update();
+    }
+
+    function enhanceMaterials(obj) {
+      obj.traverse((node) => {
+        if (!node?.isMesh) return;
+        node.castShadow = true;
+        node.receiveShadow = true;
+        const apply = (m) => {
+          if (!m) return m;
+          m.side = THREE.FrontSide;
+          if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
+          if (m.emissiveMap) m.emissiveMap.colorSpace = THREE.SRGBColorSpace;
+          m.needsUpdate = true;
+          return m;
+        };
+        if (Array.isArray(node.material)) node.material = node.material.map(apply);
+        else node.material = apply(node.material);
+      });
+    }
+
+    let currentRoot = null;
+    let loadToken = 0;
+
+    function clearCurrentRoot() {
+      if (!currentRoot) return;
+      scene.remove(currentRoot);
+      currentRoot.traverse((node) => {
+        if (!node?.isMesh) return;
+        node.geometry?.dispose?.();
+        if (Array.isArray(node.material)) node.material.forEach((m) => m?.dispose?.());
+        else node.material?.dispose?.();
+      });
+      currentRoot = null;
+    }
+
+    function loadObjOnly(localObjPath, token) {
+      const objUrl = `/${localObjPath.replace(/^\/+/, "")}`;
+      const objLoader = new OBJLoader();
+      objLoader.load(
+        objUrl,
+        (obj) => {
+          if (token !== loadToken) return;
+          clearCurrentRoot();
+          enhanceMaterials(obj);
+          scene.add(obj);
+          currentRoot = obj;
+          fitToObject(obj);
+          statusEl.textContent = `OBJ cargado (sin MTL): ${localObjPath}`;
+        },
+        undefined,
+        (err) => {
+          if (token !== loadToken) return;
+          statusEl.textContent = `Error cargando OBJ: ${localObjPath}`;
+          console.error(err);
+        }
+      );
+    }
+
+    function loadObjWithMtl(localObjPath, token) {
+      const objUrl = `/${localObjPath.replace(/^\/+/, "")}`;
+      const slash = localObjPath.lastIndexOf("/");
+      const baseDir = slash >= 0 ? localObjPath.slice(0, slash + 1) : "";
+      const objName = slash >= 0 ? localObjPath.slice(slash + 1) : localObjPath;
+      const mtlName = objName.replace(/\.obj$/i, ".mtl");
+      const mtlBaseUrl = `/${baseDir.replace(/^\/+/, "")}`;
+
+      const mtlLoader = new MTLLoader();
+      mtlLoader.setPath(mtlBaseUrl);
+      mtlLoader.setResourcePath(mtlBaseUrl);
+      mtlLoader.load(
+        mtlName,
+        (materials) => {
+          try {
+            materials.preload();
+          } catch (_) {}
+          const objLoader = new OBJLoader();
+          objLoader.setMaterials(materials);
+          objLoader.load(
+            objUrl,
+            (obj) => {
+              if (token !== loadToken) return;
+              clearCurrentRoot();
+              enhanceMaterials(obj);
+              scene.add(obj);
+              currentRoot = obj;
+              fitToObject(obj);
+              statusEl.textContent = `OBJ + MTL cargados: ${localObjPath}`;
+            },
+            undefined,
+            (err) => {
+              if (token !== loadToken) return;
+              statusEl.textContent = `Error cargando OBJ (con MTL): ${localObjPath}`;
+              console.error(err);
+            }
+          );
+        },
+        undefined,
+        () => {
+          if (token !== loadToken) return;
+          statusEl.textContent = `MTL no encontrado o invalido (${mtlName}), fallback OBJ`;
+          loadObjOnly(localObjPath, token);
+        }
+      );
+    }
+
+    function loadGlb(localPath, token) {
+      const modelUrl = `/${localPath.replace(/^\/+/, "")}`;
+      const loader = new GLTFLoader();
+      loader.load(
+        modelUrl,
+        (gltf) => {
+          if (token !== loadToken) return;
+          const root = gltf?.scene || gltf?.scenes?.[0];
+          if (!root) {
+            statusEl.textContent = `GLB/GLTF sin scene: ${localPath}`;
+            return;
+          }
+          clearCurrentRoot();
+          enhanceMaterials(root);
+          scene.add(root);
+          currentRoot = root;
+          fitToObject(root);
+          statusEl.textContent = `GLB/GLTF cargado: ${localPath}`;
+        },
+        undefined,
+        (err) => {
+          if (token !== loadToken) return;
+          statusEl.textContent = `Error cargando GLB/GLTF: ${localPath}`;
+          console.error(err);
+        }
+      );
+    }
+
+    function loadModel(path) {
+      const next = (path || "").trim();
+      if (!next) return;
+      modelPath = next;
+      loadToken += 1;
+      const token = loadToken;
+      statusEl.textContent = `Cargando: ${modelPath}`;
+      const lower = modelPath.toLowerCase();
+      if (lower.endsWith(".glb") || lower.endsWith(".gltf")) {
+        loadGlb(modelPath, token);
+      } else if (lower.endsWith(".obj")) {
+        loadObjWithMtl(modelPath, token);
+      } else {
+        statusEl.textContent = `Formato no soportado: ${modelPath}`;
+      }
+    }
+
+    if (modelPath) {
+      loadModel(modelPath);
+    }
+
+    if (wsUrl) {
+      let ws = null;
+      const connect = () => {
+        try {
+          ws = new WebSocket(wsUrl);
+        } catch (_err) {
+          setTimeout(connect, 1000);
+          return;
+        }
+        ws.onopen = () => {
+          statusEl.textContent = modelPath ? statusEl.textContent : "Conectado al canal live. Esperando modelo...";
+        };
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data || "{}");
+            if (msg?.type !== "preview_state") return;
+            if (msg?.icon !== undefined) setIcon(msg.icon || "");
+            if (msg?.obj) loadModel((msg.obj || "").trim());
+          } catch (_err) {}
+        };
+        ws.onclose = () => setTimeout(connect, 900);
+        ws.onerror = () => {
+          try { ws.close(); } catch (_e) {}
+        };
+      };
+      connect();
+    }
+
+    window.addEventListener("keydown", (ev) => {
+      if ((ev.key || "").toLowerCase() !== "r") return;
+      controls.reset();
+    });
+
+    window.addEventListener("resize", () => {
+      const w = window.innerWidth;
+      const h = Math.max(window.innerHeight, 1);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+    });
+
+    function tick() {
+      controls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(tick);
+    }
+    tick();
+  </script>
+</body>
+</html>

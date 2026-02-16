@@ -41,8 +41,15 @@
 
     <textarea id="hidden-textarea-field" class="hidden-field" autocomplete="off"></textarea>
 
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.1/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.1/examples/jsm/"
+      }
+    }
+    </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.3.0/pixi.min.js"></script>
-    <script src="https://unpkg.com/three@0.160.1/build/three.min.js"></script>
     <script type="module" src="./app.js"></script>
 </body>
 
