@@ -384,10 +384,12 @@ export class InventoryUi {
 
             if (has && item?.icon_key) {
                 const iconRel = (item.icon_key || '').toString().replace(/^\/+/, '');
-                el.style.backgroundImage = `linear-gradient(180deg, rgba(12,24,40,0.7), rgba(10,18,32,0.78)), url('./assets/sprites/iconos/${iconRel}')`;
+                el.style.filter = 'saturate(1.18) brightness(1.12) contrast(1.06)';
+                el.style.backgroundImage = `linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02)), url('./assets/sprites/iconos/${iconRel}')`;
                 el.style.backgroundSize = 'cover';
                 el.style.backgroundPosition = 'center';
             } else {
+                el.style.filter = 'none';
                 el.style.backgroundImage = 'linear-gradient(180deg, rgba(18,39,66,0.9), rgba(10,22,40,0.94))';
                 el.style.backgroundSize = '';
                 el.style.backgroundPosition = '';
@@ -409,10 +411,10 @@ export class InventoryUi {
             const item = has ? this.items[slot.item_code] : null;
             const name = has ? (item?.name || slot.item_code) : '';
 
-            slotEl.style.filter = has ? 'none' : 'saturate(0.35) brightness(0.75)';
+            slotEl.style.filter = has ? 'saturate(1.18) brightness(1.12) contrast(1.06)' : 'saturate(0.35) brightness(0.75)';
             if (has && item?.icon_key) {
                 const iconRel = (item.icon_key || '').toString().replace(/^\/+/, '');
-                slotEl.style.backgroundImage = `linear-gradient(180deg, rgba(12,24,40,0.7), rgba(10,18,32,0.78)), url('./assets/sprites/iconos/${iconRel}')`;
+                slotEl.style.backgroundImage = `linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02)), url('./assets/sprites/iconos/${iconRel}')`;
                 slotEl.style.backgroundSize = 'cover';
                 slotEl.style.backgroundPosition = 'center';
             } else {

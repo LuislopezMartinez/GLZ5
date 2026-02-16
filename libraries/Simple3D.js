@@ -129,10 +129,12 @@ export class Simple3D {
         this.cameraRotateSensitivity = 0.0044;
         this.mouseLookActive = false;
         this.mouseLookButton = 2;
+        this.mouseButtonsDown = new Set();
         this.mouseLookLastX = 0;
         this.mouseLookLastY = 0;
         this.pointerLocked = false;
         this.pointerLockRequestedByRmb = false;
+        this.enablePointerLock = false;
         this.actor = {
             x: 0, y: 0, z: 0, yaw: 0,
             moving: false,
@@ -465,6 +467,7 @@ export class Simple3D {
         this.mouseLookActive = false;
         this.pointerLocked = false;
         this.pointerLockRequestedByRmb = false;
+        if (this.worldCanvas) this.worldCanvas.style.cursor = '';
     }
 
     getDebugInfo() {
@@ -2295,6 +2298,7 @@ export class Simple3D {
         const hitCollectable = this._pickCollectableDecorKeyFromScreenPoint(Number(ev.clientX) || 0, Number(ev.clientY) || 0);
         if (hitCollectable) return;
         ev.preventDefault();
+        this.mouseButtonsDown.add(ev.button);
         this.mouseLookActive = true;
         this.mouseLookButton = ev.button;
         this.mouseLookLastX = Number(ev.clientX) || 0;
@@ -2302,8 +2306,9 @@ export class Simple3D {
         if (this.mouseLookButton === 2 && this.actor) {
             this.moveYaw = this.cameraYaw;
             this.actor.yaw = this.moveYaw;
+            if (this.worldCanvas) this.worldCanvas.style.cursor = 'none';
             const lockEl = this.worldCanvas;
-            if (lockEl && document.pointerLockElement !== lockEl && lockEl.requestPointerLock) {
+            if (this.enablePointerLock && lockEl && document.pointerLockElement !== lockEl && lockEl.requestPointerLock) {
                 this.pointerLockRequestedByRmb = true;
                 try {
                     lockEl.requestPointerLock();
@@ -2330,14 +2335,17 @@ export class Simple3D {
         this.cameraYaw -= yawDelta;
         // RMB: acopla orientacion del personaje a la camara (estilo WoW).
         // LMB: solo orienta camara, sin afectar yaw del personaje.
-        if (this.mouseLookButton === 2) this.moveYaw = this.cameraYaw;
+        if (this.mouseButtonsDown.has(2)) this.moveYaw = this.cameraYaw;
         this.cameraPitch = Math.max(this.cameraPitchMin, Math.min(this.cameraPitchMax, this.cameraPitch + (dy * this.cameraRotateSensitivity)));
     }
 
     onMouseUp(ev) {
         if (!this.desktopThirdPersonActive) return;
-        if (ev.button !== this.mouseLookButton) return;
-        this.mouseLookActive = false;
+        this.mouseButtonsDown.delete(ev.button);
+        this.mouseLookActive = this.mouseButtonsDown.size > 0;
+        if (ev.button === 2 && this.worldCanvas) {
+            this.worldCanvas.style.cursor = '';
+        }
         if (ev.button === 2 && document.pointerLockElement === this.worldCanvas && document.exitPointerLock) {
             try {
                 document.exitPointerLock();
@@ -2365,7 +2373,10 @@ export class Simple3D {
         this.pointerLocked = (document.pointerLockElement === this.worldCanvas);
         if (!this.pointerLocked) {
             this.pointerLockRequestedByRmb = false;
-            if (this.mouseLookButton === 2) this.mouseLookActive = false;
+            if (this.mouseButtonsDown.has(2)) {
+                this.mouseButtonsDown.delete(2);
+                this.mouseLookActive = this.mouseButtonsDown.size > 0;
+            }
         }
     }
 
@@ -2376,7 +2387,9 @@ export class Simple3D {
 
     _updateDesktopThirdPersonController(safeDt) {
         const actor = this.actor;
-        const input = this.getDesktopMoveInput();
+        const comboForward = this.mouseButtonsDown.has(2) && this.mouseButtonsDown.has(0);
+        let input = this.getDesktopMoveInput();
+        if (!input && comboForward) input = { forward: 1, right: 0 };
         let moveX = 0;
         let moveZ = 0;
         let moving = false;
@@ -2384,7 +2397,7 @@ export class Simple3D {
         if (input) {
             const speed = this.moveSpeed * (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') ? this.sprintMultiplier : 1);
             const step = speed * safeDt;
-            if (this.mouseLookActive && this.mouseLookButton === 2) {
+            if (this.mouseLookActive && this.mouseButtonsDown.has(2)) {
                 // En modo RMB el marco de movimiento es la camara,
                 // pero la orientacion del modelo la marca la direccion real de avance.
                 this.moveYaw = this.cameraYaw;
