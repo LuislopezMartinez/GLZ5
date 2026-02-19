@@ -24,7 +24,7 @@ from .terrain import build_fixed_world_terrain
 
 class SimpleWsServer:
     def __init__(self, host: str, port: int, db: DatabaseManager, log_fn, network_settings=None, network_event_cb=None):
-        self.protocol_version = "1.0.0"
+        self.protocol_version = "1.1.0"
         self.server_build = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self.host = host
         self.port = port
@@ -40,12 +40,16 @@ class SimpleWsServer:
         self.sessions: dict = {}
         self.decor_maintenance_last_by_world: dict[int, float] = {}
         self.world_loot_by_world: dict[int, dict[str, dict]] = {}
+        self.world_voxel_changes_by_world: dict[int, dict[str, int]] = {}
+        self.world_voxel_loaded_worlds: set[int] = set()
+        self.voxel_world_height = 128
+        self.voxel_edit_reach = 64.0
         self.loot_pickup_radius = 1.35
         self.loot_spawn_radius_min = 0.45
         self.loot_spawn_radius_max = 1.35
         self.loot_spawn_min_separation = 0.34
-        self.inventory_total_slots = 32
-        self.inventory_hotbar_slots = 8
+        self.inventory_total_slots = 16
+        self.inventory_hotbar_slots = 4
         self.character_max_slots = 3
 
     def _network_config_payload(self) -> dict:
@@ -54,8 +58,38 @@ class SimpleWsServer:
             timeout_ms = max(500, int(timeout_ms))
         except (TypeError, ValueError):
             timeout_ms = 12000
+        raw_sync = self.network_settings.get("movement_sync")
+        sync = raw_sync if isinstance(raw_sync, dict) else {}
+
+        def _f(name: str, default: float, lo: float, hi: float) -> float:
+            try:
+                v = float(sync.get(name, default))
+            except (TypeError, ValueError):
+                v = float(default)
+            return max(float(lo), min(float(hi), float(v)))
+
+        send_interval_ms = int(_f("send_interval_ms", 100.0, 33.0, 1000.0))
+        remote_near_distance = _f("remote_near_distance", 0.35, 0.01, 5.0)
+        remote_far_distance = _f("remote_far_distance", 4.0, 0.1, 60.0)
+        remote_min_follow_speed = _f("remote_min_follow_speed", 7.0, 0.2, 120.0)
+        remote_max_follow_speed = _f("remote_max_follow_speed", 24.0, 0.2, 160.0)
+        if remote_far_distance < remote_near_distance:
+            remote_far_distance = remote_near_distance
+        if remote_max_follow_speed < remote_min_follow_speed:
+            remote_max_follow_speed = remote_min_follow_speed
         return {
             "client_request_timeout_ms": timeout_ms,
+            "movement_sync": {
+                "send_interval_ms": send_interval_ms,
+                "send_min_distance": _f("send_min_distance", 0.08, 0.01, 2.0),
+                "send_min_y_distance": _f("send_min_y_distance", 0.12, 0.01, 2.0),
+                "remote_near_distance": remote_near_distance,
+                "remote_far_distance": remote_far_distance,
+                "remote_min_follow_speed": remote_min_follow_speed,
+                "remote_max_follow_speed": remote_max_follow_speed,
+                "remote_teleport_distance": _f("remote_teleport_distance", 25.0, 1.0, 500.0),
+                "remote_stop_epsilon": _f("remote_stop_epsilon", 0.03, 0.001, 2.0),
+            },
             "protocol_version": self.protocol_version,
             "server_build": self.server_build,
         }
@@ -148,6 +182,136 @@ class SimpleWsServer:
         if raw in {"0", "false", "no", "off"}:
             return False
         return bool(default)
+
+    def _compute_fall_damage_percent(self, fall_distance: float, threshold_voxels: float) -> float:
+        d = max(0.0, float(fall_distance or 0.0))
+        t = max(0.0001, float(threshold_voxels or 10.0))
+        if d < t:
+            return 0.0
+        # Modelo lineal (punto 2): r=1 -> 10%, r=2 -> 25%.
+        r = d / t
+        pct = (15.0 * r) - 5.0
+        return max(0.0, min(100.0, pct))
+
+    def _session_spawn_pos(self, session: dict) -> dict:
+        spawn_hint = session.get("spawn_hint") or {"x": 0.0, "y": 60.0, "z": 0.0}
+        return {
+            "x": float(spawn_hint.get("x") or 0.0),
+            "y": float(spawn_hint.get("y") or 60.0),
+            "z": float(spawn_hint.get("z") or 0.0),
+        }
+
+    def _respawn_session(self, session: dict, full_heal: bool = True) -> dict:
+        spawn_pos = self._session_spawn_pos(session)
+        max_hp = max(1, int(session.get("max_hp") or 1000))
+        if full_heal:
+            session["hp"] = max_hp
+        else:
+            session["hp"] = max(1, min(max_hp, int(session.get("hp") or max_hp)))
+        session["is_dead"] = False
+        session["position"] = dict(spawn_pos)
+        session["fall_peak_y"] = float(spawn_pos["y"])
+        session["falling_active"] = False
+        session["animation_state"] = "idle"
+        return {
+            "position": dict(spawn_pos),
+            "hp": int(session["hp"]),
+            "max_hp": int(max_hp),
+        }
+
+    async def _notify_local_fall_damage(self, websocket, payload: dict):
+        await self._send(
+            websocket,
+            {
+                "id": None,
+                "action": "world_local_fall_damage",
+                "payload": payload,
+            },
+        )
+
+    async def _notify_local_death(
+        self,
+        websocket,
+        session: dict,
+        req_id,
+        action: str,
+        reason: str,
+        fall_distance: float = 0.0,
+    ):
+        session["is_dead"] = True
+        session["hp"] = 0
+        session["animation_state"] = "dead"
+        pos = session.get("position") or {"x": 0.0, "y": 60.0, "z": 0.0}
+        payload = {
+            "ok": True,
+            "dead": True,
+            "death_reason": reason,
+            "fall_distance": float(max(0.0, fall_distance)),
+            "position": {
+                "x": float(pos.get("x") or 0.0),
+                "y": float(pos.get("y") or 60.0),
+                "z": float(pos.get("z") or 0.0),
+            },
+            "hp": 0,
+            "max_hp": max(1, int(session.get("max_hp") or 1000)),
+        }
+        await self._send_response(websocket, req_id, action, payload)
+        await self._send(
+            websocket,
+            {
+                "id": None,
+                "action": "world_local_died",
+                "payload": payload,
+            },
+        )
+        await self._broadcast_world_event(
+            session["world_name"],
+            "world_player_died",
+            {
+                "id": session.get("user_id"),
+                "username": session.get("username"),
+                "reason": reason,
+                "fall_distance": float(max(0.0, fall_distance)),
+                "position": payload["position"],
+            },
+            exclude=websocket,
+        )
+
+    async def _notify_local_respawn(self, websocket, session: dict, req_id, action: str):
+        snap = self._respawn_session(session, full_heal=True)
+        payload = {
+            "ok": True,
+            "respawned": True,
+            "position": snap["position"],
+            "hp": snap["hp"],
+            "max_hp": snap["max_hp"],
+        }
+        await self._send_response(websocket, req_id, action, payload)
+        await self._send(
+            websocket,
+            {
+                "id": None,
+                "action": "world_local_respawn",
+                "payload": payload,
+            },
+        )
+        await self._broadcast_world_event(
+            session["world_name"],
+            "world_player_moved",
+            {
+                "id": session.get("user_id"),
+                "username": session.get("username"),
+                "character_id": session.get("character_id"),
+                "character_name": session.get("character_name"),
+                "model_key": session.get("model_key"),
+                "rol": session.get("rol") or "user",
+                "character_class": session.get("character_class") or "rogue",
+                "active_emotion": session.get("active_emotion") or "neutral",
+                "animation_state": "idle",
+                "position": snap["position"],
+            },
+            exclude=websocket,
+        )
 
     def _session_role(self, websocket) -> str:
         sess = self.sessions.get(websocket) or {}
@@ -387,6 +551,304 @@ class SimpleWsServer:
             bucket = {}
             self.world_loot_by_world[wid] = bucket
         return bucket
+
+    def _world_voxel_bucket(self, world_id: int) -> dict[str, int]:
+        wid = int(world_id or 0)
+        if wid <= 0:
+            return {}
+        bucket = self.world_voxel_changes_by_world.get(wid)
+        if bucket is None:
+            bucket = {}
+            self.world_voxel_changes_by_world[wid] = bucket
+        return bucket
+
+    def _voxel_key(self, x: int, y: int, z: int) -> str:
+        return f"{int(x)},{int(y)},{int(z)}"
+
+    def _parse_voxel_key(self, key: str):
+        try:
+            xs, ys, zs = str(key).split(",", 2)
+            return int(xs), int(ys), int(zs)
+        except Exception:
+            return None
+
+    def _seed_hash(self, seed: str) -> int:
+        h = 2166136261
+        for ch in str(seed or "default-seed"):
+            h ^= ord(ch)
+            h = (h * 16777619) & 0xFFFFFFFF
+        return h & 0xFFFFFFFF
+
+    def _random_from_int2d(self, x: int, z: int, seed_hash: int) -> float:
+        n = ((x * 374761393) ^ (z * 668265263) ^ seed_hash) & 0xFFFFFFFF
+        n = (n ^ (n >> 13)) & 0xFFFFFFFF
+        n = (n * 1274126177) & 0xFFFFFFFF
+        return float(n & 0x7FFFFFFF) / float(0x7FFFFFFF)
+
+    def _smoothstep(self, t: float) -> float:
+        return t * t * (3.0 - (2.0 * t))
+
+    def _lerp(self, a: float, b: float, t: float) -> float:
+        return a + ((b - a) * t)
+
+    def _value_noise_2d(self, x: float, z: float, seed_hash: int) -> float:
+        x0 = math.floor(x)
+        z0 = math.floor(z)
+        x1 = x0 + 1
+        z1 = z0 + 1
+        sx = self._smoothstep(x - x0)
+        sz = self._smoothstep(z - z0)
+        n00 = self._random_from_int2d(x0, z0, seed_hash)
+        n10 = self._random_from_int2d(x1, z0, seed_hash)
+        n01 = self._random_from_int2d(x0, z1, seed_hash)
+        n11 = self._random_from_int2d(x1, z1, seed_hash)
+        ix0 = self._lerp(n00, n10, sx)
+        ix1 = self._lerp(n01, n11, sx)
+        v = self._lerp(ix0, ix1, sz)
+        return (v * 2.0) - 1.0
+
+    def _sample_fixed_column_height(self, world_seed: str, terrain_config: dict, terrain_cells: dict, wx: int, wz: int):
+        layout = (terrain_config.get("biome_layout") or "").strip().lower()
+        if layout == "quadrants":
+            base_height = float(terrain_config.get("surface_height") or terrain_config.get("base_height") or 64.0)
+            amp = max(0.0, float(terrain_config.get("mountain_amplitude") or terrain_config.get("fixed_noise_amplitude") or 20.0))
+            scale = max(0.001, float(terrain_config.get("mountain_noise_scale") or terrain_config.get("fixed_noise_scale") or 0.02))
+            octaves = max(1, min(4, int(terrain_config.get("fixed_noise_octaves") or 2)))
+            quadrants = terrain_config.get("quadrant_biomes") if isinstance(terrain_config.get("quadrant_biomes"), dict) else {}
+            qkey = "xp_zp" if (wx >= 0 and wz >= 0) else ("xn_zp" if (wx < 0 and wz >= 0) else ("xn_zn" if (wx < 0 and wz < 0) else "xp_zn"))
+            biome = (quadrants.get(qkey) or "").strip().lower()
+            if not biome:
+                if wx >= 0 and wz >= 0:
+                    biome = "fire"
+                elif wx < 0 and wz >= 0:
+                    biome = "grass"
+                elif wx < 0 and wz < 0:
+                    biome = "earth"
+                else:
+                    biome = "wind"
+            rough_mul = 1.0
+        else:
+            if not isinstance(terrain_cells, dict) or not terrain_cells:
+                return None, "void"
+            biome = (terrain_cells.get(f"{int(wx)},{int(wz)}") or "").strip().lower()
+            if not biome:
+                return None, "void"
+            base_height = float(terrain_config.get("hub_height") or terrain_config.get("base_height") or 58.0)
+            amp = max(0.0, float(terrain_config.get("fixed_noise_amplitude") or 2.2))
+            scale = max(0.001, float(terrain_config.get("fixed_noise_scale") or 0.06))
+            hub_rough = max(0.0, min(1.0, float(terrain_config.get("fixed_hub_roughness") or 0.35)))
+            bridge_rough = max(0.0, min(1.0, float(terrain_config.get("fixed_bridge_roughness") or 0.18)))
+            rough_mul = 1.0
+            if biome == "stone":
+                rough_mul = hub_rough
+            elif biome == "bridge":
+                rough_mul = bridge_rough
+
+        octaves = max(1, min(4, int(terrain_config.get("fixed_noise_octaves") or 2)))
+        noise = 0.0
+        weight = 0.0
+        freq = 1.0
+        amp_mul = 1.0
+        seed_hash = self._seed_hash(world_seed)
+        for _ in range(octaves):
+            n = self._value_noise_2d(float(wx) * scale * freq, float(wz) * scale * freq, seed_hash)
+            noise += n * amp_mul
+            weight += amp_mul
+            freq *= 2.07
+            amp_mul *= 0.5
+        normalized = (noise / weight) if weight > 0 else 0.0
+        biome_y = (0.9 if biome == "fire" else 0.0) + (0.55 if biome == "wind" else 0.0) - (0.45 if biome == "earth" else 0.0)
+        world_h = max(8, int(terrain_config.get("voxel_world_height") or self.voxel_world_height or 128))
+        final_h = base_height + biome_y + (normalized * amp * rough_mul)
+        final_h = max(0.0, min(float(world_h - 1), final_h))
+        return int(round(final_h)), biome
+
+    def _terrain_layout_uses_sparse_cells(self, terrain_config: dict) -> bool:
+        layout = (terrain_config.get("biome_layout") or "").strip().lower()
+        return layout not in {"quadrants"}
+
+    def _biome_top_block_id(self, biome: str) -> int:
+        b = (biome or "").strip().lower()
+        if b in {"fire", "lava"}:
+            return 5
+        if b == "wind":
+            return 6
+        if b == "bridge":
+            return 7
+        if b == "stone":
+            return 4
+        if b == "earth":
+            return 3
+        return 2
+
+    def _base_block_id_at(self, world: dict, terrain_config: dict, terrain_cells: dict, x: int, y: int, z: int) -> int:
+        iy = int(y)
+        if iy < 0 or iy >= int(self.voxel_world_height):
+            return 0
+        style = (terrain_config.get("world_style") or "fixed_biome_grid").strip().lower()
+        if style == "fixed_biome_grid":
+            top_y, biome = self._sample_fixed_column_height(
+                str(world.get("seed") or "default-seed"),
+                terrain_config or {},
+                terrain_cells or {},
+                int(x),
+                int(z),
+            )
+        else:
+            top_y, biome = self._sample_fixed_column_height(
+                str(world.get("seed") or "default-seed"),
+                terrain_config or {},
+                terrain_cells or {},
+                int(x),
+                int(z),
+            )
+        if top_y is None:
+            return 0
+        if iy > int(top_y):
+            return 0
+        if iy == int(top_y):
+            return self._biome_top_block_id(biome)
+        if iy >= (int(top_y) - 3):
+            return 3
+        return 1
+
+    def _effective_block_id_at(self, world_id: int, world: dict, terrain_config: dict, terrain_cells: dict, x: int, y: int, z: int) -> int:
+        key = self._voxel_key(x, y, z)
+        bucket = self._world_voxel_bucket(world_id)
+        if key in bucket:
+            return max(0, int(bucket.get(key) or 0))
+        return self._base_block_id_at(world, terrain_config, terrain_cells, x, y, z)
+
+    def _set_voxel_override(
+        self,
+        world_id: int,
+        world: dict,
+        terrain_config: dict,
+        terrain_cells: dict,
+        x: int,
+        y: int,
+        z: int,
+        block_id: int,
+        persist_chunk: bool = True,
+    ):
+        key = self._voxel_key(x, y, z)
+        bucket = self._world_voxel_bucket(world_id)
+        target = max(0, int(block_id or 0))
+        base = self._base_block_id_at(world, terrain_config, terrain_cells, x, y, z)
+        changed = False
+        has_prev = key in bucket
+        if target == base:
+            if has_prev:
+                bucket.pop(key, None)
+                changed = True
+        else:
+            prev = max(0, int(bucket.get(key) or 0))
+            if (not has_prev) or (prev != target):
+                bucket[key] = target
+                changed = True
+        if not changed:
+            return False, None
+        cx = math.floor(int(x) / 16)
+        cz = math.floor(int(z) / 16)
+        if persist_chunk:
+            try:
+                self._persist_world_voxel_chunk(world_id, cx, cz, bucket)
+            except Exception:
+                pass
+        return True, (cx, cz)
+
+    def _persist_world_voxel_chunk(self, world_id: int, chunk_x: int, chunk_z: int, bucket: dict[str, int] | None = None):
+        wid = int(world_id or 0)
+        if wid <= 0:
+            return
+        b = bucket if isinstance(bucket, dict) else self._world_voxel_bucket(wid)
+        rows = []
+        for key, block_id in b.items():
+            parsed = self._parse_voxel_key(key)
+            if not parsed:
+                continue
+            x, y, z = parsed
+            cx = math.floor(int(x) / 16)
+            cz = math.floor(int(z) / 16)
+            if cx != int(chunk_x) or cz != int(chunk_z):
+                continue
+            lx = int(x) - (cx * 16)
+            lz = int(z) - (cz * 16)
+            bid = max(0, int(block_id or 0))
+            rows.append({"lx": lx, "y": int(y), "lz": lz, "block_id": bid})
+        self.db.save_world_voxel_chunk(wid, int(chunk_x), int(chunk_z), rows)
+
+    def _list_voxel_overrides_payload(self, world_id: int) -> list[dict]:
+        bucket = self._world_voxel_bucket(world_id)
+        out = []
+        for key, block_id in bucket.items():
+            try:
+                xs, ys, zs = str(key).split(",", 2)
+                x = int(xs)
+                y = int(ys)
+                z = int(zs)
+                bid = max(0, int(block_id or 0))
+            except Exception:
+                continue
+            out.append({"x": x, "y": y, "z": z, "block_id": bid})
+        return out
+
+    def _resolve_session_world_and_terrain(self, session: dict):
+        world_id = int(session.get("world_id") or 0)
+        world_name = (session.get("world_name") or "").strip()
+        world = None
+        if world_id > 0 and world_name:
+            world = self.db.get_world_config(world_name)
+            if world and int(world.get("id") or 0) != world_id:
+                world = None
+        if not world and world_name:
+            world = self.db.get_world_config(world_name)
+            if world:
+                world_id = int(world.get("id") or 0)
+                session["world_id"] = world_id
+        if not world:
+            return None, None, None, None
+        terrain_row = self.db.get_world_terrain(world_id)
+        if not terrain_row:
+            terrain_config, terrain_cells = build_fixed_world_terrain(world)
+            self.db.save_world_terrain(world_id, terrain_config, terrain_cells)
+        else:
+            terrain_config = (terrain_row.get("terrain_config") or {})
+            terrain_cells = (terrain_row.get("terrain_cells") or {})
+            if self._terrain_layout_uses_sparse_cells(terrain_config) and (not terrain_cells):
+                terrain_config, terrain_cells = build_fixed_world_terrain(world)
+                self.db.save_world_terrain(world_id, terrain_config, terrain_cells)
+        if world_id > 0 and world_id not in self.world_voxel_loaded_worlds:
+            bucket = self._world_voxel_bucket(world_id)
+            bucket.clear()
+            try:
+                chunk_rows = self.db.list_world_voxel_chunks(world_id, limit=120000)
+            except Exception:
+                chunk_rows = []
+            if chunk_rows:
+                for crow in chunk_rows:
+                    cx = int(crow.get("chunk_x") or 0)
+                    cz = int(crow.get("chunk_z") or 0)
+                    entries = crow.get("overrides") or []
+                    if not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        try:
+                            lx = int(entry.get("lx") or 0)
+                            y = int(entry.get("y") or 0)
+                            lz = int(entry.get("lz") or 0)
+                            bid = max(0, int(entry.get("block_id") or 0))
+                        except Exception:
+                            continue
+                        x = (cx * 16) + lx
+                        z = (cz * 16) + lz
+                        bucket[self._voxel_key(x, y, z)] = bid
+            self.world_voxel_loaded_worlds.add(world_id)
+        try:
+            self.voxel_world_height = max(64, min(256, int(terrain_config.get("voxel_world_height") or self.voxel_world_height)))
+        except Exception:
+            pass
+        return world_id, world, terrain_config, terrain_cells
 
     def _cleanup_world_loot_world(self, world_id: int, world_name: str | None = None):
         wid = int(world_id or 0)
@@ -853,6 +1315,7 @@ class SimpleWsServer:
                     "animation_state": "idle",
                     "hp": 1000,
                     "max_hp": 1000,
+                    "is_dead": False,
                     "in_world": False,
                     "world_name": None,
                     "position": {"x": 0.0, "y": 60.0, "z": 0.0},
@@ -1092,7 +1555,8 @@ class SimpleWsServer:
                     return
                 slot_index = int(payload.get("slot_index"))
                 if slot_index < 0 or slot_index >= self.inventory_hotbar_slots:
-                    await self._send_error(websocket, req_id, action, "Solo puedes usar slots 0..7")
+                    max_slot = max(0, int(self.inventory_hotbar_slots) - 1)
+                    await self._send_error(websocket, req_id, action, f"Solo puedes usar slots 0..{max_slot}")
                     return
                 res = self.db.inventory_use_slot(
                     int(session["user_id"]),
@@ -1339,6 +1803,14 @@ class SimpleWsServer:
                             "island_count": int(world.get("island_count") or 6),
                             "bridge_width": world.get("bridge_width") or "Normal",
                             "biome_mode": world.get("biome_mode") or "Variado",
+                            "biome_shape_mode": world.get("biome_shape_mode") or "Organico",
+                            "organic_noise_scale": float(world.get("organic_noise_scale") or 0.095),
+                            "organic_noise_strength": float(world.get("organic_noise_strength") or 0.36),
+                            "organic_edge_falloff": float(world.get("organic_edge_falloff") or 0.24),
+                            "bridge_curve_strength": float(world.get("bridge_curve_strength") or 0.20),
+                            "fall_death_enabled": 1 if self._as_bool_flag(world.get("fall_death_enabled"), True) else 0,
+                            "void_death_enabled": 1 if self._as_bool_flag(world.get("void_death_enabled"), True) else 0,
+                            "fall_death_threshold_voxels": max(1.0, min(120.0, float(world.get("fall_death_threshold_voxels") or 10.0))),
                             "decor_density": world.get("decor_density") or "Media",
                             "npc_slots": int(world.get("npc_slots") or 4),
                             "hub_size": world.get("hub_size") or "Mediano",
@@ -1427,14 +1899,19 @@ class SimpleWsServer:
                 session["world_name"] = world["world_name"]
                 session["world_id"] = int(world["id"])
                 session["in_world"] = True
+                session["is_dead"] = False
                 npc_slots = max(0, min(20, int(world.get("npc_slots") or 4)))
-                terrain_row = self.db.get_world_terrain(int(world["id"]))
-                terrain_config = (terrain_row or {}).get("terrain_config") or {}
-                terrain_cells = (terrain_row or {}).get("terrain_cells") or {}
-                world_style = (terrain_config.get("world_style") or "").lower()
-                if (not terrain_cells) or (world_style != "fixed_biome_grid"):
-                    terrain_config, terrain_cells = build_fixed_world_terrain(world)
-                    self.db.save_world_terrain(int(world["id"]), terrain_config, terrain_cells)
+                resolved_world_id, resolved_world, terrain_config, terrain_cells = self._resolve_session_world_and_terrain(session)
+                if not resolved_world or resolved_world_id <= 0:
+                    await self._send_error(
+                        websocket,
+                        req_id,
+                        action,
+                        "Mundo no encontrado",
+                    )
+                    return
+                world = resolved_world
+                session["world_id"] = int(resolved_world_id)
 
                 decor_config, decor_slots, decor_removed_map, decor_changed = self._ensure_world_decor_data(world, terrain_cells)
                 assets = self.db.list_decor_assets(limit=2000, active_only=True)
@@ -1456,12 +1933,24 @@ class SimpleWsServer:
                     self.db.save_world_decor_state(int(world["id"]), decor_config, decor_slots, decor_removed_map)
                 decor_removed = list((decor_removed_map or {}).keys())
                 world_loot = list(self._world_loot_bucket(int(world["id"])).values())
+                voxel_overrides = self._list_voxel_overrides_payload(int(world["id"]))
 
                 spawn_hint = terrain_config.get("spawn_hint") or {"x": 0.0, "y": 60.0, "z": 0.0}
                 if user_row.get("last_pos_y") is None or float(spawn_y) > 200:
                     spawn_y = float(spawn_hint.get("y", 60.0))
                 session_pos = {"x": float(spawn_x), "y": float(spawn_y), "z": float(spawn_z)}
                 session["position"] = session_pos
+                session["spawn_hint"] = {
+                    "x": float(spawn_hint.get("x") or 0.0),
+                    "y": float(spawn_hint.get("y") or 60.0),
+                    "z": float(spawn_hint.get("z") or 0.0),
+                }
+                session["void_height"] = float(terrain_config.get("void_height") or -90.0)
+                session["fall_death_enabled"] = self._as_bool_flag(world.get("fall_death_enabled"), True)
+                session["void_death_enabled"] = self._as_bool_flag(world.get("void_death_enabled"), True)
+                session["fall_death_threshold_voxels"] = max(1.0, min(120.0, float(world.get("fall_death_threshold_voxels") or 10.0)))
+                session["fall_peak_y"] = float(session_pos["y"])
+                session["falling_active"] = False
 
                 other_players = []
                 for ws, sess in self.sessions.items():
@@ -1492,8 +1981,16 @@ class SimpleWsServer:
                             "main_biome": world["main_biome"],
                             "view_distance": world["view_distance"],
                             "island_count": 4,
-                            "bridge_width": "N/A",
+                            "bridge_width": world.get("bridge_width") or "Normal",
                             "biome_mode": "CardinalFixed",
+                            "biome_shape_mode": world.get("biome_shape_mode") or "Organico",
+                            "organic_noise_scale": float(world.get("organic_noise_scale") or 0.095),
+                            "organic_noise_strength": float(world.get("organic_noise_strength") or 0.36),
+                            "organic_edge_falloff": float(world.get("organic_edge_falloff") or 0.24),
+                            "bridge_curve_strength": float(world.get("bridge_curve_strength") or 0.20),
+                            "fall_death_enabled": 1 if self._as_bool_flag(world.get("fall_death_enabled"), True) else 0,
+                            "void_death_enabled": 1 if self._as_bool_flag(world.get("void_death_enabled"), True) else 0,
+                            "fall_death_threshold_voxels": max(1.0, min(120.0, float(world.get("fall_death_threshold_voxels") or 10.0))),
                             "decor_density": "N/A",
                             "npc_slots": npc_slots,
                             "hub_size": world.get("hub_size") or "Mediano",
@@ -1514,6 +2011,7 @@ class SimpleWsServer:
                             "assets": list(assets_by_code.values()),
                         },
                         "world_loot": world_loot,
+                        "voxel_overrides": voxel_overrides,
                         "spawn": session_pos,
                         "player": {
                             "id": user_row["id"],
@@ -1575,6 +2073,9 @@ class SimpleWsServer:
                 session = self.sessions.get(websocket)
                 if not session or not session.get("in_world") or not session.get("world_name"):
                     await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                if bool(session.get("is_dead")):
+                    await self._send_error(websocket, req_id, action, "Estas muerto. Usa Reaparecer.")
                     return
                 key = (payload.get("key") or "").strip()
                 if not key:
@@ -1708,10 +2209,24 @@ class SimpleWsServer:
                     )
                 return
 
+            if action == "world_respawn":
+                session = self.sessions.get(websocket)
+                if not session or not session.get("in_world") or not session.get("world_name"):
+                    await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                if not bool(session.get("is_dead")):
+                    await self._send_response(websocket, req_id, action, {"ok": True, "respawned": False, "message": "No estabas muerto"})
+                    return
+                await self._notify_local_respawn(websocket, session, req_id, action)
+                return
+
             if action == "world_move":
                 session = self.sessions.get(websocket)
                 if not session or not session.get("in_world") or not session.get("world_name"):
                     await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                if bool(session.get("is_dead")):
+                    await self._send_response(websocket, req_id, action, {"ok": False, "dead": True, "error": "Estas muerto. Usa Reaparecer."})
                     return
                 pos = payload.get("position")
                 cur = session.get("position") or {"x": 0.0, "y": 60.0, "z": 0.0}
@@ -1728,8 +2243,101 @@ class SimpleWsServer:
                 anim = (payload.get("animation_state") or session.get("animation_state") or "idle").strip().lower()
                 if anim not in {"idle", "walk", "gather"}:
                     anim = "idle"
+                prev_y = float(cur.get("y", 60.0))
+                fall_peak = float(session.get("fall_peak_y", prev_y))
+                falling_before = bool(session.get("falling_active", False))
+                falling_now = falling_before
+                y_eps = 0.01
+                if y < (prev_y - y_eps):
+                    if not falling_before:
+                        fall_peak = max(fall_peak, prev_y)
+                    falling_now = True
+                elif y > (prev_y + y_eps):
+                    falling_now = False
+                    fall_peak = y
+                landed_now = falling_before and (y >= (prev_y - y_eps))
+
+                void_height = float(session.get("void_height") or -90.0)
+                void_death_enabled = bool(session.get("void_death_enabled", True))
+                fall_death_enabled = bool(session.get("fall_death_enabled", True))
+                fall_threshold = max(0.0, float(session.get("fall_death_threshold_voxels") or 10.0))
+                fall_distance_now = max(0.0, fall_peak - y)
+                in_void = y <= void_height
+                resolve_fall_now = landed_now or in_void
+                damage_applied = 0
+                damage_pct = 0.0
+                killed_reason = None
+
                 session["position"] = {"x": x, "y": y, "z": z}
                 session["animation_state"] = anim
+                session["fall_peak_y"] = float(fall_peak)
+                session["falling_active"] = bool(falling_now)
+
+                if resolve_fall_now:
+                    max_hp = max(1, int(session.get("max_hp") or 1000))
+                    hp_now = max(0, min(max_hp, int(session.get("hp") or max_hp)))
+                    if fall_death_enabled:
+                        damage_pct = self._compute_fall_damage_percent(fall_distance_now, fall_threshold)
+                        if damage_pct > 0.0:
+                            damage_applied = max(1, int(math.ceil((max_hp * damage_pct) / 100.0)))
+                            hp_now = max(0, hp_now - damage_applied)
+                    # Si toca fondo de vacio con la opcion activa, se considera muerte inmediata.
+                    if in_void and void_death_enabled:
+                        hp_now = 0
+                        if not killed_reason:
+                            killed_reason = "void_floor"
+                    if hp_now <= 0 and not killed_reason:
+                        killed_reason = "fall_distance"
+                    session["hp"] = int(hp_now)
+
+                if killed_reason:
+                    await self._notify_local_death(
+                        websocket,
+                        session,
+                        req_id,
+                        action,
+                        killed_reason,
+                        fall_distance=fall_distance_now,
+                    )
+                    return
+
+                if resolve_fall_now:
+                    session["falling_active"] = False
+                    session["fall_peak_y"] = float(y)
+                    if in_void:
+                        # Si no murio pero llego al fondo del vacio, lo devuelve al spawn sin curarlo.
+                        snap = self._respawn_session(session, full_heal=False)
+                        await self._send(
+                            websocket,
+                            {
+                                "id": None,
+                                "action": "world_local_respawn",
+                                "payload": {
+                                    "ok": True,
+                                    "respawned": True,
+                                    "position": snap["position"],
+                                    "hp": snap["hp"],
+                                    "max_hp": snap["max_hp"],
+                                },
+                            },
+                        )
+                    if damage_applied > 0:
+                        await self._notify_local_fall_damage(
+                            websocket,
+                            {
+                                "damage": int(damage_applied),
+                                "damage_pct": float(damage_pct),
+                                "hp": int(session.get("hp") or 0),
+                                "max_hp": max(1, int(session.get("max_hp") or 1000)),
+                                "fall_distance": float(fall_distance_now),
+                                "threshold": float(fall_threshold),
+                            },
+                        )
+                pos_now = session.get("position") or {"x": x, "y": y, "z": z}
+                x = float(pos_now.get("x") or x)
+                y = float(pos_now.get("y") or y)
+                z = float(pos_now.get("z") or z)
+
                 await self._send_response(websocket, req_id, action, {"ok": True})
                 await self._broadcast_world_event(
                     session["world_name"],
@@ -1774,10 +2382,249 @@ class SimpleWsServer:
                             )
                 return
 
+            if action == "world_block_batch":
+                session = self.sessions.get(websocket)
+                if not session or not session.get("in_world") or not session.get("world_name"):
+                    await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                if bool(session.get("is_dead")):
+                    await self._send_error(websocket, req_id, action, "Estas muerto. Usa Reaparecer.")
+                    return
+                actions_raw = payload.get("actions")
+                if not isinstance(actions_raw, list) or len(actions_raw) <= 0:
+                    await self._send_error(websocket, req_id, action, "Lista de acciones invalida")
+                    return
+                actions = actions_raw[:48]
+                world_id, world, terrain_config, terrain_cells = self._resolve_session_world_and_terrain(session)
+                if not world or world_id <= 0:
+                    await self._send_error(websocket, req_id, action, "Mundo no encontrado")
+                    return
+                pos = session.get("position") or {"x": 0.0, "y": 60.0, "z": 0.0}
+                px = float(pos.get("x") or 0.0)
+                py = float(pos.get("y") or 0.0)
+                pz = float(pos.get("z") or 0.0)
+                actor_hw = 0.42
+                actor_hh = 0.95
+                dirty_chunks: set[tuple[int, int]] = set()
+                changes: list[dict] = []
+                results: list[dict] = []
+
+                for idx, row in enumerate(actions):
+                    item = row if isinstance(row, dict) else {}
+                    kind = (item.get("type") or item.get("action") or "").strip().lower()
+                    if kind == "world_block_break":
+                        kind = "break"
+                    elif kind == "world_block_place":
+                        kind = "place"
+                    if kind not in {"break", "place"}:
+                        results.append({"index": idx, "ok": False, "error": "Tipo invalido"})
+                        continue
+                    try:
+                        x = int(item.get("x"))
+                        y = int(item.get("y"))
+                        z = int(item.get("z"))
+                    except Exception:
+                        results.append({"index": idx, "ok": False, "error": "Coordenadas invalidas"})
+                        continue
+                    if y < 0 or y >= int(self.voxel_world_height):
+                        results.append({"index": idx, "ok": False, "error": "Coordenada Y fuera de rango"})
+                        continue
+                    dist = math.dist([px, py, pz], [float(x), float(y), float(z)])
+                    if dist > float(self.voxel_edit_reach):
+                        results.append({"index": idx, "ok": False, "error": "Bloque fuera de alcance"})
+                        continue
+
+                    if kind == "break":
+                        current = self._effective_block_id_at(world_id, world, terrain_config, terrain_cells, x, y, z)
+                        if current <= 0:
+                            results.append({"index": idx, "ok": False, "error": "No hay bloque para romper"})
+                            continue
+                        changed, dirty = self._set_voxel_override(
+                            world_id, world, terrain_config, terrain_cells, x, y, z, 0, persist_chunk=False
+                        )
+                        if changed:
+                            if dirty:
+                                dirty_chunks.add((int(dirty[0]), int(dirty[1])))
+                            changes.append({"x": x, "y": y, "z": z, "block_id": 0})
+                        results.append({"index": idx, "ok": True})
+                        continue
+
+                    block_id = max(1, int(item.get("block_id") or 2))
+                    if (
+                        (x >= (px - actor_hw) and x <= (px + actor_hw)) and
+                        (z >= (pz - actor_hw) and z <= (pz + actor_hw)) and
+                        (y >= (py - actor_hh) and y <= (py + actor_hh))
+                    ):
+                        results.append({"index": idx, "ok": False, "error": "No puedes colocar bloque dentro del jugador"})
+                        continue
+                    current = self._effective_block_id_at(world_id, world, terrain_config, terrain_cells, x, y, z)
+                    if current > 0:
+                        results.append({"index": idx, "ok": False, "error": "Destino ocupado"})
+                        continue
+                    changed, dirty = self._set_voxel_override(
+                        world_id, world, terrain_config, terrain_cells, x, y, z, block_id, persist_chunk=False
+                    )
+                    if changed:
+                        if dirty:
+                            dirty_chunks.add((int(dirty[0]), int(dirty[1])))
+                        changes.append({"x": x, "y": y, "z": z, "block_id": block_id})
+                    results.append({"index": idx, "ok": True})
+
+                for cx, cz in dirty_chunks:
+                    try:
+                        self._persist_world_voxel_chunk(world_id, cx, cz)
+                    except Exception:
+                        pass
+                rejected_count = 0
+                for row in results:
+                    if isinstance(row, dict) and row.get("ok") is False:
+                        rejected_count += 1
+                try:
+                    self.log(
+                        f"[VOXEL] batch user={session.get('username')} world={session.get('world_name')} "
+                        f"processed={len(actions)} changes={len(changes)} rejected={rejected_count}"
+                    )
+                except Exception:
+                    pass
+
+                await self._send_response(
+                    websocket,
+                    req_id,
+                    action,
+                    {
+                        "ok": True,
+                        "processed": len(actions),
+                        "changes": changes,
+                        "results": results,
+                    },
+                )
+                if changes:
+                    await self._broadcast_world_event(
+                        session["world_name"],
+                        "world_chunk_patch",
+                        {"changes": changes, "by": session.get("username")},
+                        exclude=websocket,
+                    )
+                    # Compatibilidad adicional: replica tambien como eventos legacy individuales.
+                    for change in changes:
+                        await self._broadcast_world_event(
+                            session["world_name"],
+                            "world_block_changed",
+                            {"change": change, "by": session.get("username")},
+                            exclude=websocket,
+                        )
+                return
+
+            if action == "world_block_break":
+                session = self.sessions.get(websocket)
+                if not session or not session.get("in_world") or not session.get("world_name"):
+                    await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                if bool(session.get("is_dead")):
+                    await self._send_error(websocket, req_id, action, "Estas muerto. Usa Reaparecer.")
+                    return
+                try:
+                    x = int(payload.get("x"))
+                    y = int(payload.get("y"))
+                    z = int(payload.get("z"))
+                except Exception:
+                    await self._send_error(websocket, req_id, action, "Coordenadas invalidas")
+                    return
+                if y < 0 or y >= int(self.voxel_world_height):
+                    await self._send_error(websocket, req_id, action, "Coordenada Y fuera de rango")
+                    return
+                pos = session.get("position") or {"x": 0.0, "y": 60.0, "z": 0.0}
+                dist = math.dist(
+                    [float(pos.get("x") or 0.0), float(pos.get("y") or 0.0), float(pos.get("z") or 0.0)],
+                    [float(x), float(y), float(z)],
+                )
+                if dist > float(self.voxel_edit_reach):
+                    await self._send_error(websocket, req_id, action, "Bloque fuera de alcance")
+                    return
+                world_id, world, terrain_config, terrain_cells = self._resolve_session_world_and_terrain(session)
+                if not world or world_id <= 0:
+                    await self._send_error(websocket, req_id, action, "Mundo no encontrado")
+                    return
+                current = self._effective_block_id_at(world_id, world, terrain_config, terrain_cells, x, y, z)
+                if current <= 0:
+                    await self._send_error(websocket, req_id, action, "No hay bloque para romper")
+                    return
+                self._set_voxel_override(world_id, world, terrain_config, terrain_cells, x, y, z, 0)
+                change = {"x": x, "y": y, "z": z, "block_id": 0}
+                await self._send_response(websocket, req_id, action, {"ok": True, "change": change})
+                await self._broadcast_world_event(
+                    session["world_name"],
+                    "world_block_changed",
+                    {"change": change, "by": session.get("username")},
+                    exclude=websocket,
+                )
+                return
+
+            if action == "world_block_place":
+                session = self.sessions.get(websocket)
+                if not session or not session.get("in_world") or not session.get("world_name"):
+                    await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                if bool(session.get("is_dead")):
+                    await self._send_error(websocket, req_id, action, "Estas muerto. Usa Reaparecer.")
+                    return
+                try:
+                    x = int(payload.get("x"))
+                    y = int(payload.get("y"))
+                    z = int(payload.get("z"))
+                except Exception:
+                    await self._send_error(websocket, req_id, action, "Coordenadas invalidas")
+                    return
+                block_id = max(1, int(payload.get("block_id") or 2))
+                if y < 0 or y >= int(self.voxel_world_height):
+                    await self._send_error(websocket, req_id, action, "Coordenada Y fuera de rango")
+                    return
+                pos = session.get("position") or {"x": 0.0, "y": 60.0, "z": 0.0}
+                dist = math.dist(
+                    [float(pos.get("x") or 0.0), float(pos.get("y") or 0.0), float(pos.get("z") or 0.0)],
+                    [float(x), float(y), float(z)],
+                )
+                if dist > float(self.voxel_edit_reach):
+                    await self._send_error(websocket, req_id, action, "Bloque fuera de alcance")
+                    return
+                actor_hw = 0.42
+                actor_hh = 0.95
+                px = float(pos.get("x") or 0.0)
+                py = float(pos.get("y") or 0.0)
+                pz = float(pos.get("z") or 0.0)
+                if (
+                    (x >= (px - actor_hw) and x <= (px + actor_hw)) and
+                    (z >= (pz - actor_hw) and z <= (pz + actor_hw)) and
+                    (y >= (py - actor_hh) and y <= (py + actor_hh))
+                ):
+                    await self._send_error(websocket, req_id, action, "No puedes colocar bloque dentro del jugador")
+                    return
+                world_id, world, terrain_config, terrain_cells = self._resolve_session_world_and_terrain(session)
+                if not world or world_id <= 0:
+                    await self._send_error(websocket, req_id, action, "Mundo no encontrado")
+                    return
+                current = self._effective_block_id_at(world_id, world, terrain_config, terrain_cells, x, y, z)
+                if current > 0:
+                    await self._send_error(websocket, req_id, action, "Destino ocupado")
+                    return
+                self._set_voxel_override(world_id, world, terrain_config, terrain_cells, x, y, z, block_id)
+                change = {"x": x, "y": y, "z": z, "block_id": block_id}
+                await self._send_response(websocket, req_id, action, {"ok": True, "change": change})
+                await self._broadcast_world_event(
+                    session["world_name"],
+                    "world_block_changed",
+                    {"change": change, "by": session.get("username")},
+                    exclude=websocket,
+                )
+                return
+
             if action == "world_loot_pickup":
                 session = self.sessions.get(websocket)
                 if not session or not session.get("in_world") or not session.get("world_name"):
                     await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                if bool(session.get("is_dead")):
+                    await self._send_error(websocket, req_id, action, "Estas muerto. Usa Reaparecer.")
                     return
                 loot_key = (payload.get("key") or "").strip()
                 if not loot_key:
@@ -1872,6 +2719,9 @@ class SimpleWsServer:
                 if not session or not session.get("in_world") or not session.get("world_name"):
                     await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
                     return
+                if bool(session.get("is_dead")):
+                    await self._send_error(websocket, req_id, action, "Estas muerto. Usa Reaparecer.")
+                    return
                 cls = (payload.get("character_class") or "").strip().lower()
                 if cls not in {"rogue", "tank", "mage", "healer"}:
                     await self._send_error(websocket, req_id, action, "Clase invalida")
@@ -1893,6 +2743,9 @@ class SimpleWsServer:
                 session = self.sessions.get(websocket)
                 if not session or not session.get("in_world") or not session.get("world_name"):
                     await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                if bool(session.get("is_dead")):
+                    await self._send_error(websocket, req_id, action, "Estas muerto. Usa Reaparecer.")
                     return
                 text = (payload.get("message") or "").strip()
                 if not text:
@@ -1918,6 +2771,9 @@ class SimpleWsServer:
                 session = self.sessions.get(websocket)
                 if not session or not session.get("in_world") or not session.get("world_name"):
                     await self._send_error(websocket, req_id, action, "No estas dentro de un mundo")
+                    return
+                if bool(session.get("is_dead")):
+                    await self._send_error(websocket, req_id, action, "Estas muerto. Usa Reaparecer.")
                     return
                 emotion = (payload.get("emotion") or "neutral").strip().lower()
                 if emotion not in {"neutral", "happy", "angry", "sad", "surprised", "cool", "love", "dead"}:

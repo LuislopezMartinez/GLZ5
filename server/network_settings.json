@@ -1,6 +1,17 @@
 {
   "network_settings": {
-    "client_request_timeout_ms": 12000
+    "client_request_timeout_ms": 12000,
+    "movement_sync": {
+      "send_interval_ms": 100,
+      "send_min_distance": 0.08,
+      "send_min_y_distance": 0.12,
+      "remote_near_distance": 0.35,
+      "remote_far_distance": 4.0,
+      "remote_min_follow_speed": 7.0,
+      "remote_max_follow_speed": 24.0,
+      "remote_teleport_distance": 25.0,
+      "remote_stop_epsilon": 0.03
+    }
   },
-  "updated_at_utc": "2026-02-16T15:11:48.653246"
+  "updated_at_utc": "2026-02-19T03:52:22.420362"
 }

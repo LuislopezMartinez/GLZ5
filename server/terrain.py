@@ -1,59 +1,65 @@
+def _clamp_float(raw, default: float, lo: float, hi: float) -> float:
+    try:
+        value = float(raw)
+    except Exception:
+        value = default
+    return max(lo, min(hi, value))
+
+
 def build_fixed_world_terrain(config: dict) -> tuple[dict, dict]:
-    scale = 3
-    hub_size = (config.get("hub_size") or config.get("world_size") or "Mediano").lower()
-    island_size = (config.get("island_size") or "Grande").lower()
-    gap_size = (config.get("platform_gap") or config.get("terrain_type") or "Media").lower()
+    # Nuevo layout simplificado:
+    # - Mundo voxel global destruible.
+    # - 4 cuadrantes => 4 biomas.
+    # - Altura total 128, superficie base en Y=64.
     view_distance = (config.get("view_distance") or "Media").lower()
-
-    hub_half = {"compacto": 12, "estandar": 16, "amplio": 20, "mediano": 16, "grande": 20}.get(hub_size, 16) * scale
-    island_half = {"normal": 14, "grande": 18, "enorme": 24}.get(island_size, 18) * scale
-    gap = {"cercana": 8, "equilibrado": 12, "lejano": 16, "media": 12, "amplia": 16}.get(gap_size, 12) * scale
     view_distance_chunks = {"corta": 2, "media": 3, "larga": 5}.get(view_distance, 3)
-    ring_distance = hub_half + gap + island_half
-    world_height = 58
-
+    world_voxel_height = int(_clamp_float(config.get("voxel_world_height"), 128.0, 64.0, 256.0))
+    default_surface = float(max(1, min(world_voxel_height - 1, int(round(world_voxel_height * 0.5)))))
+    surface_height = int(_clamp_float(config.get("surface_height"), default_surface, 1.0, float(world_voxel_height - 1)))
+    mountain_amplitude = _clamp_float(config.get("mountain_amplitude"), 20.0, 4.0, 40.0)
+    mountain_noise_scale = _clamp_float(config.get("mountain_noise_scale"), 0.02, 0.003, 0.12)
+    fall_death_threshold_voxels = _clamp_float(config.get("fall_death_threshold_voxels"), 10.0, 1.0, 120.0)
     terrain_cells: dict[str, str] = {}
-
-    def fill_square(cx: int, cz: int, half_size: int, biome: str):
-        for x in range(cx - half_size, cx + half_size + 1):
-            for z in range(cz - half_size, cz + half_size + 1):
-                terrain_cells[f"{x},{z}"] = biome
-
-    def fill_rect(x1: int, x2: int, z1: int, z2: int, biome: str):
-        xa, xb = sorted((x1, x2))
-        za, zb = sorted((z1, z2))
-        for x in range(xa, xb + 1):
-            for z in range(za, zb + 1):
-                terrain_cells[f"{x},{z}"] = biome
-
-    fill_square(0, 0, hub_half, "stone")
-    fill_square(0, ring_distance, island_half, "fire")
-    fill_square(0, -ring_distance, island_half, "earth")
-    fill_square(ring_distance, 0, island_half, "wind")
-    fill_square(-ring_distance, 0, island_half, "grass")
-
-    bridge_half = 2 * scale
-    fill_rect(-bridge_half, bridge_half, hub_half + 1, ring_distance - island_half - 1, "bridge")
-    fill_rect(-bridge_half, bridge_half, -hub_half - 1, -ring_distance + island_half + 1, "bridge")
-    fill_rect(hub_half + 1, ring_distance - island_half - 1, -bridge_half, bridge_half, "bridge")
-    fill_rect(-hub_half - 1, -ring_distance + island_half + 1, -bridge_half, bridge_half, "bridge")
 
     terrain_config = {
         "chunk_size": 16,
         "world_style": "fixed_biome_grid",
-        "hub_height": world_height,
-        "base_height": world_height,
+        "biome_layout": "quadrants",
+        "voxel_world_height": world_voxel_height,
+        "hub_height": surface_height,
+        "base_height": surface_height,
+        "surface_height": surface_height,
+        "mountain_amplitude": mountain_amplitude,
+        "mountain_noise_scale": mountain_noise_scale,
+        "fixed_noise_amplitude": mountain_amplitude,
+        "fixed_noise_scale": mountain_noise_scale,
+        "fixed_noise_octaves": 2,
+        "fixed_hub_roughness": 1.0,
+        "fixed_bridge_roughness": 1.0,
         "view_distance_chunks": view_distance_chunks,
-        "void_height": -90,
-        "hub_half_size": hub_half,
-        "island_half_size": island_half,
-        "ring_distance": ring_distance,
-        "platform_gap": gap,
-        "bridge_half_width": bridge_half,
-        "world_scale": scale,
+        "void_height": -64,
+        "quadrant_biomes": {
+            "xp_zp": "fire",
+            "xn_zp": "grass",
+            "xn_zn": "earth",
+            "xp_zn": "wind",
+        },
+        "fall_death_enabled": 1 if int(config.get("fall_death_enabled") or 1) == 1 else 0,
+        "void_death_enabled": 1 if int(config.get("void_death_enabled") or 1) == 1 else 0,
+        "fall_death_threshold_voxels": fall_death_threshold_voxels,
         "island_count": 4,
-        "biome_mode": "CardinalFixed",
+        "biome_mode": "Quadrants4",
         "npc_slots": max(0, min(20, int(config.get("npc_slots") or 4))),
-        "spawn_hint": {"x": 0.0, "y": 60.0, "z": 0.0},
+        "physics_move_speed": float(config.get("physics_move_speed") or 4.6),
+        "physics_sprint_mult": float(config.get("physics_sprint_mult") or 1.45),
+        "physics_accel": float(config.get("physics_accel") or 16.0),
+        "physics_decel": float(config.get("physics_decel") or 18.0),
+        "physics_step_height": float(config.get("physics_step_height") or 0.75),
+        "physics_max_slope_deg": float(config.get("physics_max_slope_deg") or 48.0),
+        "physics_ground_snap": float(config.get("physics_ground_snap") or 1.20),
+        "physics_jump_velocity": float(config.get("physics_jump_velocity") or 8.8),
+        "physics_gravity": float(config.get("physics_gravity") or 26.0),
+        "physics_air_control": float(config.get("physics_air_control") or 0.45),
+        "spawn_hint": {"x": 0.0, "y": float(min(world_voxel_height - 2, surface_height + 2)), "z": 0.0},
     }
     return terrain_config, terrain_cells

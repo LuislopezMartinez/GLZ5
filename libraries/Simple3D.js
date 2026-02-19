@@ -15,12 +15,17 @@ export class Simple3D {
         this.floatingLayout = null;
         this.seedHash = 1;
         this.chunkSize = 16;
+        this.voxelChunkHeight = 128;
+        this.voxelLayerSize = this.chunkSize * this.chunkSize;
+        this.voxelChunkVolume = this.voxelLayerSize * this.voxelChunkHeight;
+        this.useVoxelTerrainMeshing = true;
         this.viewDistanceChunks = 3;
         this.chunkQueue = [];
         this.chunkQueueKeys = new Set();
         this.chunks = new Map();
         this.chunkCenter = { cx: 0, cz: 0 };
         this.generatedChunks = 0;
+        this.generatedVoxelBlocks = 0;
         this.maxHeightSeen = -Infinity;
         this.minHeightSeen = Infinity;
         this.terrainDirty = false;
@@ -29,7 +34,14 @@ export class Simple3D {
         this.terrainTopMesh = null;
         this.terrainBodyMesh = null;
         this.fixedTerrainMeshes = [];
+        this.voxelChunkMeshes = new Map();
+        this.voxelDirtyChunkKeys = new Set();
         this.waterMesh = null;
+        this.waterFxUniforms = null;
+        this.waterFxConfig = null;
+        this.waterRipples = [];
+        this.maxWaterRipples = 4;
+        this.waterRippleLifeSec = 2.6;
         this.spawnMarker = null;
         this.characterRig = null;
         this.characterClass = 'rogue';
@@ -40,8 +52,18 @@ export class Simple3D {
         this.emoticonExpireAt = 0;
         this.localPlayerId = null;
         this.remotePlayers = new Map();
+        this.remoteNearDistance = 0.35;
+        this.remoteFarDistance = 4.0;
+        this.remoteMinFollowSpeed = 7.0;
+        this.remoteMaxFollowSpeed = 24.0;
+        this.remoteTeleportDistance = 25.0;
+        this.remoteStopEpsilon = 0.03;
         this.pendingNetworkPosition = null;
-        this.lastNetworkGridKey = '';
+        this.networkSendIntervalSec = 0.10;
+        this.networkSendMinDistance = 0.08;
+        this.networkSendMinYDistance = 0.12;
+        this.lastNetworkSentPos = null;
+        this.lastNetworkPositionQueuedAt = -999;
         this.pendingNetworkAnimState = null;
         this.localAnimState = 'idle';
         this.pendingNetworkClassChange = null;
@@ -95,6 +117,21 @@ export class Simple3D {
         this.pendingLootPickupKey = null;
         this.lastLootPickupAttemptAt = -999;
         this.lootPickupRadius = 1.0;
+        this.voxelRaycaster = null;
+        this.voxelPointerNdc = null;
+        this.voxelPointerClientX = null;
+        this.voxelPointerClientY = null;
+        this.voxelPointerBlockedByUi = false;
+        this.voxelPointerMaxDistance = 64.0;
+        this.voxelHoverHit = null;
+        this.voxelHoverBlock = null;
+        this.voxelPlaceBlock = null;
+        this.voxelHighlightMesh = null;
+        this.voxelPlacePreviewMesh = null;
+        this.voxelPlaceBlockId = 2;
+        this.pendingVoxelActions = [];
+        this.worldVoxelOverrides = new Map();
+        this.worldVoxelOverridesByChunk = new Map();
 
         this.renderer = null;
         this.scene = null;
@@ -115,18 +152,38 @@ export class Simple3D {
         this.desktopThirdPersonActive = false;
         this.moveSpeed = 4.6;
         this.sprintMultiplier = 1.45;
+        this.moveAcceleration = 16.0;
+        this.moveDeceleration = 18.0;
+        this.maxSlopeDeg = 48.0;
+        this.maxStepHeight = 0.75;
+        this.maxDownStep = 1.20;
+        this.jumpVelocity = 8.8;
+        this.gravity = 26.0;
+        this.airControl = 0.45;
+        this.desktopVelX = 0;
+        this.desktopVelZ = 0;
+        this.actorVelY = 0;
+        this.jumpQueued = false;
+        this.actorGrounded = true;
         this.turnLerp = 14;
         this.cameraYaw = 0;
         this.moveYaw = 0;
         this.cameraPitch = 0.48;
-        this.cameraPitchMin = 0.2;
-        this.cameraPitchMax = 1.1;
+        this.cameraPitchMin = -1.2;
+        this.cameraPitchMax = 1.45;
         this.cameraTargetHeight = 1.45;
         this.cameraDistance = 7.8;
         this.cameraDistanceMin = 3.2;
         this.cameraDistanceMax = 15;
         this.cameraFollowLerp = 10;
-        this.cameraRotateSensitivity = 0.0044;
+        this.cameraRotateSensitivityBase = 0.0044;
+        this.cameraRotateSensitivity = this.cameraRotateSensitivityBase;
+        this.cameraInvertY = false;
+        this.cameraCollisionEnabled = true;
+        this.cameraCollisionPadding = 0.38;
+        this.cameraCollisionMinDistance = 1.05;
+        this.cameraCollisionGroundClearance = 0.34;
+        this.cameraCollisionRaycaster = null;
         this.mouseLookActive = false;
         this.mouseLookButton = 2;
         this.mouseButtonsDown = new Set();
@@ -135,6 +192,13 @@ export class Simple3D {
         this.pointerLocked = false;
         this.pointerLockRequestedByRmb = false;
         this.enablePointerLock = false;
+        this.controlKeybinds = {
+            jump: { type: 'key', code: 'Space', ctrl: false, alt: false },
+            place_block: { type: 'key', code: 'KeyF', ctrl: false, alt: false },
+            break_block: { type: 'key', code: 'KeyQ', ctrl: false, alt: false },
+            interact_collect: { type: 'key', code: 'KeyE', ctrl: false, alt: false },
+            sprint: { type: 'key', code: 'ShiftLeft', ctrl: false, alt: false },
+        };
         this.actor = {
             x: 0, y: 0, z: 0, yaw: 0,
             moving: false,
@@ -144,7 +208,6 @@ export class Simple3D {
             targetX: 0,
             targetZ: 0
         };
-        this.cameraDistance = 7.8;
         this.cameraHeight = 5.5;
         this.cameraFollowOffsetX = -12;
         this.cameraFollowOffsetZ = -12;
@@ -173,7 +236,7 @@ export class Simple3D {
         this.onPointerLockError = this.onPointerLockError.bind(this);
     }
 
-    init({ world, player, spawn, terrainConfig, decor, worldLoot } = {}) {
+    init({ world, player, spawn, terrainConfig, decor, worldLoot, voxelOverrides } = {}) {
         const THREE = THREE_MODULE;
         if (!THREE) {
             console.error('Simple3D: THREE no está disponible. Verifica index.html.');
@@ -185,6 +248,25 @@ export class Simple3D {
         this.spawn = spawn || { x: 0, y: 80, z: 0 };
         this.elapsed = 0;
         this.params = this.buildTerrainParams(this.world, terrainConfig || null);
+        this.voxelChunkHeight = Math.max(16, Math.min(512, Math.round(Number(this.params?.voxelWorldHeight ?? 128))));
+        this.voxelLayerSize = this.chunkSize * this.chunkSize;
+        this.voxelChunkVolume = this.voxelLayerSize * this.voxelChunkHeight;
+        this.useVoxelTerrainMeshing = this.params?.voxelMeshing !== false;
+        this.moveSpeed = Number(this.params?.physicsMoveSpeed ?? 4.6);
+        this.sprintMultiplier = Number(this.params?.physicsSprintMult ?? 1.45);
+        this.moveAcceleration = Number(this.params?.physicsAccel ?? 16.0);
+        this.moveDeceleration = Number(this.params?.physicsDecel ?? 18.0);
+        this.maxStepHeight = Number(this.params?.physicsStepHeight ?? 0.75);
+        this.maxSlopeDeg = Number(this.params?.physicsMaxSlopeDeg ?? 48.0);
+        this.maxDownStep = Number(this.params?.physicsGroundSnap ?? 1.20);
+        this.jumpVelocity = Number(this.params?.physicsJumpVelocity ?? 8.8);
+        this.gravity = Number(this.params?.physicsGravity ?? 26.0);
+        this.airControl = Number(this.params?.physicsAirControl ?? 0.45);
+        this.desktopVelX = 0;
+        this.desktopVelZ = 0;
+        this.actorVelY = 0;
+        this.jumpQueued = false;
+        this.actorGrounded = true;
         this.seedHash = this.hashSeed(this.params.seed);
         this.floatingLayout = this.buildFloatingLayout(this.params);
         this.chunkQueue = [];
@@ -192,9 +274,12 @@ export class Simple3D {
         this.chunks = new Map();
         this.chunkCenter = { cx: 0, cz: 0 };
         this.generatedChunks = 0;
+        this.generatedVoxelBlocks = 0;
         this.maxHeightSeen = -Infinity;
         this.minHeightSeen = Infinity;
         this.terrainDirty = false;
+        this.voxelChunkMeshes.clear();
+        this.voxelDirtyChunkKeys.clear();
         this.actor = {
             x: this.spawn.x,
             y: this.spawn.y,
@@ -212,12 +297,13 @@ export class Simple3D {
         this.desktopThirdPersonActive = this.desktopThirdPersonEnabled && !this.useTopDownCamera;
         this.cameraYaw = this.actor.yaw;
         this.moveYaw = this.actor.yaw;
-        this.lastNetworkGridKey = `${Math.round(this.actor.x)},${Math.round(this.actor.z)}`;
-        this.pendingNetworkPosition = {
-            x: Math.round(this.actor.x),
+        this.lastNetworkSentPos = {
+            x: Number(this.actor.x.toFixed(2)),
             y: Number(this.actor.y.toFixed(2)),
-            z: Math.round(this.actor.z),
+            z: Number(this.actor.z.toFixed(2)),
         };
+        this.lastNetworkPositionQueuedAt = this.elapsed;
+        this.pendingNetworkPosition = null;
         this.characterClass = this.resolveCharacterClass(this.player);
         this.characterAnimTime = 0;
         this.localAnimState = 'idle';
@@ -273,6 +359,22 @@ export class Simple3D {
         this.worldLootByKey.clear();
         this.pendingLootPickupKey = null;
         this.lastLootPickupAttemptAt = -999;
+        this.voxelHoverHit = null;
+        this.voxelHoverBlock = null;
+        this.voxelPlaceBlock = null;
+        this.voxelPointerBlockedByUi = false;
+        this.pendingVoxelActions = [];
+        this.worldVoxelOverrides.clear();
+        this.worldVoxelOverridesByChunk.clear();
+        const incomingVoxelOverrides = Array.isArray(voxelOverrides) ? voxelOverrides : [];
+        for (const row of incomingVoxelOverrides) {
+            const x = Number(row?.x);
+            const y = Number(row?.y);
+            const z = Number(row?.z);
+            const blockId = Math.max(0, Number(row?.block_id) | 0);
+            if (![x, y, z].every((v) => Number.isFinite(v))) continue;
+            this._setWorldVoxelOverrideCache(x, y, z, blockId);
+        }
         this.activeCollectKind = null;
         this.currentBiomeKey = null;
         this.pendingBiomeChange = null;
@@ -312,6 +414,7 @@ export class Simple3D {
         this.updateWorldLootEntities();
         this.updateWorldLootPickup();
         this.updateVegetationInteraction();
+        this.updateVoxelPointerSelection();
         this.updateRemotePlayers(safeDt);
         this.updateLights();
         this.renderer.render(this.scene, this.camera);
@@ -378,6 +481,7 @@ export class Simple3D {
         window.removeEventListener('contextmenu', this.onContextMenu);
         document.removeEventListener('pointerlockchange', this.onPointerLockChange);
         document.removeEventListener('pointerlockerror', this.onPointerLockError);
+        this._removeVoxelCursorVisuals();
 
         if (this.scene) {
             this.clearObject(this.scene);
@@ -402,7 +506,12 @@ export class Simple3D {
         this.terrainTopMesh = null;
         this.terrainBodyMesh = null;
         this.fixedTerrainMeshes = [];
+        this.voxelChunkMeshes.clear();
+        this.voxelDirtyChunkKeys.clear();
         this.waterMesh = null;
+        this.waterFxUniforms = null;
+        this.waterFxConfig = null;
+        this.waterRipples = [];
         this.spawnMarker = null;
         this.characterRig = null;
         this.emoticonMesh = null;
@@ -412,7 +521,8 @@ export class Simple3D {
         this.localPlayerId = null;
         this.remotePlayers.clear();
         this.pendingNetworkPosition = null;
-        this.lastNetworkGridKey = '';
+        this.lastNetworkSentPos = null;
+        this.lastNetworkPositionQueuedAt = -999;
         this.pendingNetworkAnimState = null;
         this.localAnimState = 'idle';
         this.pendingNetworkClassChange = null;
@@ -456,6 +566,19 @@ export class Simple3D {
         this.decorCollectHighlightReplacements = [];
         this.decorRaycaster = null;
         this.decorPointerNdc = null;
+        this.voxelRaycaster = null;
+        this.voxelPointerNdc = null;
+        this.voxelPointerClientX = null;
+        this.voxelPointerClientY = null;
+        this.voxelPointerBlockedByUi = false;
+        this.voxelHoverHit = null;
+        this.voxelHoverBlock = null;
+        this.voxelPlaceBlock = null;
+        this.voxelHighlightMesh = null;
+        this.voxelPlacePreviewMesh = null;
+        this.pendingVoxelActions = [];
+        this.worldVoxelOverrides.clear();
+        this.worldVoxelOverridesByChunk.clear();
         this.decorGroup = null;
         this.decorCollisionCellGroup = null;
         this.worldLootGroup = null;
@@ -467,6 +590,11 @@ export class Simple3D {
         this.mouseLookActive = false;
         this.pointerLocked = false;
         this.pointerLockRequestedByRmb = false;
+        this.desktopVelX = 0;
+        this.desktopVelZ = 0;
+        this.actorVelY = 0;
+        this.jumpQueued = false;
+        this.actorGrounded = true;
         if (this.worldCanvas) this.worldCanvas.style.cursor = '';
     }
 
@@ -475,6 +603,8 @@ export class Simple3D {
             generatedChunks: this.generatedChunks,
             queuedChunks: this.chunkQueue.length,
             chunkSize: this.chunkSize,
+            chunkHeight: this.voxelChunkHeight,
+            generatedVoxelBlocks: this.generatedVoxelBlocks,
             minHeightSeen: Number.isFinite(this.minHeightSeen) ? this.minHeightSeen : 0,
             maxHeightSeen: Number.isFinite(this.maxHeightSeen) ? this.maxHeightSeen : 0
         };
@@ -595,6 +725,7 @@ export class Simple3D {
         this.localNameTag = this.createNameTag(THREE, localName, this.localHealth.hp, this.localHealth.maxHp);
         this.scene.add(this.localNameTag.sprite);
         this.vegetationInteractHint = null;
+        this._ensureVoxelCursorVisuals(THREE);
         this.createDebugCameraUi();
         this.createDebugCharacterUi();
 
@@ -1538,7 +1669,7 @@ export class Simple3D {
         return root;
     }
 
-    _upsertWorldLootEntity(entity = {}) {
+    _upsertWorldLootEntity(entity = {}, options = null) {
         const key = (entity?.key || '').toString();
         if (!key || !this.scene) return;
         if (!this.worldLootGroup) {
@@ -1605,12 +1736,12 @@ export class Simple3D {
     replaceWorldLoot(entities = []) {
         this.clearWorldLoot();
         const list = Array.isArray(entities) ? entities : [];
-        for (const e of list) this._upsertWorldLootEntity(e);
+        for (const e of list) this._upsertWorldLootEntity(e, { spawnRipple: false });
     }
 
     applyWorldLootSpawned(entities = []) {
         const list = Array.isArray(entities) ? entities : [];
-        for (const e of list) this._upsertWorldLootEntity(e);
+        for (const e of list) this._upsertWorldLootEntity(e, { spawnRipple: true });
     }
 
     updateWorldLootEntities() {
@@ -2268,16 +2399,129 @@ export class Simple3D {
         }
     }
 
+    _normalizeControlBinding(rawBinding, fallbackBinding) {
+        const fb = (fallbackBinding && typeof fallbackBinding === 'object')
+            ? fallbackBinding
+            : { type: 'key', code: 'KeyF', ctrl: false, alt: false };
+        if (typeof rawBinding === 'string') {
+            const code = rawBinding.trim();
+            return { type: 'key', code: code || fb.code, ctrl: false, alt: false };
+        }
+        const src = (rawBinding && typeof rawBinding === 'object') ? rawBinding : {};
+        const typeRaw = (src.type || fb.type || 'key').toString().toLowerCase();
+        const type = typeRaw === 'mouse' ? 'mouse' : 'key';
+        if (type === 'mouse') {
+            const button = Number.isFinite(Number(src.button)) ? (Number(src.button) | 0) : (Number(fb.button ?? 0) | 0);
+            return {
+                type: 'mouse',
+                button: Math.max(0, button),
+                ctrl: !!src.ctrl,
+                alt: !!src.alt,
+            };
+        }
+        return {
+            type: 'key',
+            code: (src.code || fb.code || '').toString().trim() || (fb.code || 'KeyF'),
+            ctrl: !!src.ctrl,
+            alt: !!src.alt,
+        };
+    }
+
+    _bindingMatchesKeyEvent(ev, binding) {
+        const b = this._normalizeControlBinding(binding, { type: 'key', code: '', ctrl: false, alt: false });
+        if (b.type !== 'key') return false;
+        const code = (ev?.code || '').toString();
+        if (!code || code !== b.code) return false;
+        if (!!ev.ctrlKey !== !!b.ctrl) return false;
+        if (!!ev.altKey !== !!b.alt) return false;
+        return true;
+    }
+
+    _bindingMatchesMouseEvent(ev, binding) {
+        const b = this._normalizeControlBinding(binding, { type: 'mouse', button: 0, ctrl: false, alt: false });
+        if (b.type !== 'mouse') return false;
+        const btn = Number(ev?.button);
+        if (!Number.isFinite(btn) || (btn | 0) !== (Number(b.button) | 0)) return false;
+        if (!!ev.ctrlKey !== !!b.ctrl) return false;
+        if (!!ev.altKey !== !!b.alt) return false;
+        return true;
+    }
+
+    setControlConfig(config = {}) {
+        const keybinds = (config?.keybinds && typeof config.keybinds === 'object') ? config.keybinds : {};
+        this.controlKeybinds = {
+            jump: this._normalizeControlBinding(keybinds.jump, { type: 'key', code: 'Space', ctrl: false, alt: false }),
+            place_block: this._normalizeControlBinding(keybinds.place_block, { type: 'key', code: 'KeyF', ctrl: false, alt: false }),
+            break_block: this._normalizeControlBinding(keybinds.break_block, { type: 'key', code: 'KeyQ', ctrl: false, alt: false }),
+            interact_collect: this._normalizeControlBinding(keybinds.interact_collect, { type: 'key', code: 'KeyE', ctrl: false, alt: false }),
+            sprint: this._normalizeControlBinding(keybinds.sprint, { type: 'key', code: 'ShiftLeft', ctrl: false, alt: false }),
+        };
+        const sensMul = Number(config?.camera_sensitivity);
+        const mul = Number.isFinite(sensMul) ? Math.max(0.25, Math.min(2.5, sensMul)) : 1.0;
+        this.cameraRotateSensitivity = this.cameraRotateSensitivityBase * mul;
+        this.cameraInvertY = !!config?.camera_invert_y;
+    }
+
+    setNetworkSyncConfig(config = null) {
+        const cfg = (config && typeof config === 'object') ? config : {};
+        const num = (v, fb) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : fb;
+        };
+        this.networkSendIntervalSec = Math.max(0.03, Math.min(1.0, num(cfg.send_interval_ms, this.networkSendIntervalSec * 1000) / 1000));
+        this.networkSendMinDistance = Math.max(0.01, Math.min(2.0, num(cfg.send_min_distance, this.networkSendMinDistance)));
+        this.networkSendMinYDistance = Math.max(0.01, Math.min(2.0, num(cfg.send_min_y_distance, this.networkSendMinYDistance)));
+        this.remoteNearDistance = Math.max(0.01, Math.min(5.0, num(cfg.remote_near_distance, this.remoteNearDistance)));
+        this.remoteFarDistance = Math.max(this.remoteNearDistance, Math.min(60.0, num(cfg.remote_far_distance, this.remoteFarDistance)));
+        this.remoteMinFollowSpeed = Math.max(0.2, Math.min(120.0, num(cfg.remote_min_follow_speed, this.remoteMinFollowSpeed)));
+        this.remoteMaxFollowSpeed = Math.max(this.remoteMinFollowSpeed, Math.min(160.0, num(cfg.remote_max_follow_speed, this.remoteMaxFollowSpeed)));
+        this.remoteTeleportDistance = Math.max(1.0, Math.min(500.0, num(cfg.remote_teleport_distance, this.remoteTeleportDistance)));
+        this.remoteStopEpsilon = Math.max(0.001, Math.min(2.0, num(cfg.remote_stop_epsilon, this.remoteStopEpsilon)));
+    }
+
+    _isActionKey(ev, actionKey) {
+        const binding = this.controlKeybinds?.[actionKey];
+        return this._bindingMatchesKeyEvent(ev, binding);
+    }
+
+    _isActionMouse(ev, actionKey) {
+        const binding = this.controlKeybinds?.[actionKey];
+        return this._bindingMatchesMouseEvent(ev, binding);
+    }
+
+    _isSprintPressed() {
+        const sprintBinding = this._normalizeControlBinding(this.controlKeybinds?.sprint, { type: 'key', code: 'ShiftLeft', ctrl: false, alt: false });
+        if (sprintBinding.type === 'key' && sprintBinding.code) {
+            if (!this.keys.has(sprintBinding.code)) return false;
+            const ctrlPressed = this.keys.has('ControlLeft') || this.keys.has('ControlRight');
+            const altPressed = this.keys.has('AltLeft') || this.keys.has('AltRight');
+            if (sprintBinding.ctrl !== ctrlPressed) return false;
+            if (sprintBinding.alt !== altPressed) return false;
+            return true;
+        }
+        return this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+    }
+
     onKeyDown(ev) {
         const tag = (ev?.target?.tagName || '').toLowerCase();
         if (tag === 'input' || tag === 'textarea') return;
-        if (ev.code.startsWith('Arrow') || ev.code === 'Space') ev.preventDefault();
-        if (ev.code === 'KeyE' && !ev.repeat) this.requestVegetationInteract();
+        if (ev.code.startsWith('Arrow') || this._isActionKey(ev, 'jump')) ev.preventDefault();
+        if (this._isActionKey(ev, 'break_block') && !ev.repeat) {
+            this.requestBreakHoveredVoxel();
+            return;
+        }
+        if (this._isActionKey(ev, 'place_block') && !ev.repeat) {
+            this.requestPlaceHoveredVoxel();
+            return;
+        }
+        if (this._isActionKey(ev, 'interact_collect') && !ev.repeat) this.requestVegetationInteract();
+        if (this._isActionKey(ev, 'jump') && !ev.repeat && this.actorGrounded) this.jumpQueued = true;
         this.keys.add(ev.code);
     }
 
     onKeyUp(ev) {
         this.keys.delete(ev.code);
+        if (this._isActionKey(ev, 'jump')) this.jumpQueued = false;
     }
 
     shouldUseTopDownCamera() {
@@ -2288,13 +2532,45 @@ export class Simple3D {
 
     isUiInteractiveTarget(target) {
         if (!target || !target.closest) return false;
-        return !!target.closest('input,textarea,select,button,[contenteditable="true"],#debug-camera-controls,#debug-character-controls');
+        return !!target.closest('input,textarea,select,button,[contenteditable="true"],[data-world-ui="1"],#debug-camera-controls,#debug-character-controls');
     }
 
     onMouseDown(ev) {
-        if (!this.desktopThirdPersonActive || !this.initialized) return;
-        if (ev.button !== 0 && ev.button !== 2) return;
+        if (!this.initialized) return;
+        if (ev.button !== 0 && ev.button !== 1 && ev.button !== 2 && ev.button !== 3 && ev.button !== 4) return;
+        this.voxelPointerClientX = Number(ev.clientX) || 0;
+        this.voxelPointerClientY = Number(ev.clientY) || 0;
+        this.voxelPointerBlockedByUi = this.isUiInteractiveTarget(ev.target);
         if (this.isUiInteractiveTarget(ev.target)) return;
+        this.updateVoxelPointerSelection();
+        let consumedByBinding = false;
+        if (this.useVoxelTerrainMeshing && this._isActionMouse(ev, 'break_block')) {
+            this.requestBreakHoveredVoxel();
+            consumedByBinding = true;
+        }
+        if (this.useVoxelTerrainMeshing && this._isActionMouse(ev, 'place_block')) {
+            this.requestPlaceHoveredVoxel();
+            consumedByBinding = true;
+        }
+        if (this._isActionMouse(ev, 'interact_collect')) {
+            this.requestVegetationInteract();
+            consumedByBinding = true;
+        }
+        if (this._isActionMouse(ev, 'jump') && this.actorGrounded) {
+            this.jumpQueued = true;
+            consumedByBinding = true;
+        }
+        if (consumedByBinding) {
+            ev.preventDefault();
+            return;
+        }
+        if (ev.altKey && this.useVoxelTerrainMeshing) {
+            ev.preventDefault();
+            if (ev.button === 0) this.requestBreakHoveredVoxel();
+            if (ev.button === 2) this.requestPlaceHoveredVoxel();
+            return;
+        }
+        if (!this.desktopThirdPersonActive) return;
         const hitCollectable = this._pickCollectableDecorKeyFromScreenPoint(Number(ev.clientX) || 0, Number(ev.clientY) || 0);
         if (hitCollectable) return;
         ev.preventDefault();
@@ -2320,7 +2596,11 @@ export class Simple3D {
     }
 
     onMouseMove(ev) {
-        if (!this.desktopThirdPersonActive || !this.initialized) return;
+        if (!this.initialized) return;
+        this.voxelPointerClientX = Number(ev.clientX) || 0;
+        this.voxelPointerClientY = Number(ev.clientY) || 0;
+        this.voxelPointerBlockedByUi = this.isUiInteractiveTarget(ev.target);
+        if (!this.desktopThirdPersonActive) return;
         if (!this.mouseLookActive) return;
         const usingPointerLock = this.pointerLocked && (document.pointerLockElement === this.worldCanvas);
         const cx = Number(ev.clientX) || 0;
@@ -2336,7 +2616,11 @@ export class Simple3D {
         // RMB: acopla orientacion del personaje a la camara (estilo WoW).
         // LMB: solo orienta camara, sin afectar yaw del personaje.
         if (this.mouseButtonsDown.has(2)) this.moveYaw = this.cameraYaw;
-        this.cameraPitch = Math.max(this.cameraPitchMin, Math.min(this.cameraPitchMax, this.cameraPitch + (dy * this.cameraRotateSensitivity)));
+        const pitchSign = this.cameraInvertY ? -1 : 1;
+        this.cameraPitch = Math.max(
+            this.cameraPitchMin,
+            Math.min(this.cameraPitchMax, this.cameraPitch + (dy * this.cameraRotateSensitivity * pitchSign))
+        );
     }
 
     onMouseUp(ev) {
@@ -2385,62 +2669,329 @@ export class Simple3D {
         this.pointerLockRequestedByRmb = false;
     }
 
+    _isSolidVoxelAtPoint(x, y, z) {
+        const wx = Math.round(Number(x) || 0);
+        const wy = Math.round(Number(y) || 0);
+        const wz = Math.round(Number(z) || 0);
+        return this._isSolidBlockId(this.getVoxelAtWorld(wx, wy, wz));
+    }
+
+    _hasMovementHeadroomAt(x, z, groundY) {
+        // Altura libre aproximada para cuerpo de jugador (pies->cabeza).
+        const feetY = Number(groundY) || 0;
+        const bodyHeight = 1.7;
+        // Importante: solo verificar techo sobre el eje del jugador.
+        // Si incluimos muestras laterales, una pared adyacente se interpreta
+        // como "sin headroom" y puede dejar al actor sin suelo valido.
+        for (let py = feetY + 0.1; py <= (feetY + bodyHeight); py += 0.32) {
+            if (this._isSolidVoxelAtPoint(x, py, z)) return false;
+        }
+        return true;
+    }
+
+    _sampleGroundYNearHeight(x, z, refGroundY = null) {
+        if (!this.useVoxelTerrainMeshing) return this.sampleGroundY(x, z);
+        const wx = Number(x) || 0;
+        const wz = Number(z) || 0;
+        const ref = Number.isFinite(Number(refGroundY)) ? Number(refGroundY) : this.sampleGroundY(x, z);
+        if (!Number.isFinite(ref)) return this.sampleGroundY(x, z);
+        const refTop = Math.round(ref - 0.5);
+        const up = Math.max(1, Math.ceil(Math.max(0.1, Number(this.maxStepHeight) || 0.75)) + 1);
+        const down = Math.max(2, Math.ceil(Math.max(0.5, Number(this.maxDownStep) || 1.2)) + 2);
+        const maxOffset = Math.max(up, down);
+        const r = Math.max(0.12, Number(this.actorCollisionRadius) || 0.28);
+        const probePoints = [
+            [wx, wz],
+            [wx + (r * 0.75), wz],
+            [wx - (r * 0.75), wz],
+            [wx, wz + (r * 0.75)],
+            [wx, wz - (r * 0.75)],
+            [wx + (r * 0.52), wz + (r * 0.52)],
+            [wx + (r * 0.52), wz - (r * 0.52)],
+            [wx - (r * 0.52), wz + (r * 0.52)],
+            [wx - (r * 0.52), wz - (r * 0.52)],
+        ];
+        const columns = new Map();
+        for (const [px, pz] of probePoints) {
+            const cx = Math.round(px);
+            const cz = Math.round(pz);
+            columns.set(`${cx},${cz}`, { x: cx, z: cz });
+        }
+
+        let bestGroundY = null;
+        let bestScore = Infinity;
+        for (const col of columns.values()) {
+            const colX = col.x;
+            const colZ = col.z;
+            for (let offset = 0; offset <= maxOffset; offset += 1) {
+                const candidates = (offset === 0)
+                    ? [refTop]
+                    : [refTop - offset, refTop + offset];
+                for (const topY of candidates) {
+                    if (topY < 0 || topY >= this.voxelChunkHeight) continue;
+                    if (!this._isSolidBlockId(this.getVoxelAtWorld(colX, topY, colZ))) continue;
+                    if (this._isSolidBlockId(this.getVoxelAtWorld(colX, topY + 1, colZ))) continue;
+                    const gy = topY + 0.5;
+                    if (!this._hasMovementHeadroomAt(colX, colZ, gy)) continue;
+                    const score = Math.abs(gy - ref) + (Math.hypot(colX - wx, colZ - wz) * 0.12);
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestGroundY = gy;
+                    }
+                }
+            }
+        }
+        return bestGroundY;
+    }
+
+    _canTraverseToPosition(fromX, fromZ, fromGroundY, toX, toZ) {
+        if (this._isDecorColliderBlockingPosition(toX, toZ)) return { ok: false, groundY: null };
+        const nextGround = this._sampleGroundYNearHeight(toX, toZ, fromGroundY);
+        // Permite salir de plataformas al vacio: no bloquea movimiento horizontal por falta de suelo.
+        if (nextGround === null) return { ok: true, groundY: null };
+        if (!Number.isFinite(fromGroundY)) return { ok: true, groundY: nextGround };
+
+        const dy = nextGround - fromGroundY;
+        const stepUp = Math.max(0.05, Number(this.maxStepHeight) || 0.75);
+        if (dy > stepUp) return { ok: false, groundY: nextGround };
+
+        const dx = toX - fromX;
+        const dz = toZ - fromZ;
+        const horiz = Math.hypot(dx, dz);
+        if (horiz > 0.0001) {
+            const slopeDeg = Math.abs(Math.atan2(dy, horiz) * (180 / Math.PI));
+            const slopeMax = Math.max(5, Math.min(89, Number(this.maxSlopeDeg) || 48));
+            if (dy > 0.01 && slopeDeg > slopeMax) return { ok: false, groundY: nextGround };
+        }
+        if (!this._hasMovementHeadroomAt(toX, toZ, nextGround)) return { ok: false, groundY: nextGround };
+        return { ok: true, groundY: nextGround };
+    }
+
+    _resolveDesktopCameraCollision(targetX, targetY, targetZ, desiredX, desiredY, desiredZ) {
+        const THREE = THREE_MODULE;
+        if (!THREE || !this.cameraCollisionEnabled) {
+            return { x: desiredX, y: desiredY, z: desiredZ };
+        }
+        const target = new THREE.Vector3(targetX, targetY, targetZ);
+        const desired = new THREE.Vector3(desiredX, desiredY, desiredZ);
+        const seg = desired.clone().sub(target);
+        const dist = seg.length();
+        if (!Number.isFinite(dist) || dist <= 0.0001) {
+            return { x: desiredX, y: desiredY, z: desiredZ };
+        }
+        const dir = seg.clone().divideScalar(dist);
+        if (!this.cameraCollisionRaycaster) this.cameraCollisionRaycaster = new THREE.Raycaster();
+        this.cameraCollisionRaycaster.set(target, dir);
+        this.cameraCollisionRaycaster.near = 0.05;
+        this.cameraCollisionRaycaster.far = dist;
+
+        const colliders = [];
+        if (this.terrainTopMesh) colliders.push(this.terrainTopMesh);
+        if (this.terrainBodyMesh) colliders.push(this.terrainBodyMesh);
+        if (this.voxelChunkMeshes && this.voxelChunkMeshes.size > 0) {
+            colliders.push(...this.voxelChunkMeshes.values());
+        }
+        if (Array.isArray(this.fixedTerrainMeshes) && this.fixedTerrainMeshes.length > 0) {
+            colliders.push(...this.fixedTerrainMeshes);
+        }
+        if (this.decorGroup) colliders.push(this.decorGroup);
+
+        let finalPos = desired.clone();
+        if (colliders.length > 0) {
+            const hits = this.cameraCollisionRaycaster.intersectObjects(colliders, true);
+            const hit = hits.find((h) => {
+                if (!h?.object) return false;
+                if (h.distance <= 0.005) return false;
+                const tag = (h.object?.userData?.tag || '').toString();
+                if (tag === 'decor_collision_cells') return false;
+                return true;
+            });
+            if (hit) {
+                const safeDist = Math.max(
+                    this.cameraCollisionMinDistance,
+                    Math.min(dist, Number(hit.distance) - this.cameraCollisionPadding)
+                );
+                finalPos = target.clone().add(dir.multiplyScalar(safeDist));
+            }
+        }
+
+        const feetRefY = targetY - this.cameraTargetHeight - this.playerGroundOffset;
+        const groundY = this._sampleGroundYNearHeight(finalPos.x, finalPos.z, feetRefY);
+        if (groundY !== null) {
+            const minY = groundY + this.cameraCollisionGroundClearance;
+            if (finalPos.y < minY) finalPos.y = minY;
+        }
+
+        // Segunda pasada: garantiza linea de vision libre actor->camara
+        // (importante en cuevas con techos muy cercanos al foco de camara).
+        if (colliders.length > 0) {
+            const ensureDir = finalPos.clone().sub(target);
+            const ensureDist = ensureDir.length();
+            if (Number.isFinite(ensureDist) && ensureDist > 0.001) {
+                const ensureUnit = ensureDir.clone().divideScalar(ensureDist);
+                for (let i = 0; i < 3; i += 1) {
+                    this.cameraCollisionRaycaster.set(target, ensureUnit);
+                    this.cameraCollisionRaycaster.near = 0.005;
+                    this.cameraCollisionRaycaster.far = ensureDist;
+                    const ensureHits = this.cameraCollisionRaycaster.intersectObjects(colliders, true);
+                    const ensureHit = ensureHits.find((h) => {
+                        if (!h?.object) return false;
+                        const tag = (h.object?.userData?.tag || '').toString();
+                        if (tag === 'decor_collision_cells') return false;
+                        return h.distance > 0.005;
+                    });
+                    if (!ensureHit) break;
+                    const pull = Math.max(
+                        this.cameraCollisionMinDistance,
+                        Math.min(ensureDist, Number(ensureHit.distance) - this.cameraCollisionPadding)
+                    );
+                    finalPos.copy(target.clone().add(ensureUnit.clone().multiplyScalar(pull)));
+                }
+            }
+        }
+
+        for (let i = 0; i < 5; i += 1) {
+            if (!this._isDecorColliderBlockingPosition(finalPos.x, finalPos.z)) break;
+            finalPos.addScaledVector(dir, -0.22);
+        }
+        return { x: finalPos.x, y: finalPos.y, z: finalPos.z };
+    }
+
     _updateDesktopThirdPersonController(safeDt) {
         const actor = this.actor;
         const comboForward = this.mouseButtonsDown.has(2) && this.mouseButtonsDown.has(0);
         let input = this.getDesktopMoveInput();
         if (!input && comboForward) input = { forward: 1, right: 0 };
-        let moveX = 0;
-        let moveZ = 0;
-        let moving = false;
+        let currentGround = this._sampleGroundYNearHeight(actor.x, actor.z, actor.y - this.playerGroundOffset);
+        if (currentGround === null && this.actorGrounded && !this.jumpQueued) {
+            currentGround = actor.y - this.playerGroundOffset;
+        }
+        let grounded = false;
+        if (currentGround !== null) {
+            const targetGroundY = currentGround + this.playerGroundOffset;
+            grounded = actor.y <= (targetGroundY + 0.06) && this.actorVelY <= 0.5;
+            if (grounded) {
+                actor.y = targetGroundY;
+                if (this.actorVelY < 0) this.actorVelY = 0;
+            }
+        }
 
+        if (grounded && this.jumpQueued) {
+            this.actorVelY = Math.max(0, Number(this.jumpVelocity) || 8.8);
+            grounded = false;
+            this.jumpQueued = false;
+        } else if (grounded) {
+            this.jumpQueued = false;
+        }
+        this.actorGrounded = grounded;
+
+        let desiredVelX = 0;
+        let desiredVelZ = 0;
         if (input) {
-            const speed = this.moveSpeed * (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') ? this.sprintMultiplier : 1);
-            const step = speed * safeDt;
+            const speed = this.moveSpeed * (this._isSprintPressed() ? this.sprintMultiplier : 1);
             if (this.mouseLookActive && this.mouseButtonsDown.has(2)) {
-                // En modo RMB el marco de movimiento es la camara,
-                // pero la orientacion del modelo la marca la direccion real de avance.
                 this.moveYaw = this.cameraYaw;
             }
             const sinYaw = Math.sin(this.moveYaw);
             const cosYaw = Math.cos(this.moveYaw);
             const worldDx = (input.forward * sinYaw) + (input.right * cosYaw);
             const worldDz = (input.forward * cosYaw) - (input.right * sinYaw);
-            moveX = worldDx * step;
-            moveZ = worldDz * step;
-            moving = Math.hypot(moveX, moveZ) > 0.0001;
+            desiredVelX = worldDx * speed;
+            desiredVelZ = worldDz * speed;
         }
 
-        if (moving) {
+        const accel = Math.max(2, Number(this.moveAcceleration) || 16);
+        const decel = Math.max(2, Number(this.moveDeceleration) || 18);
+        const airControl = Math.max(0, Math.min(1, Number(this.airControl) || 0));
+        const controlMul = grounded ? 1 : Math.max(0.05, airControl);
+        const response = input ? (accel * controlMul) : (decel * (grounded ? 1 : Math.max(0.03, controlMul * 0.8)));
+        const lerpFactor = Math.min(1, response * safeDt);
+        this.desktopVelX += (desiredVelX - this.desktopVelX) * lerpFactor;
+        this.desktopVelZ += (desiredVelZ - this.desktopVelZ) * lerpFactor;
+        if (!input && Math.hypot(this.desktopVelX, this.desktopVelZ) < 0.005) {
+            this.desktopVelX = 0;
+            this.desktopVelZ = 0;
+        }
+
+        const moveX = this.desktopVelX * safeDt;
+        const moveZ = this.desktopVelZ * safeDt;
+        let moving = Math.hypot(moveX, moveZ) > 0.0001;
+        if (moving && currentGround !== null) {
             let nextX = actor.x + moveX;
             let nextZ = actor.z + moveZ;
-            let blocked = this._isDecorColliderBlockingPosition(nextX, nextZ);
-            if (blocked) {
-                const tryX = actor.x + moveX;
-                if (!this._isDecorColliderBlockingPosition(tryX, actor.z)) {
-                    nextX = tryX;
-                    nextZ = actor.z;
-                    blocked = false;
-                } else {
-                    const tryZ = actor.z + moveZ;
-                    if (!this._isDecorColliderBlockingPosition(actor.x, tryZ)) {
-                        nextX = actor.x;
-                        nextZ = tryZ;
-                        blocked = false;
+            if (grounded) {
+                let test = this._canTraverseToPosition(actor.x, actor.z, currentGround, nextX, nextZ);
+                if (!test.ok) {
+                    const testX = this._canTraverseToPosition(actor.x, actor.z, currentGround, actor.x + moveX, actor.z);
+                    if (testX.ok) {
+                        nextX = actor.x + moveX;
+                        nextZ = actor.z;
+                        test = testX;
+                    } else {
+                        const testZ = this._canTraverseToPosition(actor.x, actor.z, currentGround, actor.x, actor.z + moveZ);
+                        if (testZ.ok) {
+                            nextX = actor.x;
+                            nextZ = actor.z + moveZ;
+                            test = testZ;
+                        }
                     }
                 }
-            }
-            if (!blocked) {
-                const nextGround = this.sampleGroundY(nextX, nextZ);
-                if (nextGround !== null) {
+                if (test.ok) {
                     actor.x = nextX;
                     actor.z = nextZ;
+                    const nextGroundY = Number(test.groundY);
+                    const dropDelta = (Number.isFinite(nextGroundY) && Number.isFinite(currentGround))
+                        ? (nextGroundY - currentGround)
+                        : 0;
+                    // Evita "teletransporte" al bajar un desnivel: pasa a caida suave.
+                    if (!Number.isFinite(nextGroundY) || dropDelta < -0.08) {
+                        grounded = false;
+                        this.actorGrounded = false;
+                        if (this.actorVelY > -0.5) this.actorVelY = -0.5;
+                    }
+                } else {
+                    this.desktopVelX *= 0.25;
+                    this.desktopVelZ *= 0.25;
+                    moving = false;
+                }
+            } else {
+                const blocked = this._isDecorColliderBlockingPosition(nextX, nextZ);
+                const nextGroundY = this._sampleGroundYNearHeight(nextX, nextZ, actor.y - this.playerGroundOffset);
+                const feetY = actor.y - this.playerGroundOffset;
+                // En aire se puede avanzar aunque no haya suelo debajo (caida al vacio).
+                const canPassHeight = (nextGroundY === null) || (feetY >= (nextGroundY - 0.05));
+                if (!blocked && canPassHeight) {
+                    actor.x = nextX;
+                    actor.z = nextZ;
+                } else {
+                    this.desktopVelX *= 0.45;
+                    this.desktopVelZ *= 0.45;
+                    moving = false;
                 }
             }
         }
 
-        const groundY = this.sampleGroundY(actor.x, actor.z);
-        if (groundY !== null) actor.y = groundY + this.playerGroundOffset;
+        if (!grounded) {
+            const prevY = actor.y;
+            this.actorVelY -= Math.max(4.0, Number(this.gravity) || 26.0) * safeDt;
+            actor.y += this.actorVelY * safeDt;
+            const landGroundY = this._sampleGroundYNearHeight(actor.x, actor.z, actor.y - this.playerGroundOffset);
+            if (landGroundY !== null) {
+                const targetGroundY = landGroundY + this.playerGroundOffset;
+                const descending = this.actorVelY <= 0;
+                const crossedFromAbove = (prevY >= (targetGroundY - 0.02)) && (actor.y <= targetGroundY);
+                if (descending && crossedFromAbove) {
+                    actor.y = targetGroundY;
+                    this.actorVelY = 0;
+                    grounded = true;
+                }
+            }
+        } else {
+            const groundY = this._sampleGroundYNearHeight(actor.x, actor.z, actor.y - this.playerGroundOffset);
+            if (groundY !== null) actor.y = groundY + this.playerGroundOffset;
+            else grounded = false;
+        }
+        this.actorGrounded = grounded;
         actor.moving = moving;
 
         if (moving) {
@@ -2456,10 +3007,11 @@ export class Simple3D {
         const camX = targetX - (Math.sin(this.cameraYaw) * horizDist);
         const camZ = targetZ - (Math.cos(this.cameraYaw) * horizDist);
         const camY = targetY + (Math.sin(this.cameraPitch) * this.cameraDistance);
+        const safeCam = this._resolveDesktopCameraCollision(targetX, targetY, targetZ, camX, camY, camZ);
         const followLerp = Math.min(1, this.cameraFollowLerp * safeDt);
-        this.camera.position.x += (camX - this.camera.position.x) * followLerp;
-        this.camera.position.y += (camY - this.camera.position.y) * followLerp;
-        this.camera.position.z += (camZ - this.camera.position.z) * followLerp;
+        this.camera.position.x += (safeCam.x - this.camera.position.x) * followLerp;
+        this.camera.position.y += (safeCam.y - this.camera.position.y) * followLerp;
+        this.camera.position.z += (safeCam.z - this.camera.position.z) * followLerp;
         this.camera.lookAt(targetX, targetY, targetZ);
     }
 
@@ -2470,19 +3022,11 @@ export class Simple3D {
         if (!actor.moving && moveInput) {
             const nextX = actor.x + moveInput.dx;
             const nextZ = actor.z + moveInput.dz;
-            const nextGround = this.sampleGroundY(nextX, nextZ);
+            const curGround = this._sampleGroundYNearHeight(actor.x, actor.z, actor.y - this.playerGroundOffset);
             actor.yaw = moveInput.yaw;
-            if (nextGround !== null) {
-                if (!this._isDecorColliderBlockingPosition(nextX, nextZ)) {
-                    const nextGridKey = `${Math.round(nextX)},${Math.round(nextZ)}`;
-                    if (nextGridKey !== this.lastNetworkGridKey) {
-                        this.lastNetworkGridKey = nextGridKey;
-                        this.pendingNetworkPosition = {
-                            x: Math.round(nextX),
-                            y: Number((nextGround + this.playerGroundOffset).toFixed(2)),
-                            z: Math.round(nextZ),
-                        };
-                    }
+            if (curGround !== null) {
+                const nav = this._canTraverseToPosition(actor.x, actor.z, curGround, nextX, nextZ);
+                if (nav.ok) {
                     actor.moving = true;
                     actor.moveProgress = 0;
                     actor.moveFromX = actor.x;
@@ -2490,6 +3034,13 @@ export class Simple3D {
                     actor.targetX = nextX;
                     actor.targetZ = nextZ;
                 }
+            } else if (!this._isDecorColliderBlockingPosition(nextX, nextZ)) {
+                actor.moving = true;
+                actor.moveProgress = 0;
+                actor.moveFromX = actor.x;
+                actor.moveFromZ = actor.z;
+                actor.targetX = nextX;
+                actor.targetZ = nextZ;
             }
         }
 
@@ -2505,8 +3056,17 @@ export class Simple3D {
                 actor.moving = false;
             }
         }
-        const groundY = this.sampleGroundY(actor.x, actor.z);
-        if (groundY !== null) actor.y = groundY + this.playerGroundOffset;
+        const groundY = this._sampleGroundYNearHeight(actor.x, actor.z, actor.y - this.playerGroundOffset);
+        if (groundY !== null) {
+            const targetY = groundY + this.playerGroundOffset;
+            if (actor.y <= (targetY + 0.06) && this.actorVelY <= 0.5) {
+                actor.y = targetY;
+                if (this.actorVelY < 0) this.actorVelY = 0;
+            }
+        } else {
+            this.actorVelY -= Math.max(4.0, Number(this.gravity) || 26.0) * safeDt;
+            actor.y += this.actorVelY * safeDt;
+        }
 
         const targetX = actor.x;
         const targetY = actor.y + 1.3;
@@ -2544,16 +3104,23 @@ export class Simple3D {
     }
 
     updateNetworkPositionPending() {
-        const gx = Math.round(this.actor.x);
-        const gz = Math.round(this.actor.z);
-        const key = `${gx},${gz}`;
-        if (key === this.lastNetworkGridKey) return;
-        this.lastNetworkGridKey = key;
-        this.pendingNetworkPosition = {
-            x: gx,
+        const interval = Math.max(0.03, Number(this.networkSendIntervalSec) || 0.10);
+        if ((this.elapsed - Number(this.lastNetworkPositionQueuedAt || 0)) < interval) return;
+        const cur = {
+            x: Number(this.actor.x.toFixed(2)),
             y: Number(this.actor.y.toFixed(2)),
-            z: gz,
+            z: Number(this.actor.z.toFixed(2)),
         };
+        const last = this.lastNetworkSentPos || cur;
+        const dx = cur.x - Number(last.x || 0);
+        const dy = cur.y - Number(last.y || 0);
+        const dz = cur.z - Number(last.z || 0);
+        const dist2d = Math.hypot(dx, dz);
+        const minDist = Math.max(0.01, Number(this.networkSendMinDistance) || 0.08);
+        const minY = Math.max(0.01, Number(this.networkSendMinYDistance) || 0.12);
+        if (dist2d < minDist && Math.abs(dy) < minY) return;
+        this.pendingNetworkPosition = cur;
+        this.lastNetworkPositionQueuedAt = this.elapsed;
     }
 
     setLocalPlayerId(id) {
@@ -2563,14 +3130,21 @@ export class Simple3D {
     pullPendingNetworkPosition() {
         const p = this.pendingNetworkPosition;
         this.pendingNetworkPosition = null;
+        if (p) {
+            this.lastNetworkSentPos = {
+                x: Number(p.x || 0),
+                y: Number(p.y || 0),
+                z: Number(p.z || 0),
+            };
+        }
         return p;
     }
 
     getCurrentNetworkPosition() {
         return {
-            x: Math.round(Number(this.actor?.x) || 0),
+            x: Number((Number(this.actor?.x) || 0).toFixed(2)),
             y: Number((Number(this.actor?.y) || 0).toFixed(2)),
-            z: Math.round(Number(this.actor?.z) || 0),
+            z: Number((Number(this.actor?.z) || 0).toFixed(2)),
         };
     }
 
@@ -2849,6 +3423,39 @@ export class Simple3D {
         }
     }
 
+    forceLocalPosition(position) {
+        if (!position || typeof position !== 'object' || !this.actor) return;
+        const x = Number(position.x);
+        const y = Number(position.y);
+        const z = Number(position.z);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
+        this.actor.x = x;
+        this.actor.y = y;
+        this.actor.z = z;
+        this.actor.moveFromX = x;
+        this.actor.moveFromZ = z;
+        this.actor.targetX = x;
+        this.actor.targetZ = z;
+        this.actorVelY = 0;
+        this.actorGrounded = false;
+        this.desktopVelX = 0;
+        this.desktopVelZ = 0;
+        this.pendingNetworkPosition = {
+            x: Number(x.toFixed(2)),
+            y: Number(y.toFixed(2)),
+            z: Number(z.toFixed(2)),
+        };
+        this.lastNetworkSentPos = {
+            x: Number(x.toFixed(2)),
+            y: Number(y.toFixed(2)),
+            z: Number(z.toFixed(2)),
+        };
+        this.lastNetworkPositionQueuedAt = this.elapsed;
+        if (this.spawnMarker) {
+            this.spawnMarker.position.set(x, y, z);
+        }
+    }
+
     updateNameTagPosition(tag, x, y, z, source = null) {
         if (!tag) return;
         const yOff = Math.max(1.8, Number(source?.userData?.nameTagYOffset) || 3.5);
@@ -2899,6 +3506,17 @@ export class Simple3D {
             if (map) tex = map;
         });
         return tex;
+    }
+
+    _remoteFollowAlpha(distance, dt) {
+        const near = Math.max(0.01, Number(this.remoteNearDistance) || 0.35);
+        const far = Math.max(near + 0.1, Number(this.remoteFarDistance) || 4.0);
+        const minSpeed = Math.max(0.5, Number(this.remoteMinFollowSpeed) || 7.0);
+        const maxSpeed = Math.max(minSpeed, Number(this.remoteMaxFollowSpeed) || 24.0);
+        const t = Math.max(0, Math.min(1, (distance - near) / (far - near)));
+        const speed = minSpeed + ((maxSpeed - minSpeed) * t);
+        const dtSafe = Math.max(0, Math.min(0.1, Number(dt) || 0));
+        return Math.max(0.02, Math.min(1.0, 1 - Math.exp(-speed * dtSafe)));
     }
 
     upsertRemotePlayer(player) {
@@ -2984,15 +3602,19 @@ export class Simple3D {
         const tx = Number(position.x) || 0;
         const ty = Number(position.y) || this.actor.y;
         const tz = Number(position.z) || 0;
-        const dx = tx - rp.rig.position.x;
-        const dz = tz - rp.rig.position.z;
-        if ((Math.abs(dx) + Math.abs(dz)) <= 0.001) return;
-        rp.rig.rotation.y = Math.atan2(dx, dz);
-        rp.moveFromPos.copy(rp.rig.position);
+        const dxNow = tx - Number(rp.rig?.position?.x || 0);
+        const dyNow = ty - Number(rp.rig?.position?.y || 0);
+        const dzNow = tz - Number(rp.rig?.position?.z || 0);
+        const distNow = Math.hypot(dxNow, dyNow, dzNow);
+        const teleportDist = Math.max(4.0, Number(this.remoteTeleportDistance) || 25.0);
+        if (distNow > teleportDist) {
+            rp.rig.position.set(tx, ty, tz);
+            rp.targetPos.set(tx, ty, tz);
+            rp.moving = false;
+            return;
+        }
         rp.targetPos.set(tx, ty, tz);
-        rp.moveProgress = 0;
-        rp.moving = true;
-        if (rp.networkAnimState !== 'gather') {
+        if (rp.networkAnimState !== 'gather' && Math.hypot(dxNow, dzNow) > 0.04) {
             rp.networkAnimState = 'walk';
         }
     }
@@ -3022,14 +3644,26 @@ export class Simple3D {
     updateRemotePlayers(dt = 0.016) {
         if (!this.remotePlayers || this.remotePlayers.size === 0) return;
         for (const rp of this.remotePlayers.values()) {
-            if (rp.moving) {
-                const duration = Math.max(0.01, this.gridMoveDuration);
-                rp.moveProgress = Math.min(1, rp.moveProgress + (dt / duration));
-                const t = rp.moveProgress;
-                rp.rig.position.lerpVectors(rp.moveFromPos, rp.targetPos, t);
-                if (t >= 1) {
+            if (!rp.rig || !rp.targetPos) {
+                rp.moving = false;
+            } else {
+                const dx = rp.targetPos.x - rp.rig.position.x;
+                const dy = rp.targetPos.y - rp.rig.position.y;
+                const dz = rp.targetPos.z - rp.rig.position.z;
+                const dist = Math.hypot(dx, dy, dz);
+                const stopEps = Math.max(0.005, Number(this.remoteStopEpsilon) || 0.03);
+                if (dist <= stopEps) {
                     rp.rig.position.copy(rp.targetPos);
                     rp.moving = false;
+                } else {
+                    const alpha = this._remoteFollowAlpha(dist, dt);
+                    rp.rig.position.x += dx * alpha;
+                    rp.rig.position.y += dy * alpha;
+                    rp.rig.position.z += dz * alpha;
+                    rp.moving = Math.hypot(dx, dz) > (stopEps * 0.65);
+                    if (Math.abs(dx) + Math.abs(dz) > 0.001) {
+                        rp.rig.rotation.y = Math.atan2(dx, dz);
+                    }
                 }
             }
             const animator = rp.rig?.userData?.animator || null;
@@ -3420,7 +4054,7 @@ export class Simple3D {
     }
 
     sampleGroundY(x, z) {
-        const h = this.sampleHeight(Math.round(x), Math.round(z));
+        const h = this.getTopSolidYAtWorld(Math.round(x), Math.round(z));
         if (h === null || !Number.isFinite(h)) return null;
         return h + 0.5;
     }
@@ -3460,7 +4094,11 @@ export class Simple3D {
             return {
                 seed,
                 worldStyle: (terrainConfig.world_style || 'noise').toLowerCase(),
+                biomeLayout: (terrainConfig.biome_layout || '').toLowerCase(),
+                voxelWorldHeight: Number(terrainConfig.voxel_world_height ?? 128),
+                voxelMeshing: terrainConfig.voxel_meshing !== false,
                 baseHeight: Number(terrainConfig.base_height ?? 52),
+                surfaceHeight: Number(terrainConfig.surface_height ?? terrainConfig.base_height ?? 52),
                 heightVariation: Number(terrainConfig.height_variation ?? 14),
                 noiseScale: Number(terrainConfig.noise_scale ?? 0.11),
                 viewDistanceChunks: Number(terrainConfig.view_distance_chunks ?? 3),
@@ -3472,9 +4110,27 @@ export class Simple3D {
                 islandRadiusMax: Number(terrainConfig.island_radius_max ?? 16),
                 bridgeWidth: Number(terrainConfig.bridge_width ?? 3),
                 islandHeightVariation: Number(terrainConfig.island_height_variation ?? 6),
+                fixedNoiseAmplitude: Number(terrainConfig.fixed_noise_amplitude ?? 2.2),
+                fixedNoiseScale: Number(terrainConfig.fixed_noise_scale ?? 0.06),
+                fixedNoiseOctaves: Number(terrainConfig.fixed_noise_octaves ?? 2),
+                mountainAmplitude: Number(terrainConfig.mountain_amplitude ?? terrainConfig.fixed_noise_amplitude ?? 2.2),
+                mountainNoiseScale: Number(terrainConfig.mountain_noise_scale ?? terrainConfig.fixed_noise_scale ?? 0.06),
+                fixedHubRoughness: Number(terrainConfig.fixed_hub_roughness ?? 0.35),
+                fixedBridgeRoughness: Number(terrainConfig.fixed_bridge_roughness ?? 0.18),
+                quadrantBiomes: terrainConfig.quadrant_biomes || null,
                 biomeMode: (terrainConfig.biome_mode || 'Variado').toString(),
                 decorDensity: Number(terrainConfig.decor_density ?? 0.58),
                 voidHeight: Number(terrainConfig.void_height ?? -90),
+                physicsMoveSpeed: Number(terrainConfig.physics_move_speed ?? 4.6),
+                physicsSprintMult: Number(terrainConfig.physics_sprint_mult ?? 1.45),
+                physicsAccel: Number(terrainConfig.physics_accel ?? 16.0),
+                physicsDecel: Number(terrainConfig.physics_decel ?? 18.0),
+                physicsStepHeight: Number(terrainConfig.physics_step_height ?? 0.75),
+                physicsMaxSlopeDeg: Number(terrainConfig.physics_max_slope_deg ?? 48.0),
+                physicsGroundSnap: Number(terrainConfig.physics_ground_snap ?? 1.20),
+                physicsJumpVelocity: Number(terrainConfig.physics_jump_velocity ?? 8.8),
+                physicsGravity: Number(terrainConfig.physics_gravity ?? 26.0),
+                physicsAirControl: Number(terrainConfig.physics_air_control ?? 0.45),
                 terrainCells: terrainConfig.terrain_cells || null
             };
         }
@@ -3489,7 +4145,11 @@ export class Simple3D {
         return {
             seed,
             worldStyle: 'noise',
+            biomeLayout: '',
+            voxelWorldHeight: 128,
+            voxelMeshing: true,
             baseHeight: 52,
+            surfaceHeight: 52,
             heightVariation: terrainHeightMap[terrain] ?? 14,
             noiseScale: worldScaleMap[size] ?? 0.11,
             viewDistanceChunks: viewMap[viewDistance] ?? 3,
@@ -3501,9 +4161,27 @@ export class Simple3D {
             islandRadiusMax: 16,
             bridgeWidth: 3,
             islandHeightVariation: 6,
+            fixedNoiseAmplitude: 2.2,
+            fixedNoiseScale: 0.06,
+            fixedNoiseOctaves: 2,
+            mountainAmplitude: 2.2,
+            mountainNoiseScale: 0.06,
+            fixedHubRoughness: 0.35,
+            fixedBridgeRoughness: 0.18,
+            quadrantBiomes: null,
             biomeMode: 'Variado',
             decorDensity: 0.58,
             voidHeight: -90,
+            physicsMoveSpeed: 4.6,
+            physicsSprintMult: 1.45,
+            physicsAccel: 16.0,
+            physicsDecel: 18.0,
+            physicsStepHeight: 0.75,
+            physicsMaxSlopeDeg: 48.0,
+            physicsGroundSnap: 1.20,
+            physicsJumpVelocity: 8.8,
+            physicsGravity: 26.0,
+            physicsAirControl: 0.45,
             terrainCells: null
         };
     }
@@ -3541,6 +4219,181 @@ export class Simple3D {
 
     chunkKey(cx, cz) {
         return `${cx}:${cz}`;
+    }
+
+    voxelIndex(lx, ly, lz) {
+        return lx + (lz * this.chunkSize) + (ly * this.voxelLayerSize);
+    }
+
+    isVoxelLocalInBounds(lx, ly, lz) {
+        return (
+            lx >= 0 && lx < this.chunkSize &&
+            lz >= 0 && lz < this.chunkSize &&
+            ly >= 0 && ly < this.voxelChunkHeight
+        );
+    }
+
+    worldToChunkAndLocal(wx, wy, wz) {
+        const fx = Math.floor(wx);
+        const fy = Math.floor(wy);
+        const fz = Math.floor(wz);
+        const cx = Math.floor(fx / this.chunkSize);
+        const cz = Math.floor(fz / this.chunkSize);
+        const lx = fx - (cx * this.chunkSize);
+        const lz = fz - (cz * this.chunkSize);
+        return { cx, cz, lx, ly: fy, lz };
+    }
+
+    getChunkByWorldXZ(wx, wz) {
+        const fx = Math.floor(wx);
+        const fz = Math.floor(wz);
+        const cx = Math.floor(fx / this.chunkSize);
+        const cz = Math.floor(fz / this.chunkSize);
+        return this.chunks.get(this.chunkKey(cx, cz)) || null;
+    }
+
+    getVoxelAtWorld(wx, wy, wz) {
+        const pos = this.worldToChunkAndLocal(wx, wy, wz);
+        if (pos.ly < 0 || pos.ly >= this.voxelChunkHeight) return 0;
+        const chunk = this.chunks.get(this.chunkKey(pos.cx, pos.cz));
+        if (!chunk || !chunk.blocks) return 0;
+        return chunk.blocks[this.voxelIndex(pos.lx, pos.ly, pos.lz)] || 0;
+    }
+
+    setVoxelAtWorld(wx, wy, wz, blockId = 0) {
+        const pos = this.worldToChunkAndLocal(wx, wy, wz);
+        if (pos.ly < 0 || pos.ly >= this.voxelChunkHeight) return false;
+        const chunk = this.chunks.get(this.chunkKey(pos.cx, pos.cz));
+        if (!chunk || !chunk.blocks) return false;
+        chunk.blocks[this.voxelIndex(pos.lx, pos.ly, pos.lz)] = Math.max(0, Number(blockId) | 0);
+        return true;
+    }
+
+    _removeVoxelChunkMesh(chunkKey) {
+        const key = (chunkKey || '').toString();
+        if (!key) return;
+        const mesh = this.voxelChunkMeshes.get(key);
+        if (!mesh) return;
+        if (this.terrainGroup) this.terrainGroup.remove(mesh);
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (mesh.material) mesh.material.dispose();
+        this.voxelChunkMeshes.delete(key);
+    }
+
+    _markVoxelChunkDirty(cx, cz, includeNeighbors = false) {
+        const key = this.chunkKey(cx, cz);
+        this.voxelDirtyChunkKeys.add(key);
+        if (!includeNeighbors) return;
+        this.voxelDirtyChunkKeys.add(this.chunkKey(cx + 1, cz));
+        this.voxelDirtyChunkKeys.add(this.chunkKey(cx - 1, cz));
+        this.voxelDirtyChunkKeys.add(this.chunkKey(cx, cz + 1));
+        this.voxelDirtyChunkKeys.add(this.chunkKey(cx, cz - 1));
+    }
+
+    _markVoxelChunksDirtyAroundWorldBlock(wx, wz) {
+        const cx = Math.floor((Number(wx) || 0) / this.chunkSize);
+        const cz = Math.floor((Number(wz) || 0) / this.chunkSize);
+        this._markVoxelChunkDirty(cx, cz, true);
+    }
+
+    _biomeTopBlockId(biomeRaw = '') {
+        const biome = (biomeRaw || '').toString().toLowerCase();
+        if (biome === 'fire' || biome === 'lava') return 5;
+        if (biome === 'wind') return 6;
+        if (biome === 'bridge') return 7;
+        if (biome === 'stone') return 4;
+        if (biome === 'earth') return 3;
+        return 2;
+    }
+
+    _columnMaterialByDepth(topY, y, biomeRaw = '') {
+        if (y === topY) return this._biomeTopBlockId(biomeRaw);
+        if (y >= (topY - 3)) return 3;
+        return 1;
+    }
+
+    _worldVoxelKey(x, y, z) {
+        return `${intOr(x)},${intOr(y)},${intOr(z)}`;
+        function intOr(v) {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return 0;
+            return n | 0;
+        }
+    }
+
+    _setWorldVoxelOverrideCache(x, y, z, blockId) {
+        const ix = Number(x) | 0;
+        const iy = Number(y) | 0;
+        const iz = Number(z) | 0;
+        const bid = Math.max(0, Number(blockId) | 0);
+        const worldKey = this._worldVoxelKey(ix, iy, iz);
+        const cx = Math.floor(ix / this.chunkSize);
+        const cz = Math.floor(iz / this.chunkSize);
+        const chunkKey = this.chunkKey(cx, cz);
+        const chunkBucket = this.worldVoxelOverridesByChunk.get(chunkKey) || new Map();
+        this.worldVoxelOverrides.set(worldKey, bid);
+        chunkBucket.set(worldKey, bid);
+        this.worldVoxelOverridesByChunk.set(chunkKey, chunkBucket);
+    }
+
+    _buildVoxelBlocksFromHeights(cx, cz, heights) {
+        const blocks = new Uint16Array(this.voxelChunkVolume);
+        let solidCount = 0;
+        for (let z = 0; z < this.chunkSize; z += 1) {
+            const row = heights[z] || [];
+            for (let x = 0; x < this.chunkSize; x += 1) {
+                const h = row[x];
+                if (h === null || !Number.isFinite(h)) continue;
+                const wx = (cx * this.chunkSize) + x;
+                const wz = (cz * this.chunkSize) + z;
+                const sample = this.params.worldStyle === 'fixed_biome_grid'
+                    ? this.sampleFixedColumn(wx, wz)
+                    : (this.params.worldStyle === 'floating_hub_islands' ? this.sampleFloatingColumn(wx, wz) : null);
+                const biome = (sample?.biome || this.world?.main_biome || 'grass').toString().toLowerCase();
+                const topY = Math.max(0, Math.min(this.voxelChunkHeight - 1, Math.round(Number(h) || 0)));
+                for (let y = 0; y <= topY; y += 1) {
+                    blocks[this.voxelIndex(x, y, z)] = this._columnMaterialByDepth(topY, y, biome);
+                    solidCount += 1;
+                }
+            }
+        }
+        const chunkOverrides = this.worldVoxelOverridesByChunk.get(this.chunkKey(cx, cz));
+        if (chunkOverrides && chunkOverrides.size > 0) {
+            for (const [worldKey, blockId] of chunkOverrides.entries()) {
+                const parts = worldKey.split(',');
+                if (parts.length !== 3) continue;
+                const wx = Number(parts[0]);
+                const wy = Number(parts[1]);
+                const wz = Number(parts[2]);
+                if (![wx, wy, wz].every((v) => Number.isFinite(v))) continue;
+                if (wy < 0 || wy >= this.voxelChunkHeight) continue;
+                const local = this.worldToChunkAndLocal(wx, wy, wz);
+                if (local.cx !== cx || local.cz !== cz) continue;
+                const idx = this.voxelIndex(local.lx, local.ly, local.lz);
+                const prev = blocks[idx] || 0;
+                const next = Math.max(0, Number(blockId) | 0);
+                if (prev === next) continue;
+                if (this._isSolidBlockId(prev) && !this._isSolidBlockId(next)) solidCount = Math.max(0, solidCount - 1);
+                if (!this._isSolidBlockId(prev) && this._isSolidBlockId(next)) solidCount += 1;
+                blocks[idx] = next;
+            }
+        }
+        return { blocks, solidCount };
+    }
+
+    getTopSolidYAtWorld(wx, wz) {
+        const chunk = this.getChunkByWorldXZ(wx, wz);
+        if (!chunk || !chunk.blocks) {
+            const hFallback = this.sampleHeight(Math.round(wx), Math.round(wz));
+            return (hFallback === null || !Number.isFinite(hFallback)) ? null : Math.round(hFallback);
+        }
+        const local = this.worldToChunkAndLocal(wx, 0, wz);
+        for (let y = this.voxelChunkHeight - 1; y >= 0; y -= 1) {
+            if ((chunk.blocks[this.voxelIndex(local.lx, y, local.lz)] || 0) !== 0) {
+                return y;
+            }
+        }
+        return null;
     }
 
     enqueueInitialChunks() {
@@ -3583,6 +4436,8 @@ export class Simple3D {
             const dcz = Math.abs(chunk.cz - cz);
             if (dcx > keepRadius || dcz > keepRadius) {
                 this.chunks.delete(key);
+                this._removeVoxelChunkMesh(key);
+                this.voxelDirtyChunkKeys.delete(key);
                 removedAny = true;
             }
         }
@@ -3608,6 +4463,7 @@ export class Simple3D {
                 const chunk = this.generateChunk(next.cx, next.cz);
                 this.chunks.set(key, chunk);
                 this.generatedChunks += 1;
+                this._markVoxelChunkDirty(next.cx, next.cz, true);
                 this.terrainDirty = true;
             }
             remaining -= 1;
@@ -3638,7 +4494,18 @@ export class Simple3D {
             if (minH < this.minHeightSeen) this.minHeightSeen = minH;
             if (maxH > this.maxHeightSeen) this.maxHeightSeen = maxH;
         }
-        return { cx, cz, minH, maxH, heights, columnCount };
+        const voxelBuilt = this._buildVoxelBlocksFromHeights(cx, cz, heights);
+        this.generatedVoxelBlocks += voxelBuilt.solidCount;
+        return {
+            cx,
+            cz,
+            minH,
+            maxH,
+            heights,
+            columnCount,
+            blocks: voxelBuilt.blocks,
+            solidCount: voxelBuilt.solidCount
+        };
     }
 
     sampleHeight(wx, wz) {
@@ -3664,14 +4531,63 @@ export class Simple3D {
     }
 
     sampleFixedColumn(wx, wz) {
-        const cells = this.params?.terrainCells || null;
-        if (!cells) return { height: null, zone: 'void', biome: 'void' };
-        const biome = cells[`${wx},${wz}`];
-        if (!biome) return { height: null, zone: 'void', biome: 'void' };
-        const biomeKey = biome.toString().toLowerCase();
+        const layout = (this.params?.biomeLayout || '').toString().toLowerCase();
+        let biomeKey = '';
+        let baseHeight = Number(this.params.hubHeight || this.params.baseHeight || 58);
+        let amp = Math.max(0, Number(this.params.fixedNoiseAmplitude ?? 2.2));
+        let scale = Math.max(0.001, Number(this.params.fixedNoiseScale ?? 0.06));
+        let octaves = Math.max(1, Math.min(4, Math.round(Number(this.params.fixedNoiseOctaves ?? 2))));
+        let roughnessMul = 1.0;
+
+        if (layout === 'quadrants') {
+            const qb = (this.params?.quadrantBiomes && typeof this.params.quadrantBiomes === 'object')
+                ? this.params.quadrantBiomes
+                : null;
+            const qKey = (wx >= 0 && wz >= 0) ? 'xp_zp' : ((wx < 0 && wz >= 0) ? 'xn_zp' : ((wx < 0 && wz < 0) ? 'xn_zn' : 'xp_zn'));
+            biomeKey = (qb?.[qKey] || '').toString().toLowerCase();
+            if (!biomeKey) {
+                if (wx >= 0 && wz >= 0) biomeKey = 'fire';
+                else if (wx < 0 && wz >= 0) biomeKey = 'grass';
+                else if (wx < 0 && wz < 0) biomeKey = 'earth';
+                else biomeKey = 'wind';
+            }
+            baseHeight = Number(this.params.surfaceHeight ?? this.params.baseHeight ?? 64);
+            amp = Math.max(0, Number(this.params.mountainAmplitude ?? this.params.fixedNoiseAmplitude ?? 20));
+            scale = Math.max(0.001, Number(this.params.mountainNoiseScale ?? this.params.fixedNoiseScale ?? 0.02));
+            octaves = Math.max(1, Math.min(4, Math.round(Number(this.params.fixedNoiseOctaves ?? 2))));
+        } else {
+            const cells = this.params?.terrainCells || null;
+            if (!cells) return { height: null, zone: 'void', biome: 'void' };
+            const biome = cells[`${wx},${wz}`];
+            if (!biome) return { height: null, zone: 'void', biome: 'void' };
+            biomeKey = biome.toString().toLowerCase();
+            const hubRough = Math.max(0, Math.min(1, Number(this.params.fixedHubRoughness ?? 0.35)));
+            const bridgeRough = Math.max(0, Math.min(1, Number(this.params.fixedBridgeRoughness ?? 0.18)));
+            if (biomeKey === 'stone') roughnessMul = hubRough;
+            else if (biomeKey === 'bridge') roughnessMul = bridgeRough;
+        }
+
+        let noise = 0;
+        let weight = 0;
+        let freq = 1;
+        let ampMul = 1;
+        for (let i = 0; i < octaves; i += 1) {
+            const n = this.valueNoise2D(wx * scale * freq, wz * scale * freq);
+            noise += n * ampMul;
+            weight += ampMul;
+            freq *= 2.07;
+            ampMul *= 0.5;
+        }
+        const normalizedNoise = weight > 0 ? (noise / weight) : 0;
+        const biomeYOffset =
+            ((biomeKey === 'fire') ? 0.9 : 0.0) +
+            ((biomeKey === 'wind') ? 0.55 : 0.0) -
+            ((biomeKey === 'earth') ? 0.45 : 0.0);
+        const maxY = Math.max(7, Math.round(Number(this.params?.voxelWorldHeight ?? 128)) - 1);
+        const finalHeight = Math.max(0, Math.min(maxY, baseHeight + biomeYOffset + (normalizedNoise * amp * roughnessMul)));
         return {
-            height: Math.round(this.params.hubHeight || this.params.baseHeight || 58),
-            zone: biomeKey === 'stone' ? 'hub' : 'island',
+            height: Math.round(finalHeight),
+            zone: (layout === 'quadrants') ? 'quadrant' : (biomeKey === 'stone' ? 'hub' : 'island'),
             biome: biomeKey
         };
     }
@@ -3738,20 +4654,63 @@ export class Simple3D {
         return a + ((b - a) * t);
     }
 
-    colorForHeight(THREE, h) {
-        if (h === null || !Number.isFinite(h)) return new THREE.Color(0x000000);
-        if (h < 46) return new THREE.Color(0x2f7ed8);
-        if (h < 52) return new THREE.Color(0xd9c27c);
-        if (h < 65) return new THREE.Color(0x4caf50);
-        if (h < 78) return new THREE.Color(0x3f8f46);
-        if (h < 92) return new THREE.Color(0x8d6e63);
-        return new THREE.Color(0xe6eef5);
+    _applyTerrainToneVariation(THREE, baseColor, wx, wz, h, biomeKey = '') {
+        if (!baseColor) return new THREE.Color(0x6ab85f);
+        const c = baseColor.clone();
+        if (!Number.isFinite(wx) || !Number.isFinite(wz) || !Number.isFinite(h)) return c;
+
+        const key = (biomeKey || '').toString().toLowerCase();
+        const tintNoise = this.valueNoise2D(wx * 0.085, wz * 0.085);
+        const microNoise = this.valueNoise2D(wx * 0.31, wz * 0.31);
+        const rnd01 = this.randomFromInt2D(Math.round(wx), Math.round(wz));
+
+        let jitterStrength = 0.06;
+        if (key === 'bridge') jitterStrength = 0.05;
+        if (key === 'stone' || key === 'hub') jitterStrength = 0.06;
+        if (key === 'fire' || key === 'lava') jitterStrength = 0.08;
+
+        const jitter = (tintNoise * (jitterStrength * 0.75)) + (microNoise * (jitterStrength * 0.25));
+        const randomOffset = (rnd01 - 0.5) * (jitterStrength * 0.45);
+
+        const baseH = Number(this.params?.hubHeight ?? this.params?.baseHeight ?? 58);
+        const heightDelta = h - baseH;
+        const heightLift = Math.max(-0.04, Math.min(0.04, heightDelta * 0.0045));
+        const lightnessMul = Math.max(0.90, Math.min(1.10, 1 + jitter + randomOffset + heightLift));
+        c.multiplyScalar(lightnessMul);
+        c.r = Math.max(0, Math.min(1, c.r));
+        c.g = Math.max(0, Math.min(1, c.g));
+        c.b = Math.max(0, Math.min(1, c.b));
+
+        // Micro variacion calido/frio muy suave.
+        const warm = Math.max(-0.035, Math.min(0.035, tintNoise * 0.03));
+        c.r = Math.max(0, Math.min(1, c.r + warm));
+        c.b = Math.max(0, Math.min(1, c.b - warm));
+
+        if (!Number.isFinite(c.r) || !Number.isFinite(c.g) || !Number.isFinite(c.b)) {
+            return baseColor.clone();
+        }
+        return c;
     }
 
-    colorForFloatingSample(THREE, sample) {
+    colorForHeight(THREE, h, wx = null, wz = null) {
+        if (h === null || !Number.isFinite(h)) return new THREE.Color(0x000000);
+        let c;
+        if (h < 46) c = new THREE.Color(0x2f7ed8);
+        else if (h < 52) c = new THREE.Color(0xd9c27c);
+        else if (h < 65) c = new THREE.Color(0x4caf50);
+        else if (h < 78) c = new THREE.Color(0x3f8f46);
+        else if (h < 92) c = new THREE.Color(0x8d6e63);
+        else c = new THREE.Color(0xe6eef5);
+        return this._applyTerrainToneVariation(THREE, c, wx, wz, h, 'noise');
+    }
+
+    colorForFloatingSample(THREE, sample, wx = null, wz = null, h = null) {
         if (!sample || sample.height === null) return new THREE.Color(0x000000);
         const key = (sample.biome || '').toString().toLowerCase();
-        if (sample.zone === 'hub' || key === 'hub' || key === 'neutral') return new THREE.Color(0x8f959d);
+        const sampleH = Number.isFinite(h) ? h : Number(sample.height);
+        if (sample.zone === 'hub' || key === 'hub' || key === 'neutral') {
+            return this._applyTerrainToneVariation(THREE, new THREE.Color(0x8f959d), wx, wz, sampleH, 'hub');
+        }
         const biomeColors = {
             fire: 0xd64541,
             lava: 0xd64541,
@@ -3765,7 +4724,8 @@ export class Simple3D {
             stone: 0x8f959d,
             crystal: 0x44c6d6
         };
-        return new THREE.Color(biomeColors[key] || 0x6ab85f);
+        const base = new THREE.Color(biomeColors[key] || 0x6ab85f);
+        return this._applyTerrainToneVariation(THREE, base, wx, wz, sampleH, key);
     }
 
     darkenColor(color, factor = 0.58) {
@@ -3774,8 +4734,802 @@ export class Simple3D {
         return c;
     }
 
+    resolveWaterPlaneConfig() {
+        const worldStyle = (this.params?.worldStyle || 'noise').toLowerCase();
+        const fallbackHalfExtent = Math.max(64, (this.viewDistanceChunks + 2) * this.chunkSize);
+        let halfExtent = fallbackHalfExtent;
+        let centerX = Number(this.spawn?.x || 0);
+        let centerZ = Number(this.spawn?.z || 0);
+        let waterY = 49.5;
+
+        if (worldStyle === 'fixed_biome_grid') {
+            const hubHalf = Number(this.params?.hub_half_size ?? this.params?.hubHalfSize ?? this.params?.hubRadius ?? 28);
+            const islandHalf = Number(this.params?.island_half_size ?? this.params?.islandHalfSize ?? this.params?.islandRadiusMax ?? 16);
+            const ringDistance = Number(this.params?.ring_distance ?? this.params?.ringDistance ?? this.params?.ringRadius ?? 72);
+            const margin = Math.max(24, islandHalf * 0.6);
+            halfExtent = Math.max(fallbackHalfExtent, ringDistance + islandHalf + margin);
+            centerX = 0;
+            centerZ = 0;
+            waterY = Number(this.params?.hubHeight ?? 58) - 0.35;
+        } else if (worldStyle === 'floating_hub_islands') {
+            const islandHalf = Number(this.params?.islandRadiusMax ?? 16);
+            const ringDistance = Number(this.params?.ringRadius ?? 72);
+            halfExtent = Math.max(fallbackHalfExtent, ringDistance + islandHalf + 28);
+            centerX = 0;
+            centerZ = 0;
+            waterY = Number(this.params?.hubHeight ?? 58) - 2.5;
+        } else {
+            const baseHeight = Number(this.params?.baseHeight ?? 52);
+            waterY = baseHeight - 2.5;
+        }
+
+        return {
+            size: halfExtent * 2,
+            centerX,
+            centerZ,
+            y: waterY,
+        };
+    }
+
+    _enhanceWaterMaterial(THREE, waterMat, cfg) {
+        if (!waterMat || !cfg) return;
+        const halfSize = Math.max(1, Number(cfg.size) * 0.5);
+        const centerX = Number(cfg.centerX) || 0;
+        const centerZ = Number(cfg.centerZ) || 0;
+        waterMat.userData.waterFxUniforms = null;
+        waterMat.onBeforeCompile = (shader) => {
+            shader.uniforms.uWaterTime = { value: 0 };
+            shader.uniforms.uWaterCenter = { value: new THREE.Vector2(centerX, centerZ) };
+            shader.uniforms.uWaterHalfSize = { value: halfSize };
+            shader.uniforms.uWaterRipple0 = { value: new THREE.Vector4(0, 0, -100, 0) };
+            shader.uniforms.uWaterRipple1 = { value: new THREE.Vector4(0, 0, -100, 0) };
+            shader.uniforms.uWaterRipple2 = { value: new THREE.Vector4(0, 0, -100, 0) };
+            shader.uniforms.uWaterRipple3 = { value: new THREE.Vector4(0, 0, -100, 0) };
+            waterMat.userData.waterFxUniforms = shader.uniforms;
+            this.waterFxUniforms = shader.uniforms;
+
+            shader.vertexShader = shader.vertexShader
+                .replace(
+                    '#include <common>',
+                    `#include <common>
+                    varying vec3 vWaterWorldPos;
+                    uniform float uWaterTime;
+                    uniform vec4 uWaterRipple0;
+                    uniform vec4 uWaterRipple1;
+                    uniform vec4 uWaterRipple2;
+                    uniform vec4 uWaterRipple3;
+                    float waterRipple(vec4 rp, vec2 p, float now) {
+                        float dt = now - rp.z;
+                        if (dt < 0.0) return 0.0;
+                        float dist = distance(p, rp.xy);
+                        float ring = dist - (dt * 2.4);
+                        float wave = exp(-abs(ring) * 6.5) * sin((ring * 10.0) - (dt * 7.0));
+                        float life = max(0.0, 1.0 - (dt * 0.45));
+                        return wave * life * rp.w * 0.05;
+                    }`
+                )
+                .replace(
+                    '#include <begin_vertex>',
+                    `#include <begin_vertex>
+                    vec2 wpos = vec2(position.x + uWaterCenter.x, position.z + uWaterCenter.y);
+                    float waveA = sin((wpos.x * 0.055) + (uWaterTime * 1.2));
+                    float waveB = cos((wpos.y * 0.049) - (uWaterTime * 1.5));
+                    float waveC = sin(((wpos.x + wpos.y) * 0.032) + (uWaterTime * 0.85));
+                    transformed.y += ((waveA * 0.03) + (waveB * 0.022) + (waveC * 0.018));
+                    transformed.y += waterRipple(uWaterRipple0, wpos, uWaterTime);
+                    transformed.y += waterRipple(uWaterRipple1, wpos, uWaterTime);
+                    transformed.y += waterRipple(uWaterRipple2, wpos, uWaterTime);
+                    transformed.y += waterRipple(uWaterRipple3, wpos, uWaterTime);`
+                )
+                .replace(
+                    '#include <worldpos_vertex>',
+                    `#include <worldpos_vertex>
+                    vWaterWorldPos = worldPosition.xyz;`
+                );
+
+            shader.fragmentShader = shader.fragmentShader
+                .replace(
+                    '#include <common>',
+                    `#include <common>
+                    varying vec3 vWaterWorldPos;
+                    uniform vec2 uWaterCenter;
+                    uniform float uWaterHalfSize;`
+                )
+                .replace(
+                    '#include <dithering_fragment>',
+                    `#include <dithering_fragment>
+                    float edgeDist = distance(vWaterWorldPos.xz, uWaterCenter.xy);
+                    float edgeFoam = smoothstep(uWaterHalfSize * 0.68, uWaterHalfSize * 0.98, edgeDist);
+                    float fres = pow(1.0 - abs(dot(normalize(normal), normalize(vViewPosition))), 2.6);
+                    float shimmer = 0.08 + (0.04 * sin((vWaterWorldPos.x + vWaterWorldPos.z) * 0.08));
+                    gl_FragColor.rgb += vec3(0.06, 0.12, 0.16) * fres;
+                    gl_FragColor.rgb += vec3(0.28, 0.32, 0.24) * edgeFoam * shimmer;`
+                );
+        };
+        waterMat.customProgramCacheKey = () => 'water_fx_v2';
+        waterMat.needsUpdate = true;
+    }
+
+    pushWaterRipple(x, z, strength = 1) {
+        if (!Number.isFinite(x) || !Number.isFinite(z)) return;
+        if (!this.waterMesh) return;
+        const amp = Math.max(0.1, Math.min(2.2, Number(strength) || 1));
+        this.waterRipples.push({
+            x,
+            z,
+            startAt: this.elapsed,
+            amp,
+        });
+        if (this.waterRipples.length > this.maxWaterRipples) {
+            this.waterRipples.splice(0, this.waterRipples.length - this.maxWaterRipples);
+        }
+    }
+
+    updateWaterEffects() {
+        const mesh = this.waterMesh;
+        if (!mesh) return;
+        const mat = mesh.material;
+        if (!mat) return;
+        const t = Math.max(0, Number(this.elapsed) || 0);
+        const uniforms = this.waterFxUniforms || mat.userData?.waterFxUniforms;
+        if (uniforms) {
+            uniforms.uWaterTime.value = t;
+            const life = Math.max(0.5, Number(this.waterRippleLifeSec) || 2.6);
+            this.waterRipples = this.waterRipples.filter((r) => ((t - Number(r.startAt || 0)) < life));
+            const slots = ['uWaterRipple0', 'uWaterRipple1', 'uWaterRipple2', 'uWaterRipple3'];
+            for (let i = 0; i < slots.length; i += 1) {
+                const rp = this.waterRipples[this.waterRipples.length - 1 - i];
+                const uni = uniforms[slots[i]];
+                if (!uni) continue;
+                if (rp) {
+                    uni.value.set(Number(rp.x) || 0, Number(rp.z) || 0, Number(rp.startAt) || 0, Number(rp.amp) || 1);
+                } else {
+                    uni.value.set(0, 0, -100, 0);
+                }
+            }
+        }
+
+        const pulse = 0.5 + (0.5 * Math.sin((t * 1.25) + 0.6));
+        const deep = new THREE_MODULE.Color(0x2b84c7);
+        const shallow = new THREE_MODULE.Color(0x48a7d9);
+        mat.color.copy(deep).lerp(shallow, 0.35 + (pulse * 0.25));
+        mat.opacity = 0.36 + (pulse * 0.12);
+    }
+
+    addWaterPlane(THREE) {
+        // Plano de agua desactivado globalmente.
+        this.waterMesh = null;
+        this.waterFxUniforms = null;
+        this.waterFxConfig = null;
+        this.waterRipples = [];
+    }
+
+    _isSolidBlockId(blockId) {
+        return Number(blockId) > 0;
+    }
+
+    _baseColorForBlockId(THREE, blockId) {
+        const id = Number(blockId) | 0;
+        if (id === 1) return new THREE.Color(0x7b7b7b); // stone
+        if (id === 2) return new THREE.Color(0x4da64f); // grass top
+        if (id === 3) return new THREE.Color(0x8a6848); // dirt
+        if (id === 4) return new THREE.Color(0x8f959d); // stone top
+        if (id === 5) return new THREE.Color(0xd64541); // fire biome top
+        if (id === 6) return new THREE.Color(0x4f8ed6); // wind biome top
+        if (id === 7) return new THREE.Color(0x6f4f3f); // bridge top
+        return new THREE.Color(0x9aa39f);
+    }
+
+    _voxelTintedColorForBlock(THREE, blockId, wx, wy, wz, topY = null, biomeHint = '') {
+        const base = this._baseColorForBlockId(THREE, blockId);
+        let color = this._applyTerrainToneVariation(THREE, base, wx, wz, wy, biomeHint || 'grass');
+
+        const worldH = Math.max(8, Number(this.voxelChunkHeight) || 128);
+        const altN = Math.max(0, Math.min(1, Number(wy) / Math.max(1, worldH - 1)));
+        const altMul = 0.93 + (altN * 0.15);
+
+        let depthMul = 1.0;
+        if (Number.isFinite(topY)) {
+            const depth = Math.max(0, Number(topY) - Number(wy));
+            depthMul = 1.0 - Math.min(0.20, depth * 0.012);
+        }
+
+        // Variacion local: mezcla ruido por columna + micro ruido por voxel.
+        const sameLevelRnd = this.randomFromInt2D((Math.round(wx) * 41) + 11, (Math.round(wz) * 37) - 19);
+        const microRnd = this.randomFromInt2D(
+            (Math.round(wx) * 131) + (Math.round(wy) * 17) + 7,
+            (Math.round(wz) * 137) - (Math.round(wy) * 13) - 5
+        );
+        const jitter = ((sameLevelRnd - 0.5) * 0.14) + ((microRnd - 0.5) * 0.06);
+        const mul = Math.max(0.82, Math.min(1.18, (1 + jitter) * altMul * depthMul));
+        color.multiplyScalar(mul);
+        color.r = Math.max(0, Math.min(1, color.r));
+        color.g = Math.max(0, Math.min(1, color.g));
+        color.b = Math.max(0, Math.min(1, color.b));
+        return color;
+    }
+
+    _appendVoxelFace(positions, normals, colors, indices, cx, cy, cz, faceName, baseColor) {
+        const FACE = {
+            px: {
+                n: [1, 0, 0],
+                v: [[0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5], [0.5, -0.5, 0.5]],
+            },
+            nx: {
+                n: [-1, 0, 0],
+                v: [[-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5], [-0.5, -0.5, -0.5]],
+            },
+            py: {
+                n: [0, 1, 0],
+                v: [[-0.5, 0.5, -0.5], [-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5]],
+            },
+            ny: {
+                n: [0, -1, 0],
+                v: [[-0.5, -0.5, 0.5], [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5]],
+            },
+            pz: {
+                n: [0, 0, 1],
+                v: [[0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, -0.5, 0.5]],
+            },
+            nz: {
+                n: [0, 0, -1],
+                v: [[-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5], [0.5, -0.5, -0.5]],
+            },
+        };
+        const face = FACE[faceName];
+        if (!face) return;
+
+        const normal = face.n;
+        const shade = normal[1] > 0 ? 1.0 : (normal[1] < 0 ? 0.68 : 0.82);
+        const r = Math.max(0, Math.min(1, baseColor.r * shade));
+        const g = Math.max(0, Math.min(1, baseColor.g * shade));
+        const b = Math.max(0, Math.min(1, baseColor.b * shade));
+
+        const start = (positions.length / 3);
+        for (const v of face.v) {
+            positions.push(cx + v[0], cy + v[1], cz + v[2]);
+            normals.push(normal[0], normal[1], normal[2]);
+            colors.push(r, g, b);
+        }
+        indices.push(start, start + 1, start + 2, start, start + 2, start + 3);
+    }
+
+    _buildVoxelChunkMesh(THREE, chunk) {
+        if (!chunk || !chunk.blocks) return null;
+        const positions = [];
+        const normals = [];
+        const colors = [];
+        const indices = [];
+
+        const baseX = chunk.cx * this.chunkSize;
+        const baseZ = chunk.cz * this.chunkSize;
+        const dirs = [
+            { name: 'px', dx: 1, dy: 0, dz: 0 },
+            { name: 'nx', dx: -1, dy: 0, dz: 0 },
+            { name: 'py', dx: 0, dy: 1, dz: 0 },
+            { name: 'ny', dx: 0, dy: -1, dz: 0 },
+            { name: 'pz', dx: 0, dy: 0, dz: 1 },
+            { name: 'nz', dx: 0, dy: 0, dz: -1 },
+        ];
+        const columnBiome = new Array(this.chunkSize * this.chunkSize);
+        const columnTopY = new Array(this.chunkSize * this.chunkSize);
+        const worldStyle = (this.params?.worldStyle || '').toLowerCase();
+        const mainBiome = (this.world?.main_biome || 'grass').toString().toLowerCase();
+        for (let z = 0; z < this.chunkSize; z += 1) {
+            for (let x = 0; x < this.chunkSize; x += 1) {
+                const idx = x + (z * this.chunkSize);
+                const wx = baseX + x;
+                const wz = baseZ + z;
+                const topY = chunk?.heights?.[z]?.[x];
+                columnTopY[idx] = Number.isFinite(topY) ? Number(topY) : null;
+                let biome = mainBiome;
+                if (worldStyle === 'fixed_biome_grid') {
+                    const sample = this.sampleFixedColumn(wx, wz);
+                    biome = (sample?.biome || mainBiome).toString().toLowerCase();
+                } else if (worldStyle === 'floating_hub_islands') {
+                    const sample = this.sampleFloatingColumn(wx, wz);
+                    biome = (sample?.biome || mainBiome).toString().toLowerCase();
+                }
+                columnBiome[idx] = biome;
+            }
+        }
+
+        for (let y = 0; y < this.voxelChunkHeight; y += 1) {
+            for (let z = 0; z < this.chunkSize; z += 1) {
+                for (let x = 0; x < this.chunkSize; x += 1) {
+                    const blockId = chunk.blocks[this.voxelIndex(x, y, z)] || 0;
+                    if (!this._isSolidBlockId(blockId)) continue;
+                    const wx = baseX + x;
+                    const wz = baseZ + z;
+                    const cidx = x + (z * this.chunkSize);
+                    const color = this._voxelTintedColorForBlock(
+                        THREE,
+                        blockId,
+                        wx,
+                        y,
+                        wz,
+                        columnTopY[cidx],
+                        columnBiome[cidx]
+                    );
+
+                    for (const d of dirs) {
+                        const nx = wx + d.dx;
+                        const ny = y + d.dy;
+                        const nz = wz + d.dz;
+                        const nBlock = this.getVoxelAtWorld(nx, ny, nz);
+                        if (this._isSolidBlockId(nBlock)) continue;
+                        this._appendVoxelFace(positions, normals, colors, indices, wx, y, wz, d.name, color);
+                    }
+                }
+            }
+        }
+
+        if (indices.length === 0) return null;
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+        geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+        geometry.setIndex(indices);
+        geometry.computeBoundingSphere();
+        geometry.computeBoundingBox();
+
+        const material = new THREE.MeshLambertMaterial({
+            vertexColors: true,
+        });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.castShadow = false;
+        mesh.receiveShadow = true;
+        mesh.frustumCulled = true;
+        mesh.userData.tag = 'terrain_voxel';
+        mesh.userData.chunkKey = this.chunkKey(chunk.cx, chunk.cz);
+        return mesh;
+    }
+
+    rebuildVoxelTerrainMesh(THREE) {
+        if (!this.terrainGroup) return;
+        for (const key of Array.from(this.voxelChunkMeshes.keys())) {
+            if (!this.chunks.has(key)) this._removeVoxelChunkMesh(key);
+        }
+        let dirtyKeys = Array.from(this.voxelDirtyChunkKeys.values());
+        if (this.voxelChunkMeshes.size <= 0 && dirtyKeys.length <= 0) {
+            dirtyKeys = Array.from(this.chunks.keys());
+        }
+        for (const key of dirtyKeys) {
+            const chunk = this.chunks.get(key);
+            this._removeVoxelChunkMesh(key);
+            if (!chunk) continue;
+            const mesh = this._buildVoxelChunkMesh(THREE, chunk);
+            if (!mesh) continue;
+            this.terrainGroup.add(mesh);
+            this.voxelChunkMeshes.set(key, mesh);
+        }
+        this.voxelDirtyChunkKeys.clear();
+    }
+
+    _ensureVoxelPicker() {
+        const THREE = THREE_MODULE;
+        if (!THREE) return false;
+        if (!this.voxelRaycaster) this.voxelRaycaster = new THREE.Raycaster();
+        if (!this.voxelPointerNdc) this.voxelPointerNdc = new THREE.Vector2();
+        return true;
+    }
+
+    _ensureVoxelCursorVisuals(THREE) {
+        if (!this.scene) return;
+        if (!this.voxelHighlightMesh) {
+            const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.02, 1.02, 1.02));
+            const edgeMat = new THREE.LineBasicMaterial({
+                color: 0xfff27a,
+                transparent: true,
+                opacity: 0.95,
+                depthTest: true,
+            });
+            this.voxelHighlightMesh = new THREE.LineSegments(edgeGeo, edgeMat);
+            this.voxelHighlightMesh.visible = false;
+            this.voxelHighlightMesh.renderOrder = 5;
+            this.voxelHighlightMesh.userData.tag = 'voxel_highlight';
+            this.scene.add(this.voxelHighlightMesh);
+        }
+        if (!this.voxelPlacePreviewMesh) {
+            const placeGeo = new THREE.BoxGeometry(0.98, 0.98, 0.98);
+            const placeMat = new THREE.MeshBasicMaterial({
+                color: 0x7ad8ff,
+                transparent: true,
+                opacity: 0.24,
+                depthTest: true,
+                wireframe: false,
+            });
+            this.voxelPlacePreviewMesh = new THREE.Mesh(placeGeo, placeMat);
+            this.voxelPlacePreviewMesh.visible = false;
+            this.voxelPlacePreviewMesh.renderOrder = 4;
+            this.voxelPlacePreviewMesh.userData.tag = 'voxel_place_preview';
+            this.scene.add(this.voxelPlacePreviewMesh);
+        }
+    }
+
+    _hideVoxelCursorVisuals() {
+        if (this.voxelHighlightMesh) this.voxelHighlightMesh.visible = false;
+        if (this.voxelPlacePreviewMesh) this.voxelPlacePreviewMesh.visible = false;
+        this.voxelHoverHit = null;
+        this.voxelHoverBlock = null;
+        this.voxelPlaceBlock = null;
+    }
+
+    _removeVoxelCursorVisuals() {
+        if (!this.scene) return;
+        if (this.voxelHighlightMesh) {
+            this.scene.remove(this.voxelHighlightMesh);
+            this.voxelHighlightMesh.geometry?.dispose?.();
+            this.voxelHighlightMesh.material?.dispose?.();
+            this.voxelHighlightMesh = null;
+        }
+        if (this.voxelPlacePreviewMesh) {
+            this.scene.remove(this.voxelPlacePreviewMesh);
+            this.voxelPlacePreviewMesh.geometry?.dispose?.();
+            this.voxelPlacePreviewMesh.material?.dispose?.();
+            this.voxelPlacePreviewMesh = null;
+        }
+    }
+
+    _raycastVoxelDda(origin, dir, maxDistance = 14.0) {
+        const ox = Number(origin?.x);
+        const oy = Number(origin?.y);
+        const oz = Number(origin?.z);
+        const dx = Number(dir?.x);
+        const dy = Number(dir?.y);
+        const dz = Number(dir?.z);
+        if (![ox, oy, oz, dx, dy, dz].every((v) => Number.isFinite(v))) return null;
+
+        const maxDist = Math.max(0.1, Number(maxDistance) || 14.0);
+        // Nuestros voxels estan centrados en enteros (cubo: [i-0.5, i+0.5]).
+        // El DDA clasico asume celdas [i, i+1], asi que desplazamos a espacio de celda.
+        const eps = 1e-4;
+        const sox = ox + 0.5 + (dx * eps);
+        const soy = oy + 0.5 + (dy * eps);
+        const soz = oz + 0.5 + (dz * eps);
+        let x = Math.floor(sox);
+        let y = Math.floor(soy);
+        let z = Math.floor(soz);
+
+        const stepX = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+        const stepY = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+        const stepZ = dz > 0 ? 1 : (dz < 0 ? -1 : 0);
+        const invX = stepX !== 0 ? (1 / dx) : Infinity;
+        const invY = stepY !== 0 ? (1 / dy) : Infinity;
+        const invZ = stepZ !== 0 ? (1 / dz) : Infinity;
+        const tDeltaX = Math.abs(invX);
+        const tDeltaY = Math.abs(invY);
+        const tDeltaZ = Math.abs(invZ);
+
+        const nextBoundaryX = stepX > 0 ? (x + 1) : x;
+        const nextBoundaryY = stepY > 0 ? (y + 1) : y;
+        const nextBoundaryZ = stepZ > 0 ? (z + 1) : z;
+        let tMaxX = stepX !== 0 ? Math.abs((nextBoundaryX - sox) * invX) : Infinity;
+        let tMaxY = stepY !== 0 ? Math.abs((nextBoundaryY - soy) * invY) : Infinity;
+        let tMaxZ = stepZ !== 0 ? Math.abs((nextBoundaryZ - soz) * invZ) : Infinity;
+        let enteredNormal = { x: 0, y: 0, z: 0 };
+        let t = 0;
+
+        for (let i = 0; i < 1200 && t <= maxDist; i += 1) {
+            if (y >= 0 && y < this.voxelChunkHeight) {
+                const hitId = this.getVoxelAtWorld(x, y, z);
+                if (this._isSolidBlockId(hitId)) {
+                    let normal = enteredNormal;
+                    if (normal.x === 0 && normal.y === 0 && normal.z === 0) {
+                        normal = {
+                            x: dx > 0 ? -1 : (dx < 0 ? 1 : 0),
+                            y: dy > 0 ? -1 : (dy < 0 ? 1 : 0),
+                            z: dz > 0 ? -1 : (dz < 0 ? 1 : 0),
+                        };
+                    }
+                    return {
+                        block: { x, y, z },
+                        normal,
+                        blockId: hitId,
+                        distance: t,
+                    };
+                }
+            }
+
+            if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+                x += stepX;
+                t = tMaxX;
+                tMaxX += tDeltaX;
+                enteredNormal = { x: -stepX, y: 0, z: 0 };
+            } else if (tMaxY <= tMaxX && tMaxY <= tMaxZ) {
+                y += stepY;
+                t = tMaxY;
+                tMaxY += tDeltaY;
+                enteredNormal = { x: 0, y: -stepY, z: 0 };
+            } else {
+                z += stepZ;
+                t = tMaxZ;
+                tMaxZ += tDeltaZ;
+                enteredNormal = { x: 0, y: 0, z: -stepZ };
+            }
+        }
+        return null;
+    }
+
+    _pickVoxelFromScreenPoint(clientX, clientY) {
+        if (!this._ensureVoxelPicker()) return null;
+        if (!this.camera || !this.worldCanvas) return null;
+        const rect = this.worldCanvas.getBoundingClientRect?.() || {
+            left: 0,
+            top: 0,
+            width: window.innerWidth,
+            height: window.innerHeight,
+        };
+        if (!rect.width || !rect.height) return null;
+        const localX = clientX - rect.left;
+        const localY = clientY - rect.top;
+        if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) return null;
+        this.voxelPointerNdc.x = ((localX / rect.width) * 2) - 1;
+        this.voxelPointerNdc.y = -((localY / rect.height) * 2) + 1;
+        this.voxelRaycaster.setFromCamera(this.voxelPointerNdc, this.camera);
+        const origin = this.voxelRaycaster.ray.origin;
+        const dir = this.voxelRaycaster.ray.direction;
+        return this._raycastVoxelDda(origin, dir, this.voxelPointerMaxDistance);
+    }
+
+    updateVoxelPointerSelection() {
+        if (!this.initialized || !this.useVoxelTerrainMeshing) {
+            this._hideVoxelCursorVisuals();
+            return;
+        }
+        if (!Number.isFinite(this.voxelPointerClientX) || !Number.isFinite(this.voxelPointerClientY)) {
+            this._hideVoxelCursorVisuals();
+            return;
+        }
+        if (this.voxelPointerBlockedByUi) {
+            this._hideVoxelCursorVisuals();
+            return;
+        }
+        const THREE = THREE_MODULE;
+        if (!THREE) return;
+        this._ensureVoxelCursorVisuals(THREE);
+        const hit = this._pickVoxelFromScreenPoint(this.voxelPointerClientX, this.voxelPointerClientY);
+        if (!hit || !hit.block) {
+            this._hideVoxelCursorVisuals();
+            return;
+        }
+        const b = hit.block;
+        const n = hit.normal || { x: 0, y: 0, z: 0 };
+        const place = { x: b.x + n.x, y: b.y + n.y, z: b.z + n.z };
+        const placeOk = place.y >= 0 && place.y < this.voxelChunkHeight;
+
+        this.voxelHoverHit = hit;
+        this.voxelHoverBlock = { x: b.x, y: b.y, z: b.z };
+        this.voxelPlaceBlock = placeOk ? place : null;
+        if (this.voxelHighlightMesh) {
+            this.voxelHighlightMesh.visible = true;
+            this.voxelHighlightMesh.position.set(b.x, b.y, b.z);
+        }
+        if (this.voxelPlacePreviewMesh) {
+            if (placeOk) {
+                const occupied = this.getVoxelAtWorld(place.x, place.y, place.z);
+                this.voxelPlacePreviewMesh.visible = !this._isSolidBlockId(occupied);
+                this.voxelPlacePreviewMesh.position.set(place.x, place.y, place.z);
+            } else {
+                this.voxelPlacePreviewMesh.visible = false;
+            }
+        }
+    }
+
+    _isPointInsideActorAabb(x, y, z) {
+        const hw = Math.max(0.2, Number(this.actorCollisionRadius) || 0.28);
+        const hh = 0.95;
+        const ax = Number(this.actor?.x || 0);
+        const ay = Number(this.actor?.y || 0);
+        const az = Number(this.actor?.z || 0);
+        return (
+            x >= (ax - hw) && x <= (ax + hw) &&
+            z >= (az - hw) && z <= (az + hw) &&
+            y >= (ay - hh) && y <= (ay + hh)
+        );
+    }
+
+    _applyLocalVoxelEdit(wx, wy, wz, newBlockId = 0) {
+        const chunk = this.getChunkByWorldXZ(wx, wz);
+        if (!chunk || !chunk.blocks) return false;
+        const local = this.worldToChunkAndLocal(wx, wy, wz);
+        if (local.ly < 0 || local.ly >= this.voxelChunkHeight) return false;
+        const idx = this.voxelIndex(local.lx, local.ly, local.lz);
+        const prev = chunk.blocks[idx] || 0;
+        const next = Math.max(0, Number(newBlockId) | 0);
+        if (prev === next) return false;
+        chunk.blocks[idx] = next;
+        if (this._isSolidBlockId(prev) && !this._isSolidBlockId(next)) {
+            chunk.solidCount = Math.max(0, Number(chunk.solidCount || 0) - 1);
+            this.generatedVoxelBlocks = Math.max(0, Number(this.generatedVoxelBlocks || 0) - 1);
+        } else if (!this._isSolidBlockId(prev) && this._isSolidBlockId(next)) {
+            chunk.solidCount = Math.max(0, Number(chunk.solidCount || 0) + 1);
+            this.generatedVoxelBlocks = Math.max(0, Number(this.generatedVoxelBlocks || 0) + 1);
+        }
+        this._markVoxelChunksDirtyAroundWorldBlock(wx, wz);
+        this.terrainDirty = true;
+        return true;
+    }
+
+    tryBreakHoveredVoxel() {
+        const b = this.voxelHoverBlock;
+        if (!b) return false;
+        const ok = this._applyLocalVoxelEdit(b.x, b.y, b.z, 0);
+        if (!ok) return false;
+        this.updateVoxelPointerSelection();
+        return true;
+    }
+
+    tryPlaceHoveredVoxel(blockId = null) {
+        const p = this.voxelPlaceBlock;
+        if (!p) return false;
+        if (p.y < 0 || p.y >= this.voxelChunkHeight) return false;
+        const placeId = Math.max(1, Number(blockId ?? this.voxelPlaceBlockId) | 0);
+        const occupied = this.getVoxelAtWorld(p.x, p.y, p.z);
+        if (this._isSolidBlockId(occupied)) return false;
+        if (this._isPointInsideActorAabb(p.x, p.y, p.z)) return false;
+        const ok = this._applyLocalVoxelEdit(p.x, p.y, p.z, placeId);
+        if (!ok) return false;
+        this.updateVoxelPointerSelection();
+        return true;
+    }
+
+    requestBreakHoveredVoxel() {
+        const b = this.voxelHoverBlock;
+        if (!b) return false;
+        if (this.pendingVoxelActions.length >= 24) return false;
+        const prev = Math.max(0, Number(this.getVoxelAtWorld(b.x, b.y, b.z)) | 0);
+        if (!this._isSolidBlockId(prev)) return false;
+        const changed = this._applyLocalVoxelEdit(b.x, b.y, b.z, 0);
+        if (!changed) return false;
+        this.pendingVoxelActions.push({
+            action: 'world_block_break',
+            x: Number(b.x) | 0,
+            y: Number(b.y) | 0,
+            z: Number(b.z) | 0,
+            prev_block_id: prev,
+            next_block_id: 0,
+        });
+        this.updateVoxelPointerSelection();
+        return true;
+    }
+
+    requestPlaceHoveredVoxel(blockId = null) {
+        const p = this.voxelPlaceBlock;
+        if (!p) return false;
+        if (p.y < 0 || p.y >= this.voxelChunkHeight) return false;
+        const placeId = Math.max(1, Number(blockId ?? this.voxelPlaceBlockId) | 0);
+        const prev = Math.max(0, Number(this.getVoxelAtWorld(p.x, p.y, p.z)) | 0);
+        if (this._isSolidBlockId(prev)) return false;
+        if (this._isPointInsideActorAabb(p.x, p.y, p.z)) return false;
+        if (this.pendingVoxelActions.length >= 24) return false;
+        const changed = this._applyLocalVoxelEdit(p.x, p.y, p.z, placeId);
+        if (!changed) return false;
+        this.pendingVoxelActions.push({
+            action: 'world_block_place',
+            x: Number(p.x) | 0,
+            y: Number(p.y) | 0,
+            z: Number(p.z) | 0,
+            block_id: placeId,
+            prev_block_id: prev,
+            next_block_id: placeId,
+        });
+        this.updateVoxelPointerSelection();
+        return true;
+    }
+
+    pullPendingVoxelAction() {
+        if (!Array.isArray(this.pendingVoxelActions) || this.pendingVoxelActions.length === 0) return null;
+        return this.pendingVoxelActions.shift() || null;
+    }
+
+    pullPendingVoxelActions(maxCount = 1) {
+        const lim = Math.max(1, Math.min(24, Number(maxCount) | 0));
+        if (!Array.isArray(this.pendingVoxelActions) || this.pendingVoxelActions.length === 0) return [];
+        return this.pendingVoxelActions.splice(0, lim);
+    }
+
+    applyServerVoxelChange(change, refreshCursor = true) {
+        const x = Number(change?.x);
+        const y = Number(change?.y);
+        const z = Number(change?.z);
+        const blockId = Math.max(0, Number(change?.block_id) | 0);
+        if (![x, y, z].every((v) => Number.isFinite(v))) return false;
+        this._setWorldVoxelOverrideCache(x, y, z, blockId);
+        this._applyLocalVoxelEdit(x, y, z, blockId);
+        if (refreshCursor) this.updateVoxelPointerSelection();
+        return true;
+    }
+
+    applyServerVoxelChanges(changes) {
+        const rows = Array.isArray(changes) ? changes : [];
+        let any = false;
+        for (const row of rows) {
+            if (this.applyServerVoxelChange(row, false)) any = true;
+        }
+        if (any) this.updateVoxelPointerSelection();
+        return any;
+    }
+
+    rollbackVoxelActions(actions) {
+        const rows = Array.isArray(actions) ? actions : [];
+        let reverted = 0;
+        for (const row of rows) {
+            const x = Number(row?.x);
+            const y = Number(row?.y);
+            const z = Number(row?.z);
+            const prevBlockId = Math.max(0, Number(row?.prev_block_id) | 0);
+            if (![x, y, z].every((v) => Number.isFinite(v))) continue;
+            if (this.applyServerVoxelChange({ x, y, z, block_id: prevBlockId }, false)) reverted += 1;
+        }
+        if (reverted > 0) this.updateVoxelPointerSelection();
+        return reverted;
+    }
+
+    reconcileVoxelBatchResults(sentActions, results) {
+        const rows = Array.isArray(results) ? results : [];
+        if (rows.length <= 0) return 0;
+        const actions = Array.isArray(sentActions) ? sentActions : [];
+        let reverted = 0;
+        for (let i = 0; i < rows.length; i += 1) {
+            const resultRow = rows[i] || {};
+            if (resultRow?.ok !== false) continue;
+            const idxRaw = Number(resultRow?.index);
+            const idx = Number.isInteger(idxRaw) ? idxRaw : i;
+            const actionRow = actions[idx];
+            if (!actionRow) continue;
+            const x = Number(actionRow?.x);
+            const y = Number(actionRow?.y);
+            const z = Number(actionRow?.z);
+            const prevBlockId = Math.max(0, Number(actionRow?.prev_block_id) | 0);
+            if (![x, y, z].every((v) => Number.isFinite(v))) continue;
+            if (this.applyServerVoxelChange({ x, y, z, block_id: prevBlockId }, false)) reverted += 1;
+        }
+        if (reverted > 0) this.updateVoxelPointerSelection();
+        return reverted;
+    }
+
     rebuildTerrainMesh(THREE) {
         if (!this.terrainGroup) return;
+        if (this.useVoxelTerrainMeshing) {
+            if (this.fixedTerrainMeshes && this.fixedTerrainMeshes.length > 0) {
+                for (const m of this.fixedTerrainMeshes) {
+                    this.terrainGroup.remove(m);
+                    if (m.geometry) m.geometry.dispose();
+                    if (m.material) m.material.dispose();
+                }
+                this.fixedTerrainMeshes = [];
+            }
+            if (this.terrainTopMesh) {
+                this.terrainGroup.remove(this.terrainTopMesh);
+                this.terrainTopMesh.geometry.dispose();
+                this.terrainTopMesh.material.dispose();
+                this.terrainTopMesh = null;
+            }
+            if (this.terrainBodyMesh) {
+                this.terrainGroup.remove(this.terrainBodyMesh);
+                this.terrainBodyMesh.geometry.dispose();
+                this.terrainBodyMesh.material.dispose();
+                this.terrainBodyMesh = null;
+            }
+            if (this.waterMesh) {
+                this.terrainGroup.remove(this.waterMesh);
+                this.waterMesh.geometry.dispose();
+                this.waterMesh.material.dispose();
+                this.waterMesh = null;
+                this.waterFxUniforms = null;
+                this.waterFxConfig = null;
+                this.waterRipples = [];
+            }
+            this.rebuildVoxelTerrainMesh(THREE);
+            return;
+        }
+
+        for (const key of Array.from(this.voxelChunkMeshes.keys())) {
+            this._removeVoxelChunkMesh(key);
+        }
+        this.voxelDirtyChunkKeys.clear();
+
         if (this.fixedTerrainMeshes && this.fixedTerrainMeshes.length > 0) {
             for (const m of this.fixedTerrainMeshes) {
                 this.terrainGroup.remove(m);
@@ -3801,6 +5555,9 @@ export class Simple3D {
             this.waterMesh.geometry.dispose();
             this.waterMesh.material.dispose();
             this.waterMesh = null;
+            this.waterFxUniforms = null;
+            this.waterFxConfig = null;
+            this.waterRipples = [];
         }
 
         if (this.params.worldStyle === 'fixed_biome_grid') {
@@ -3812,13 +5569,11 @@ export class Simple3D {
         if (totalColumns <= 0) return;
 
         const boxGeo = new THREE.BoxGeometry(1, 1, 1);
-        const topMat = this.params.worldStyle === 'fixed_biome_grid'
-            ? new THREE.MeshBasicMaterial({ vertexColors: true })
-            : new THREE.MeshStandardMaterial({
-                roughness: 0.92,
-                metalness: 0.03,
-                vertexColors: true
-            });
+        const topMat = new THREE.MeshStandardMaterial({
+            roughness: 0.92,
+            metalness: 0.03,
+            vertexColors: true
+        });
         const includeBody = !['floating_hub_islands', 'fixed_biome_grid'].includes(this.params.worldStyle);
         const bodyMat = includeBody
             ? new THREE.MeshStandardMaterial({
@@ -3855,7 +5610,9 @@ export class Simple3D {
                     } else if (this.params.worldStyle === 'fixed_biome_grid') {
                         sample = this.sampleFixedColumn(wx, wz);
                     }
-                    const topColor = sample ? this.colorForFloatingSample(THREE, sample) : this.colorForHeight(THREE, h);
+                    const topColor = sample
+                        ? this.colorForFloatingSample(THREE, sample, wx, wz, h)
+                        : this.colorForHeight(THREE, h, wx, wz);
                     const bodyColor = this.darkenColor(topColor, 0.58);
 
                     matrix.compose(
@@ -3890,26 +5647,7 @@ export class Simple3D {
         if (bodyMesh) this.terrainGroup.add(bodyMesh);
         this.terrainGroup.add(topMesh);
 
-        if ((this.world?.water_enabled ?? 1) === 1) {
-            const extentChunks = this.viewDistanceChunks + 1;
-            const size = extentChunks * this.chunkSize * 2;
-            const waterGeo = new THREE.PlaneGeometry(size, size, 1, 1);
-            const waterMat = new THREE.MeshStandardMaterial({
-                color: 0x2f8ed6,
-                transparent: true,
-                opacity: 0.45,
-                roughness: 0.25,
-                metalness: 0.1
-            });
-            const water = new THREE.Mesh(waterGeo, waterMat);
-            water.rotation.x = -Math.PI * 0.5;
-            const waterLevel = ['floating_hub_islands', 'fixed_biome_grid'].includes(this.params.worldStyle)
-                ? (this.params.hubHeight - 12)
-                : 49.5;
-            water.position.set(this.spawn.x, waterLevel, this.spawn.z);
-            this.waterMesh = water;
-            this.terrainGroup.add(water);
-        }
+        this.addWaterPlane(THREE);
     }
 
     rebuildFixedBiomeTerrainMesh(THREE) {
@@ -3926,6 +5664,24 @@ export class Simple3D {
             forest: 0x3d8a45,
             crystal: 0x44c6d6
         };
+        const toneMultipliers = [0.92, 0.97, 1.00, 1.04, 1.08];
+        const biomeToneStrength = {
+            bridge: 0.30,
+            stone: 0.45,
+            fire: 0.65,
+            earth: 0.60,
+            wind: 0.55,
+            grass: 0.60
+        };
+        const getToneBucket = (wx, wz, biome) => {
+            const base = this.randomFromInt2D(wx, wz);
+            const micro = this.randomFromInt2D(wx * 3 + 17, wz * 3 - 11);
+            let salt = 0;
+            for (let i = 0; i < biome.length; i += 1) salt += biome.charCodeAt(i);
+            const mixed = (base * 0.72) + (micro * 0.23) + (((salt % 13) / 13) * 0.05);
+            const clamped = Math.max(0, Math.min(0.999, mixed));
+            return Math.floor(clamped * toneMultipliers.length);
+        };
 
         const counts = new Map();
         for (const chunk of this.chunks.values()) {
@@ -3937,7 +5693,9 @@ export class Simple3D {
                     const wz = (chunk.cz * this.chunkSize) + z;
                     const sample = this.sampleFixedColumn(wx, wz);
                     const biome = (sample?.biome || 'grass').toString().toLowerCase();
-                    counts.set(biome, (counts.get(biome) || 0) + 1);
+                    const bucket = getToneBucket(wx, wz, biome);
+                    const groupKey = `${biome}:${bucket}`;
+                    counts.set(groupKey, (counts.get(groupKey) || 0) + 1);
                 }
             }
         }
@@ -3946,15 +5704,27 @@ export class Simple3D {
         const boxGeo = new THREE.BoxGeometry(1, 1, 1);
         const meshes = new Map();
         const indices = new Map();
-        for (const [biome, count] of counts.entries()) {
-            const mat = new THREE.MeshLambertMaterial({ color: biomeColors[biome] || 0x6ab85f });
+        for (const [groupKey, count] of counts.entries()) {
+            const [biome, bucketText] = groupKey.split(':');
+            const bucket = Math.max(0, Math.min(toneMultipliers.length - 1, Number.parseInt(bucketText, 10) || 0));
+            const strength = biomeToneStrength[biome] ?? 0.55;
+            const mul = 1 + ((toneMultipliers[bucket] - 1) * strength);
+            const baseColor = new THREE.Color(biomeColors[biome] || 0x6ab85f);
+            const toneColor = baseColor.clone().multiplyScalar(mul);
+            toneColor.r = Math.max(0, Math.min(1, toneColor.r));
+            toneColor.g = Math.max(0, Math.min(1, toneColor.g));
+            toneColor.b = Math.max(0, Math.min(1, toneColor.b));
+            const mat = new THREE.MeshLambertMaterial({
+                color: toneColor,
+                emissive: toneColor.clone().multiplyScalar(0.06)
+            });
             const mesh = new THREE.InstancedMesh(boxGeo, mat, count);
             mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
             mesh.castShadow = false;
             mesh.receiveShadow = true;
             mesh.frustumCulled = false;
-            meshes.set(biome, mesh);
-            indices.set(biome, 0);
+            meshes.set(groupKey, mesh);
+            indices.set(groupKey, 0);
         }
 
         const matrix = new THREE.Matrix4();
@@ -3967,42 +5737,28 @@ export class Simple3D {
                     if (h === null || !Number.isFinite(h)) continue;
                     const sample = this.sampleFixedColumn(wx, wz);
                     const biome = (sample?.biome || 'grass').toString().toLowerCase();
-                    const mesh = meshes.get(biome);
-                    const idx = indices.get(biome) || 0;
+                    const bucket = getToneBucket(wx, wz, biome);
+                    const groupKey = `${biome}:${bucket}`;
+                    const mesh = meshes.get(groupKey);
+                    const idx = indices.get(groupKey) || 0;
                     matrix.compose(
                         new THREE.Vector3(wx, h, wz),
                         new THREE.Quaternion(),
                         new THREE.Vector3(1, 1, 1)
                     );
                     mesh.setMatrixAt(idx, matrix);
-                    indices.set(biome, idx + 1);
+                    indices.set(groupKey, idx + 1);
                 }
             }
         }
 
-        for (const [biome, mesh] of meshes.entries()) {
-            mesh.count = indices.get(biome) || 0;
+        for (const [groupKey, mesh] of meshes.entries()) {
+            mesh.count = indices.get(groupKey) || 0;
             mesh.instanceMatrix.needsUpdate = true;
             this.terrainGroup.add(mesh);
             this.fixedTerrainMeshes.push(mesh);
         }
 
-        if ((this.world?.water_enabled ?? 1) === 1) {
-            const extentChunks = this.viewDistanceChunks + 1;
-            const size = extentChunks * this.chunkSize * 2;
-            const waterGeo = new THREE.PlaneGeometry(size, size, 1, 1);
-            const waterMat = new THREE.MeshStandardMaterial({
-                color: 0x2f8ed6,
-                transparent: true,
-                opacity: 0.45,
-                roughness: 0.25,
-                metalness: 0.1
-            });
-            const water = new THREE.Mesh(waterGeo, waterMat);
-            water.rotation.x = -Math.PI * 0.5;
-            water.position.set(this.spawn.x, (this.params.hubHeight - 12), this.spawn.z);
-            this.waterMesh = water;
-            this.terrainGroup.add(water);
-        }
+        this.addWaterPlane(THREE);
     }
 }

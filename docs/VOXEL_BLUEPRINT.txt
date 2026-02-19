@@ -1,0 +1,90 @@
+Blueprint Voxel Minecraft Real
+
+Decision tecnica cerrada
+- Altura mundo: 128
+- Chunk: 16x16 (con eje Y completo de 128)
+- Mundo totalmente destructible
+- Fisica voxel real
+
+Estado implementacion (2026-02-17)
+- [x] Chunk voxel runtime: `Uint16Array(16*128*16)` por chunk.
+- [x] Meshing voxel por caras expuestas (culled meshing).
+- [x] Picker DDA + highlight de bloque + preview de colocacion.
+- [x] Break/place local + validaciones basicas.
+- [x] Servidor autoritativo para break/place.
+- [x] Persistencia por chunk comprimido (`world_voxel_chunks`).
+- [x] Batch de red voxel (`world_block_batch`) + evento patch (`world_chunk_patch`).
+- [x] Remesh incremental por chunk sucio (evita rebuild global).
+- [ ] Greedy meshing.
+- [ ] Reconciliacion cliente-servidor avanzada (rollback/smoothing en rechazos parciales).
+- [ ] Fisica voxel mas avanzada (colision por substeps, tuning final).
+
+1) Modelo de mundo voxel
+- Dimension chunk: 16 x 128 x 16.
+- blockId por celda (0 = air).
+- Estructura runtime recomendada:
+  - chunks: Map<chunkKey, VoxelChunk>
+  - VoxelChunk.blocks: Uint16Array(16*128*16)
+- Indice lineal: i = x + z*16 + y*16*16.
+
+2) Meshing
+- No renderizar cubo por bloque.
+- Generar malla solo de caras expuestas por chunk.
+- Primera version: culled meshing (simple).
+- Segunda version: greedy meshing (optimizacion).
+- Al editar bloque: remesh de chunk local + vecinos si toca borde.
+
+3) Picker de bloque (Minecraft real)
+- Raycast por DDA en grilla voxel (no contra mesh visual).
+- Resultado:
+  - hitBlock: {x,y,z}
+  - hitNormal: {x,y,z}
+  - placeBlock = hitBlock + hitNormal
+- Highlight:
+  - caja wireframe en hitBlock
+  - preview secundaria en placeBlock (modo construir)
+
+4) Edicion de bloques
+- break: set blockId=0.
+- place: set blockId=<material actual>.
+- Validaciones:
+  - rango Y 0..127
+  - no colocar dentro del collider del jugador
+  - cooldown/anti-spam basico
+
+5) Fisica voxel
+- Colision AABB jugador vs voxels solidos.
+- Resolucion por ejes (X/Z/Y).
+- Ground check, gravedad, salto y step/slope simplificados.
+- Camara con colision voxel tambien.
+
+6) Red (servidor autoritativo)
+- Nuevas acciones WS:
+  - world_block_break (compatibilidad)
+  - world_block_place (compatibilidad)
+  - world_block_batch (actual recomendado)
+- Eventos push:
+  - world_block_changed (compatibilidad, individual)
+  - world_chunk_patch (actual recomendado, batch)
+- Cliente manda intento, servidor valida y confirma/broadcast.
+
+7) Persistencia
+- Guardar diffs por chunk (no snapshot completo cada tick).
+- Tabla actual: world_voxel_chunks
+  - world_id, chunk_x, chunk_z, overrides_blob, overrides_count, updated_at
+- `overrides_blob`: JSON comprimido con zlib (coordenadas locales lx/lz + y + block_id).
+- Carga lazy por chunk al entrar/streaming.
+
+8) Migracion
+- El sistema actual heightmap/instanced pasa a "legacy".
+- Nueva ruta voxel convive temporalmente con flag world_style="voxel".
+- Retirar ruta legacy cuando este estable.
+
+Plan de ejecucion recomendado
+1. [x] Base voxel + chunk manager + conversion de generacion actual a voxels.
+2. [x] Meshing culled + render estable + streaming.
+3. [x] Picker DDA + highlight + break/place local (offline).
+4. [x] Fisica voxel jugable (base actual).
+5. [x] WS autoritativo + broadcast cambios.
+6. [x] Persistencia DB por chunk + carga incremental.
+7. [~] Optimizacion (hecho batching de red + cache/remesh incremental; pendiente greedy meshing).

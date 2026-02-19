@@ -1,4 +1,4 @@
-# WebSocket Protocol (MMO) - v1.0.0
+# WebSocket Protocol (MMO) - v1.1.0
 
 Estado: activo  
 Fuente de verdad runtime: `server/ws_server.py`
@@ -24,7 +24,7 @@ El servidor envia `network_config` en respuestas clave (`login`, `enter_world`):
 ```json
 {
   "client_request_timeout_ms": 12000,
-  "protocol_version": "1.0.0",
+  "protocol_version": "1.1.0",
   "server_build": "YYYY-MM-DD"
 }
 ```
@@ -60,8 +60,8 @@ Modelo de personaje:
 5. `inventory_use`
 
 Inventario actual:
-- `total_slots = 32`
-- `hotbar_slots = 8`
+- `total_slots = 16`
+- `hotbar_slots = 4`
 
 ## Decor / World Content Actions
 1. `decor_assets_list`
@@ -80,6 +80,10 @@ Acciones legacy (deprecadas):
 3. `world_set_class`
 4. `world_chat`
 5. `world_set_emotion`
+6. `world_loot_pickup`
+7. `world_block_break` (compat)
+8. `world_block_place` (compat)
+9. `world_block_batch` (recomendado)
 
 ### `world_move` payload
 ```json
@@ -91,6 +95,40 @@ Acciones legacy (deprecadas):
 
 - `position` es opcional (si falta, mantiene ultima posicion del servidor).
 - `animation_state` validado a `idle|walk|gather`.
+- Si se activa muerte por caida/vacio en el mundo, el servidor puede responder con:
+  - `respawned=true`
+  - `death_reason = "fall_distance" | "void_floor"`
+  - `position` de respawn
+  - `hp`, `max_hp`
+
+### `world_block_batch` payload (recomendado)
+```json
+{
+  "actions": [
+    { "type": "break", "x": 10, "y": 62, "z": -3 },
+    { "type": "place", "x": 10, "y": 63, "z": -3, "block_id": 2 }
+  ]
+}
+```
+
+Reglas:
+- maximo de acciones procesadas por request: `48`.
+- validaciones por accion: alcance, rango Y, ocupacion, colision con jugador.
+- respuesta incluye `changes` aplicados y `results` por indice.
+
+### `world_loot_pickup` payload
+```json
+{
+  "key": "loot_entity_key"
+}
+```
+
+- Si `ok=true`, respuesta incluye:
+  - `key`
+  - `item_code`
+  - `picked` (cantidad agregada al inventario)
+  - `left` (cantidad restante en el mundo)
+  - `inventory` actualizado
 
 ## Server Push Events
 1. `user_online`
@@ -104,6 +142,64 @@ Acciones legacy (deprecadas):
 9. `world_decor_removed`
 10. `world_decor_respawned`
 11. `world_decor_regenerated`
+12. `world_loot_spawned`
+13. `world_loot_removed`
+14. `world_block_changed` (compat, cambio individual)
+15. `world_chunk_patch` (recomendado, cambios voxel batch)
+16. `world_player_died`
+17. `world_local_respawn` (solo al cliente afectado)
+
+### `world_loot_spawned` payload
+```json
+{
+  "entities": [
+    { "key": "loot_123", "item_code": "wood", "quantity": 1, "x": 0, "y": 60, "z": 0 }
+  ]
+}
+```
+
+### `world_loot_removed` payload
+```json
+{
+  "key": "loot_123",
+  "by": "username",
+  "item_code": "wood",
+  "picked": 1
+}
+```
+
+### `world_chunk_patch` payload
+```json
+{
+  "changes": [
+    { "x": 10, "y": 62, "z": -3, "block_id": 0 },
+    { "x": 10, "y": 63, "z": -3, "block_id": 2 }
+  ],
+  "by": "username"
+}
+```
+
+### `world_player_died` payload
+```json
+{
+  "id": 15,
+  "username": "player1",
+  "reason": "fall_distance|void_floor",
+  "fall_distance": 12.4,
+  "position": { "x": 0, "y": 60, "z": 0 }
+}
+```
+
+### `world_local_respawn` payload
+```json
+{
+  "respawned": true,
+  "death_reason": "fall_distance|void_floor",
+  "position": { "x": 0, "y": 60, "z": 0 },
+  "hp": 1000,
+  "max_hp": 1000
+}
+```
 
 ## Player Payload (world)
 Campos relevantes sincronizados:

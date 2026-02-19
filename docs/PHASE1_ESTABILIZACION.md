@@ -26,3 +26,11 @@ Objetivo: reducir regresiones y fijar base de contrato cliente-servidor.
 1. [x] Extraer Character Select 3D de `app.js` a modulo dedicado (`libraries/CharacterSelectScene.js`).
 2. [x] Extraer Inventory UI + operaciones a modulo dedicado (`libraries/InventoryUi.js`).
 3. [x] Crear tabla de cambios de protocolo (changelog por version) en `docs/WS_PROTOCOL_CHANGELOG.md`.
+
+## Continuidad (fase voxel posterior)
+- Migracion voxel activa y establecida sobre protocolo `1.1.0`.
+- Cambios clave:
+  - `world_block_batch` y `world_chunk_patch`.
+  - Persistencia voxel chunkizada (`world_voxel_chunks`).
+  - Remesh incremental por chunk sucio en cliente.
+- Documento de entrada recomendado para retomar: `docs/DEV_CONTEXT_RAPIDO.md`.

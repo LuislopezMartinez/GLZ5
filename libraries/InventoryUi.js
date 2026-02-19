@@ -1,6 +1,6 @@
-﻿function normalizeInventoryPayload(inv) {
-    const total = Math.max(8, Math.min(128, Number(inv?.total_slots) || 32));
-    const hotbar = Math.max(1, Math.min(total, Number(inv?.hotbar_slots) || 8));
+function normalizeInventoryPayload(inv) {
+    const total = Math.max(4, Math.min(128, Number(inv?.total_slots) || 16));
+    const hotbar = Math.max(1, Math.min(total, Number(inv?.hotbar_slots) || 4));
     const srcSlots = Array.isArray(inv?.slots) ? inv.slots : [];
     const byIdx = new Map();
     srcSlots.forEach((s) => {
@@ -42,10 +42,11 @@ export class InventoryUi {
 
         this.open = false;
         this.visible = true;
-        this.slots = Array.from({ length: 32 }, (_, i) => ({ slot_index: i, item_code: null, quantity: 0 }));
+        this.slots = Array.from({ length: 16 }, (_, i) => ({ slot_index: i, item_code: null, quantity: 0 }));
         this.items = {};
-        this.totalSlots = 32;
-        this.hotbarSlots = 8;
+        this.totalSlots = 16;
+        this.hotbarSlots = 4;
+        this.selectedSlotIndex = null;
     }
 
     createUi(host) {
@@ -65,6 +66,7 @@ export class InventoryUi {
         this.inventoryBtn.style.background = '#2c6ea6';
         this.inventoryBtn.style.color = '#ecf7ff';
         this.inventoryBtn.style.touchAction = 'manipulation';
+        this.inventoryBtn.dataset.worldUi = '1';
         this.inventoryBtn.addEventListener('click', async () => {
             await this.toggleOpen();
         });
@@ -76,15 +78,17 @@ export class InventoryUi {
         this.inventoryModal.style.transform = 'translate(-50%, -50%)';
         this.inventoryModal.style.zIndex = '46';
         this.inventoryModal.style.display = 'none';
-        this.inventoryModal.style.width = 'min(92vw, 640px)';
+        this.inventoryModal.style.width = 'fit-content';
+        this.inventoryModal.style.maxWidth = 'min(92vw, 460px)';
         this.inventoryModal.style.maxHeight = '84vh';
         this.inventoryModal.style.overflow = 'auto';
-        this.inventoryModal.style.padding = '10px';
+        this.inventoryModal.style.padding = '8px';
         this.inventoryModal.style.borderRadius = '12px';
         this.inventoryModal.style.background = 'rgba(6, 15, 30, 0.94)';
         this.inventoryModal.style.border = '1px solid rgba(149, 181, 212, 0.45)';
         this.inventoryModal.style.boxShadow = '0 12px 30px rgba(0,0,0,0.42)';
         this.inventoryModal.style.backdropFilter = 'blur(3px)';
+        this.inventoryModal.dataset.worldUi = '1';
 
         const head = document.createElement('div');
         head.style.display = 'flex';
@@ -118,8 +122,9 @@ export class InventoryUi {
 
         this.inventoryGrid = document.createElement('div');
         this.inventoryGrid.style.display = 'grid';
-        this.inventoryGrid.style.gap = '6px';
+        this.inventoryGrid.style.gap = '7px';
         this.inventoryGrid.style.justifyContent = 'center';
+        this.inventoryGrid.dataset.worldUi = '1';
         this.inventoryModal.appendChild(this.inventoryGrid);
 
         host.appendChild(this.inventoryBtn);
@@ -133,6 +138,61 @@ export class InventoryUi {
     bindActionBar(actionSlots, actionSlotLabels) {
         this.actionSlots = Array.isArray(actionSlots) ? actionSlots : [];
         this.actionSlotLabels = Array.isArray(actionSlotLabels) ? actionSlotLabels : [];
+        this.actionSlots.forEach((slotEl, idx) => {
+            if (!slotEl || slotEl.dataset.inventoryBound === '1') return;
+            slotEl.dataset.inventoryBound = '1';
+            slotEl.dataset.worldUi = '1';
+            slotEl.draggable = true;
+            slotEl.addEventListener('click', async (ev) => {
+                if (!this.open) return;
+                ev.preventDefault();
+                ev.stopPropagation();
+                if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+                await this.handleSlotPrimaryClick(idx, ev, { allowUseWhenClosed: false });
+            }, true);
+            slotEl.addEventListener('contextmenu', async (ev) => {
+                if (!this.open) return;
+                ev.preventDefault();
+                ev.stopPropagation();
+                const to = this.findSplitTarget(idx);
+                if (to < 0) {
+                    this.onNoSplitTarget?.();
+                    return;
+                }
+                await this.onSplit?.(idx, to);
+            });
+            slotEl.addEventListener('dragstart', (ev) => {
+                if (!this.open) {
+                    ev.preventDefault();
+                    return;
+                }
+                const s = this.getSlotData(idx);
+                if (!s.item_code || s.quantity <= 0) {
+                    ev.preventDefault();
+                    return;
+                }
+                ev.dataTransfer.setData('text/plain', `${idx}`);
+                ev.dataTransfer.effectAllowed = 'move';
+            });
+            slotEl.addEventListener('dragover', (ev) => {
+                if (!this.open) return;
+                ev.preventDefault();
+                ev.dataTransfer.dropEffect = 'move';
+            });
+            slotEl.addEventListener('drop', async (ev) => {
+                if (!this.open) return;
+                ev.preventDefault();
+                const raw = ev.dataTransfer.getData('text/plain');
+                const from = Number(raw);
+                if (!Number.isFinite(from)) return;
+                if (ev.shiftKey) {
+                    await this.onSplit?.(from, idx);
+                    return;
+                }
+                await this.onMove?.(from, idx);
+                this.clearSelection();
+            });
+        });
         this.renderHotbarFromInventory();
     }
 
@@ -198,6 +258,7 @@ export class InventoryUi {
             await this.onRefreshRequested();
         }
         this.open = next;
+        if (!next) this.clearSelection();
         this.syncOpenVisibility();
         this.onOpenChanged?.(this.open);
     }
@@ -213,10 +274,55 @@ export class InventoryUi {
         if (this.inventoryModal) this.inventoryModal.style.display = (this.visible && this.open) ? '' : 'none';
     }
 
+    clearSelection() {
+        this.selectedSlotIndex = null;
+        this.renderInventoryGrid();
+        this.renderHotbarFromInventory();
+    }
+
+    async handleSlotPrimaryClick(idx, ev, opts = {}) {
+        const allowUseWhenClosed = opts?.allowUseWhenClosed !== false;
+        if (ev?.shiftKey) {
+            await this.onShiftClick?.(idx);
+            this.clearSelection();
+            return;
+        }
+        if (!this.open) {
+            if (allowUseWhenClosed && idx < this.hotbarSlots) {
+                await this.onUseSlot?.(idx);
+            }
+            return;
+        }
+        const slot = this.getSlotData(idx);
+        const has = !!slot.item_code && (Number(slot.quantity) || 0) > 0;
+        if (this.selectedSlotIndex == null) {
+            if (!has) return;
+            this.selectedSlotIndex = idx;
+            this.renderInventoryGrid();
+            this.renderHotbarFromInventory();
+            return;
+        }
+        const from = Number(this.selectedSlotIndex);
+        if (!Number.isFinite(from) || from < 0 || from >= this.totalSlots) {
+            this.clearSelection();
+            return;
+        }
+        if (from === idx) {
+            this.clearSelection();
+            return;
+        }
+        await this.onMove?.(from, idx);
+        this.clearSelection();
+    }
+
     refreshLayout() {
         if (!this.inventoryGrid) return;
         const slotPx = this.getSlotSizePx();
-        this.inventoryGrid.style.gridTemplateColumns = this.isMobileUi() ? `repeat(4, ${slotPx}px)` : `repeat(8, ${slotPx}px)`;
+        this.inventoryGrid.style.gridTemplateColumns = `repeat(4, ${slotPx}px)`;
+        if (this.inventoryModal) {
+            const contentW = (slotPx * 4) + (7 * 3) + 16;
+            this.inventoryModal.style.width = `${contentW}px`;
+        }
         this.renderInventoryGrid();
     }
 
@@ -266,6 +372,7 @@ export class InventoryUi {
         el.style.boxShadow = 'inset 0 0 0 1px rgba(0,0,0,0.2)';
         el.style.cursor = 'pointer';
         el.style.userSelect = 'none';
+        el.dataset.worldUi = '1';
 
         const key = document.createElement('div');
         key.style.position = 'absolute';
@@ -273,7 +380,7 @@ export class InventoryUi {
         key.style.top = '3px';
         key.style.fontSize = '10px';
         key.style.fontWeight = '800';
-        key.style.color = idx < 8 ? '#ffd66f' : '#8fc4ef';
+        key.style.color = idx < this.hotbarSlots ? '#ffd66f' : '#8fc4ef';
         key.textContent = `${idx + 1}`;
         el.appendChild(key);
 
@@ -302,13 +409,7 @@ export class InventoryUi {
         el.appendChild(name);
 
         el.addEventListener('click', async (ev) => {
-            if (ev.shiftKey) {
-                await this.onShiftClick?.(idx);
-                return;
-            }
-            if (idx < this.hotbarSlots && !this.open) {
-                await this.onUseSlot?.(idx);
-            }
+            await this.handleSlotPrimaryClick(idx, ev, { allowUseWhenClosed: true });
         });
 
         el.addEventListener('contextmenu', async (ev) => {
@@ -347,6 +448,7 @@ export class InventoryUi {
                 return;
             }
             await this.onMove?.(from, idx);
+            this.clearSelection();
         });
 
         el.draggable = true;
@@ -358,8 +460,12 @@ export class InventoryUi {
     renderInventoryGrid() {
         if (!this.inventoryGrid || !this.inventoryTitle) return;
         const slotPx = this.getSlotSizePx();
-        this.inventoryGrid.style.gridTemplateColumns = this.isMobileUi() ? `repeat(4, ${slotPx}px)` : `repeat(8, ${slotPx}px)`;
-        this.inventoryTitle.textContent = `Mochila ${this.totalSlots} slots (Hotbar: 1-8)`;
+        this.inventoryGrid.style.gridTemplateColumns = `repeat(4, ${slotPx}px)`;
+        this.inventoryTitle.textContent = `Mochila ${this.totalSlots} slots (Hotbar: 1-${this.hotbarSlots})`;
+        if (this.inventoryModal) {
+            const contentW = (slotPx * 4) + (7 * 3) + 16;
+            this.inventoryModal.style.width = `${contentW}px`;
+        }
 
         const desired = this.totalSlots;
         while (this.inventoryGrid.children.length < desired) {
@@ -381,6 +487,13 @@ export class InventoryUi {
             el.style.border = i < this.hotbarSlots
                 ? '1px solid rgba(223, 197, 125, 0.62)'
                 : '1px solid rgba(176, 208, 237, 0.38)';
+            if (Number(this.selectedSlotIndex) === i) {
+                el.style.outline = '2px solid rgba(255, 230, 142, 0.96)';
+                el.style.outlineOffset = '1px';
+            } else {
+                el.style.outline = '';
+                el.style.outlineOffset = '';
+            }
 
             if (has && item?.icon_key) {
                 const iconRel = (item.icon_key || '').toString().replace(/^\/+/, '');
@@ -412,6 +525,13 @@ export class InventoryUi {
             const name = has ? (item?.name || slot.item_code) : '';
 
             slotEl.style.filter = has ? 'saturate(1.18) brightness(1.12) contrast(1.06)' : 'saturate(0.35) brightness(0.75)';
+            if (Number(this.selectedSlotIndex) === i) {
+                slotEl.style.outline = '2px solid rgba(255, 230, 142, 0.96)';
+                slotEl.style.outlineOffset = '1px';
+            } else {
+                slotEl.style.outline = '';
+                slotEl.style.outlineOffset = '';
+            }
             if (has && item?.icon_key) {
                 const iconRel = (item.icon_key || '').toString().replace(/^\/+/, '');
                 slotEl.style.backgroundImage = `linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02)), url('./assets/sprites/iconos/${iconRel}')`;
@@ -429,3 +549,4 @@ export class InventoryUi {
         }
     }
 }
+

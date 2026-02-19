@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import zlib
 
 import mysql.connector
 from mysql.connector import errorcode
@@ -121,6 +122,14 @@ class DatabaseManager:
                     hub_size VARCHAR(20) NOT NULL DEFAULT 'Mediano',
                     island_size VARCHAR(20) NOT NULL DEFAULT 'Grande',
                     platform_gap VARCHAR(20) NOT NULL DEFAULT 'Media',
+                    biome_shape_mode VARCHAR(20) NOT NULL DEFAULT 'Organico',
+                    organic_noise_scale DOUBLE NOT NULL DEFAULT 0.095,
+                    organic_noise_strength DOUBLE NOT NULL DEFAULT 0.36,
+                    organic_edge_falloff DOUBLE NOT NULL DEFAULT 0.24,
+                    bridge_curve_strength DOUBLE NOT NULL DEFAULT 0.20,
+                    fall_death_enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    void_death_enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    fall_death_threshold_voxels DOUBLE NOT NULL DEFAULT 10.0,
                     fog_enabled TINYINT(1) NOT NULL DEFAULT 1,
                     fog_mode VARCHAR(12) NOT NULL DEFAULT 'linear',
                     fog_color VARCHAR(16) NOT NULL DEFAULT '#b8def2',
@@ -263,6 +272,22 @@ class DatabaseManager:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS world_voxel_chunks (
+                    world_id BIGINT UNSIGNED NOT NULL,
+                    chunk_x INT NOT NULL,
+                    chunk_z INT NOT NULL,
+                    overrides_blob MEDIUMBLOB NOT NULL,
+                    overrides_count INT NOT NULL DEFAULT 0,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (world_id, chunk_x, chunk_z),
+                    KEY idx_world_voxel_chunks_updated (updated_at),
+                    CONSTRAINT fk_world_voxel_chunks_world
+                        FOREIGN KEY (world_id) REFERENCES mundos(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS player_inventory_slots (
                     user_id BIGINT UNSIGNED NOT NULL,
                     slot_index INT NOT NULL,
@@ -321,6 +346,22 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE mundos ADD COLUMN island_size VARCHAR(20) NOT NULL DEFAULT 'Grande'")
             if not self._column_exists(cursor, "mundos", "platform_gap"):
                 cursor.execute("ALTER TABLE mundos ADD COLUMN platform_gap VARCHAR(20) NOT NULL DEFAULT 'Media'")
+            if not self._column_exists(cursor, "mundos", "biome_shape_mode"):
+                cursor.execute("ALTER TABLE mundos ADD COLUMN biome_shape_mode VARCHAR(20) NOT NULL DEFAULT 'Organico'")
+            if not self._column_exists(cursor, "mundos", "organic_noise_scale"):
+                cursor.execute("ALTER TABLE mundos ADD COLUMN organic_noise_scale DOUBLE NOT NULL DEFAULT 0.095")
+            if not self._column_exists(cursor, "mundos", "organic_noise_strength"):
+                cursor.execute("ALTER TABLE mundos ADD COLUMN organic_noise_strength DOUBLE NOT NULL DEFAULT 0.36")
+            if not self._column_exists(cursor, "mundos", "organic_edge_falloff"):
+                cursor.execute("ALTER TABLE mundos ADD COLUMN organic_edge_falloff DOUBLE NOT NULL DEFAULT 0.24")
+            if not self._column_exists(cursor, "mundos", "bridge_curve_strength"):
+                cursor.execute("ALTER TABLE mundos ADD COLUMN bridge_curve_strength DOUBLE NOT NULL DEFAULT 0.20")
+            if not self._column_exists(cursor, "mundos", "fall_death_enabled"):
+                cursor.execute("ALTER TABLE mundos ADD COLUMN fall_death_enabled TINYINT(1) NOT NULL DEFAULT 1")
+            if not self._column_exists(cursor, "mundos", "void_death_enabled"):
+                cursor.execute("ALTER TABLE mundos ADD COLUMN void_death_enabled TINYINT(1) NOT NULL DEFAULT 1")
+            if not self._column_exists(cursor, "mundos", "fall_death_threshold_voxels"):
+                cursor.execute("ALTER TABLE mundos ADD COLUMN fall_death_threshold_voxels DOUBLE NOT NULL DEFAULT 10.0")
             if not self._column_exists(cursor, "mundos", "fog_enabled"):
                 cursor.execute("ALTER TABLE mundos ADD COLUMN fog_enabled TINYINT(1) NOT NULL DEFAULT 1")
             if not self._column_exists(cursor, "mundos", "fog_mode"):
@@ -536,7 +577,7 @@ class DatabaseManager:
                 out[code] = 1
         return out
 
-    def ensure_player_inventory_slots(self, user_id: int, total_slots: int = 32):
+    def ensure_player_inventory_slots(self, user_id: int, total_slots: int = 16):
         total = max(1, min(256, int(total_slots)))
         conn = self._connect(include_database=True)
         try:
@@ -555,7 +596,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def get_player_inventory(self, user_id: int, total_slots: int = 32):
+    def get_player_inventory(self, user_id: int, total_slots: int = 16):
         total = max(1, min(256, int(total_slots)))
         self.ensure_player_inventory_slots(user_id, total)
         conn = self._connect(include_database=True)
@@ -593,7 +634,7 @@ class DatabaseManager:
             return {"item_code": None, "quantity": 0}
         return {"item_code": code, "quantity": qty}
 
-    def inventory_move(self, user_id: int, from_slot: int, to_slot: int, total_slots: int = 32):
+    def inventory_move(self, user_id: int, from_slot: int, to_slot: int, total_slots: int = 16):
         total = max(1, min(256, int(total_slots)))
         src = int(from_slot)
         dst = int(to_slot)
@@ -655,7 +696,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def inventory_split(self, user_id: int, from_slot: int, to_slot: int, total_slots: int = 32):
+    def inventory_split(self, user_id: int, from_slot: int, to_slot: int, total_slots: int = 16):
         total = max(1, min(256, int(total_slots)))
         src = int(from_slot)
         dst = int(to_slot)
@@ -721,7 +762,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def inventory_shift_click(self, user_id: int, from_slot: int, total_slots: int = 32, hotbar_slots: int = 8):
+    def inventory_shift_click(self, user_id: int, from_slot: int, total_slots: int = 16, hotbar_slots: int = 4):
         total = max(1, min(256, int(total_slots)))
         hotbar = max(1, min(total, int(hotbar_slots)))
         src = int(from_slot)
@@ -747,7 +788,7 @@ class DatabaseManager:
                 return res
         return {"ok": False, "error": "No hay espacio de destino"}
 
-    def inventory_add_item(self, user_id: int, item_code: str, quantity: int, total_slots: int = 32, hotbar_slots: int = 8):
+    def inventory_add_item(self, user_id: int, item_code: str, quantity: int, total_slots: int = 16, hotbar_slots: int = 4):
         total = max(1, min(256, int(total_slots)))
         qty = max(0, int(quantity))
         code = (item_code or "").strip()
@@ -834,7 +875,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def inventory_use_slot(self, user_id: int, slot_index: int, total_slots: int = 32):
+    def inventory_use_slot(self, user_id: int, slot_index: int, total_slots: int = 16):
         total = max(1, min(256, int(total_slots)))
         idx = int(slot_index)
         if idx < 0 or idx >= total:
@@ -1167,9 +1208,11 @@ class DatabaseManager:
                     world_name, seed, world_size, terrain_type, water_enabled, caves_enabled,
                     main_biome, view_distance, island_count, bridge_width, biome_mode,
                     decor_density, npc_slots, hub_size, island_size, platform_gap,
+                    biome_shape_mode, organic_noise_scale, organic_noise_strength, organic_edge_falloff, bridge_curve_strength,
+                    fall_death_enabled, void_death_enabled, fall_death_threshold_voxels,
                     fog_enabled, fog_mode, fog_color, fog_near, fog_far, fog_density, is_active
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     seed = VALUES(seed),
                     world_size = VALUES(world_size),
@@ -1186,6 +1229,14 @@ class DatabaseManager:
                     hub_size = VALUES(hub_size),
                     island_size = VALUES(island_size),
                     platform_gap = VALUES(platform_gap),
+                    biome_shape_mode = VALUES(biome_shape_mode),
+                    organic_noise_scale = VALUES(organic_noise_scale),
+                    organic_noise_strength = VALUES(organic_noise_strength),
+                    organic_edge_falloff = VALUES(organic_edge_falloff),
+                    bridge_curve_strength = VALUES(bridge_curve_strength),
+                    fall_death_enabled = VALUES(fall_death_enabled),
+                    void_death_enabled = VALUES(void_death_enabled),
+                    fall_death_threshold_voxels = VALUES(fall_death_threshold_voxels),
                     fog_enabled = VALUES(fog_enabled),
                     fog_mode = VALUES(fog_mode),
                     fog_color = VALUES(fog_color),
@@ -1211,6 +1262,14 @@ class DatabaseManager:
                     config.get("hub_size", "Mediano"),
                     config.get("island_size", "Grande"),
                     config.get("platform_gap", "Media"),
+                    config.get("biome_shape_mode", "Organico"),
+                    config.get("organic_noise_scale", 0.095),
+                    config.get("organic_noise_strength", 0.36),
+                    config.get("organic_edge_falloff", 0.24),
+                    config.get("bridge_curve_strength", 0.20),
+                    config.get("fall_death_enabled", 1),
+                    config.get("void_death_enabled", 1),
+                    config.get("fall_death_threshold_voxels", 10.0),
                     config.get("fog_enabled", 1),
                     config.get("fog_mode", "linear"),
                     config.get("fog_color", "#b8def2"),
@@ -1364,6 +1423,16 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def clear_all_worlds(self):
+        conn = self._connect(include_database=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM mundos")
+            conn.commit()
+            cursor.close()
+        finally:
+            conn.close()
+
     def save_item_catalog(self, item: dict):
         conn = self._connect(include_database=True)
         try:
@@ -1460,6 +1529,131 @@ class DatabaseManager:
             )
             conn.commit()
             cursor.close()
+        finally:
+            conn.close()
+
+    def get_item_usage_summary(self, item_code: str) -> dict:
+        code = (item_code or "").strip()
+        if not code:
+            return {"drops": 0, "inventory_slots": 0}
+        conn = self._connect(include_database=True)
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM decor_asset_drops
+                WHERE item_code = %s
+                """,
+                (code,),
+            )
+            row_drops = cursor.fetchone() or {}
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM player_inventory_slots
+                WHERE item_code = %s AND quantity > 0
+                """,
+                (code,),
+            )
+            row_inv = cursor.fetchone() or {}
+            cursor.close()
+            return {
+                "drops": int(row_drops.get("c") or 0),
+                "inventory_slots": int(row_inv.get("c") or 0),
+            }
+        finally:
+            conn.close()
+
+    def delete_item_catalog(self, item_code: str, purge_references: bool = False) -> dict:
+        code = (item_code or "").strip()
+        if not code:
+            return {"ok": False, "error": "item_code vacio"}
+        conn = self._connect(include_database=True)
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT item_code
+                FROM items_catalog
+                WHERE item_code = %s
+                LIMIT 1
+                """,
+                (code,),
+            )
+            exists = cursor.fetchone()
+            if not exists:
+                cursor.close()
+                conn.rollback()
+                return {"ok": False, "error": "item no existe"}
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM decor_asset_drops
+                WHERE item_code = %s
+                """,
+                (code,),
+            )
+            drops_count = int((cursor.fetchone() or {}).get("c") or 0)
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM player_inventory_slots
+                WHERE item_code = %s AND quantity > 0
+                """,
+                (code,),
+            )
+            inv_count = int((cursor.fetchone() or {}).get("c") or 0)
+            in_use = (drops_count > 0) or (inv_count > 0)
+            if in_use and not purge_references:
+                cursor.close()
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "error": "item en uso",
+                    "usage": {
+                        "drops": drops_count,
+                        "inventory_slots": inv_count,
+                    },
+                }
+
+            if purge_references:
+                cursor.execute(
+                    """
+                    DELETE FROM decor_asset_drops
+                    WHERE item_code = %s
+                    """,
+                    (code,),
+                )
+                cursor.execute(
+                    """
+                    UPDATE player_inventory_slots
+                    SET item_code = NULL, quantity = 0
+                    WHERE item_code = %s
+                    """,
+                    (code,),
+                )
+
+            cursor.execute(
+                """
+                DELETE FROM items_catalog
+                WHERE item_code = %s
+                """,
+                (code,),
+            )
+            conn.commit()
+            cursor.close()
+            return {
+                "ok": True,
+                "usage": {
+                    "drops": drops_count,
+                    "inventory_slots": inv_count,
+                },
+            }
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -1841,6 +2035,115 @@ class DatabaseManager:
                 "decor_slots": slots or [],
                 "decor_removed": removed or {},
             }
+        finally:
+            conn.close()
+
+    def _encode_voxel_chunk_blob(self, overrides: list[dict]) -> bytes:
+        payload = {
+            "v": 1,
+            "o": [
+                [int(r.get("lx") or 0), int(r.get("y") or 0), int(r.get("lz") or 0), max(0, int(r.get("block_id") or 0))]
+                for r in (overrides or [])
+            ],
+        }
+        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return zlib.compress(raw, level=6)
+
+    def _decode_voxel_chunk_blob(self, blob: bytes | bytearray | memoryview | None):
+        if blob is None:
+            return []
+        try:
+            if isinstance(blob, memoryview):
+                blob = blob.tobytes()
+            elif isinstance(blob, bytearray):
+                blob = bytes(blob)
+            elif not isinstance(blob, bytes):
+                blob = bytes(blob)
+            raw = zlib.decompress(blob)
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return []
+        rows = payload.get("o") if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            return []
+        out = []
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 4:
+                continue
+            try:
+                lx = int(row[0])
+                y = int(row[1])
+                lz = int(row[2])
+                block_id = max(0, int(row[3]))
+            except Exception:
+                continue
+            out.append({"lx": lx, "y": y, "lz": lz, "block_id": block_id})
+        return out
+
+    def list_world_voxel_chunks(self, world_id: int, limit: int = 200000):
+        conn = self._connect(include_database=True)
+        try:
+            cursor = conn.cursor(dictionary=True)
+            lim = max(1, min(500000, int(limit)))
+            cursor.execute(
+                """
+                SELECT chunk_x, chunk_z, overrides_blob, overrides_count
+                FROM world_voxel_chunks
+                WHERE world_id = %s
+                ORDER BY chunk_z ASC, chunk_x ASC
+                LIMIT %s
+                """,
+                (int(world_id), lim),
+            )
+            rows = cursor.fetchall() or []
+            cursor.close()
+            out = []
+            for row in rows:
+                chunk_x = int(row.get("chunk_x") or 0)
+                chunk_z = int(row.get("chunk_z") or 0)
+                blob = row.get("overrides_blob")
+                overrides = self._decode_voxel_chunk_blob(blob)
+                out.append(
+                    {
+                        "chunk_x": chunk_x,
+                        "chunk_z": chunk_z,
+                        "overrides": overrides,
+                        "overrides_count": int(row.get("overrides_count") or len(overrides)),
+                    }
+                )
+            return out
+        finally:
+            conn.close()
+
+    def save_world_voxel_chunk(self, world_id: int, chunk_x: int, chunk_z: int, overrides: list[dict]):
+        conn = self._connect(include_database=True)
+        try:
+            cursor = conn.cursor()
+            rows = list(overrides or [])
+            if len(rows) <= 0:
+                cursor.execute(
+                    """
+                    DELETE FROM world_voxel_chunks
+                    WHERE world_id = %s AND chunk_x = %s AND chunk_z = %s
+                    """,
+                    (int(world_id), int(chunk_x), int(chunk_z)),
+                )
+                conn.commit()
+                cursor.close()
+                return
+            blob = self._encode_voxel_chunk_blob(rows)
+            cursor.execute(
+                """
+                INSERT INTO world_voxel_chunks (world_id, chunk_x, chunk_z, overrides_blob, overrides_count)
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    overrides_blob = VALUES(overrides_blob),
+                    overrides_count = VALUES(overrides_count)
+                """,
+                (int(world_id), int(chunk_x), int(chunk_z), blob, int(len(rows))),
+            )
+            conn.commit()
+            cursor.close()
         finally:
             conn.close()
 

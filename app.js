@@ -15,7 +15,7 @@ import { Simple3D } from './libraries/Simple3D.js';
 import { CharacterSelectScene } from './libraries/CharacterSelectScene.js';
 import { InventoryUi } from './libraries/InventoryUi.js';
 
-const CLIENT_PROTOCOL_VERSION = '1.0.0';
+const CLIENT_PROTOCOL_VERSION = '1.1.0';
 
 let ws = null;
 let simple3D = new Simple3D();
@@ -49,6 +49,11 @@ let chatInputEl = null;
 let chatMinBtn = null;
 let chatOpen = true;
 let worldHudReady = false;
+let worldHudVisible = false;
+let deathOverlayRoot = null;
+let deathOverlayMessage = null;
+let deathRespawnBtn = null;
+let deathOverlayOpen = false;
 let characterPanelEl = null;
 let characterSceneWrapEl = null;
 let characterSceneInfoEl = null;
@@ -78,6 +83,18 @@ let movePadSuppressClickUntil = 0;
 let emotionToggleBtn = null;
 let emotionPanel = null;
 let emotionOpen = false;
+let controlsToggleBtn = null;
+let controlsPanel = null;
+let controlsOpen = false;
+let controlsCaptureAction = null;
+let controlsCaptureListener = null;
+let controlsRowRefs = new Map();
+let controlsSensitivityInput = null;
+let controlsInvertYInput = null;
+let controlsSensRow = null;
+let controlsFootRow = null;
+let controlsNoteEl = null;
+let controlsResetBtn = null;
 let collectBarRoot = null;
 let collectBarFill = null;
 let collectBarLabel = null;
@@ -88,6 +105,36 @@ let biomeBannerHideTimer = null;
 let biomeBannerLastBiome = '';
 let biomeBannerLastAt = 0;
 let serverProtocolInfo = { protocol_version: null, server_build: null };
+
+const CONTROL_BINDINGS_SCHEMA = [
+    { key: 'jump', label: 'Saltar', runtimeKey: 'jump' },
+    { key: 'place_block', label: 'Poner bloque', runtimeKey: 'place_block' },
+    { key: 'break_block', label: 'Romper bloque', runtimeKey: 'break_block' },
+    { key: 'interact_collect', label: 'Interactuar', runtimeKey: 'interact_collect' },
+    { key: 'sprint', label: 'Sprint', runtimeKey: 'sprint' },
+    { key: 'toggle_inventory', label: 'Abrir inventario' },
+    { key: 'toggle_chat', label: 'Abrir chat' },
+    { key: 'toggle_emotion', label: 'Panel emociones' },
+    { key: 'open_controls', label: 'Panel teclas' },
+];
+
+const DEFAULT_CONTROL_SETTINGS = Object.freeze({
+    keybinds: Object.freeze({
+        jump: Object.freeze({ type: 'key', code: 'Space', ctrl: false, alt: false }),
+        place_block: Object.freeze({ type: 'key', code: 'KeyF', ctrl: false, alt: false }),
+        break_block: Object.freeze({ type: 'key', code: 'KeyQ', ctrl: false, alt: false }),
+        interact_collect: Object.freeze({ type: 'key', code: 'KeyE', ctrl: false, alt: false }),
+        sprint: Object.freeze({ type: 'key', code: 'ShiftLeft', ctrl: false, alt: false }),
+        toggle_inventory: Object.freeze({ type: 'key', code: 'KeyI', ctrl: false, alt: false }),
+        toggle_chat: Object.freeze({ type: 'key', code: 'KeyC', ctrl: false, alt: false }),
+        toggle_emotion: Object.freeze({ type: 'key', code: 'KeyV', ctrl: false, alt: false }),
+        open_controls: Object.freeze({ type: 'key', code: 'KeyK', ctrl: false, alt: false }),
+    }),
+    camera_sensitivity: 1.0,
+    camera_invert_y: false,
+});
+
+let controlSettings = null;
 
 function getDetectedWsUrl() {
     const host = (window.location.hostname || '').trim();
@@ -139,6 +186,268 @@ function applyNetworkConfig(config) {
             4200
         );
     }
+    simple3D.setNetworkSyncConfig?.(config?.movement_sync || null);
+}
+
+function cloneDefaultControlSettings() {
+    const keybinds = {};
+    for (const row of CONTROL_BINDINGS_SCHEMA) {
+        keybinds[row.key] = { ...DEFAULT_CONTROL_SETTINGS.keybinds[row.key] };
+    }
+    return {
+        keybinds,
+        camera_sensitivity: Number(DEFAULT_CONTROL_SETTINGS.camera_sensitivity),
+        camera_invert_y: !!DEFAULT_CONTROL_SETTINGS.camera_invert_y,
+    };
+}
+
+function normalizeControlBinding(rawBinding, fallbackBinding) {
+    const fb = (fallbackBinding && typeof fallbackBinding === 'object')
+        ? fallbackBinding
+        : { type: 'key', code: 'KeyF', ctrl: false, alt: false };
+    if (typeof rawBinding === 'string') {
+        const code = rawBinding.trim();
+        return {
+            type: 'key',
+            code: code || fb.code,
+            ctrl: false,
+            alt: false,
+        };
+    }
+    const src = (rawBinding && typeof rawBinding === 'object') ? rawBinding : {};
+    const typeRaw = (src.type || fb.type || 'key').toString().toLowerCase();
+    const type = typeRaw === 'mouse' ? 'mouse' : 'key';
+    if (type === 'mouse') {
+        const button = Number.isFinite(Number(src.button)) ? Math.max(0, Number(src.button) | 0) : Number(fb.button ?? 0);
+        return {
+            type: 'mouse',
+            button,
+            ctrl: !!src.ctrl,
+            alt: !!src.alt,
+        };
+    }
+    const code = (src.code || fb.code || '').toString().trim() || (fb.code || 'KeyF');
+    return {
+        type: 'key',
+        code,
+        ctrl: !!src.ctrl,
+        alt: !!src.alt,
+    };
+}
+
+function controlBindingSignature(bindingRaw) {
+    const b = normalizeControlBinding(bindingRaw, { type: 'key', code: '', ctrl: false, alt: false });
+    const base = b.type === 'mouse' ? `mouse:${Number(b.button) | 0}` : `key:${(b.code || '').toString()}`;
+    return `${base}|ctrl:${b.ctrl ? 1 : 0}|alt:${b.alt ? 1 : 0}`;
+}
+
+function controlBindingMatchesKeyEvent(ev, bindingRaw) {
+    const b = normalizeControlBinding(bindingRaw, { type: 'key', code: '', ctrl: false, alt: false });
+    if (b.type !== 'key') return false;
+    const code = (ev?.code || '').toString();
+    if (!code || code !== b.code) return false;
+    if (!!ev.ctrlKey !== !!b.ctrl) return false;
+    if (!!ev.altKey !== !!b.alt) return false;
+    return true;
+}
+
+function controlBindingMatchesMouseEvent(ev, bindingRaw) {
+    const b = normalizeControlBinding(bindingRaw, { type: 'mouse', button: 0, ctrl: false, alt: false });
+    if (b.type !== 'mouse') return false;
+    const btn = Number(ev?.button);
+    if (!Number.isFinite(btn) || (btn | 0) !== (Number(b.button) | 0)) return false;
+    if (!!ev.ctrlKey !== !!b.ctrl) return false;
+    if (!!ev.altKey !== !!b.alt) return false;
+    return true;
+}
+
+function isControlBindingEvent(ev, actionKey, kind = 'key') {
+    if (!ev || !actionKey || !controlSettings?.keybinds) return false;
+    const binding = controlSettings.keybinds[actionKey];
+    if (kind === 'mouse') return controlBindingMatchesMouseEvent(ev, binding);
+    return controlBindingMatchesKeyEvent(ev, binding);
+}
+
+function buildBindingFromKeyEvent(ev) {
+    const code = (ev?.code || '').toString().trim();
+    if (!code) return null;
+    if (code.startsWith('Control') || code.startsWith('Alt')) return null;
+    return {
+        type: 'key',
+        code,
+        ctrl: !!ev?.ctrlKey,
+        alt: !!ev?.altKey,
+    };
+}
+
+function buildBindingFromMouseEvent(ev) {
+    const btn = Number(ev?.button);
+    if (!Number.isFinite(btn)) return null;
+    return {
+        type: 'mouse',
+        button: Math.max(0, btn | 0),
+        ctrl: !!ev?.ctrlKey,
+        alt: !!ev?.altKey,
+    };
+}
+
+function normalizeControlSettings(raw) {
+    const next = cloneDefaultControlSettings();
+    const src = (raw && typeof raw === 'object') ? raw : {};
+    const keybinds = (src.keybinds && typeof src.keybinds === 'object') ? src.keybinds : {};
+    for (const row of CONTROL_BINDINGS_SCHEMA) {
+        const defBinding = DEFAULT_CONTROL_SETTINGS.keybinds[row.key];
+        next.keybinds[row.key] = normalizeControlBinding(keybinds[row.key], defBinding);
+    }
+    const sens = Number(src.camera_sensitivity);
+    if (Number.isFinite(sens)) {
+        next.camera_sensitivity = Math.max(0.25, Math.min(2.5, sens));
+    }
+    next.camera_invert_y = !!src.camera_invert_y;
+    return next;
+}
+
+function getControlsStorageUserKey() {
+    const username = (worldData?.player?.username || '').toString().trim().toLowerCase();
+    if (username) return username;
+    return 'guest';
+}
+
+function getControlsStorageKey() {
+    return `mmo_controls_v1:${getControlsStorageUserKey()}`;
+}
+
+function loadControlSettings() {
+    const fallback = cloneDefaultControlSettings();
+    try {
+        const raw = localStorage.getItem(getControlsStorageKey());
+        if (!raw) return fallback;
+        const parsed = JSON.parse(raw);
+        return normalizeControlSettings(parsed);
+    } catch (_) {
+        return fallback;
+    }
+}
+
+function saveControlSettings() {
+    if (!controlSettings) return;
+    try {
+        localStorage.setItem(getControlsStorageKey(), JSON.stringify(controlSettings));
+    } catch (_) {
+        // noop
+    }
+}
+
+function getRuntimeControlBindings() {
+    if (!controlSettings) controlSettings = cloneDefaultControlSettings();
+    return {
+        jump: controlSettings.keybinds.jump,
+        place_block: controlSettings.keybinds.place_block,
+        break_block: controlSettings.keybinds.break_block,
+        interact_collect: controlSettings.keybinds.interact_collect,
+        sprint: controlSettings.keybinds.sprint,
+    };
+}
+
+function applyControlSettingsToRuntime() {
+    if (!controlSettings) controlSettings = cloneDefaultControlSettings();
+    simple3D.setControlConfig?.({
+        keybinds: getRuntimeControlBindings(),
+        camera_sensitivity: controlSettings.camera_sensitivity,
+        camera_invert_y: controlSettings.camera_invert_y,
+    });
+}
+
+function isControlKeyEvent(ev, actionKey) {
+    return isControlBindingEvent(ev, actionKey, 'key');
+}
+
+function isControlMouseEvent(ev, actionKey) {
+    return isControlBindingEvent(ev, actionKey, 'mouse');
+}
+
+function getControlsConflictMap() {
+    if (!controlSettings?.keybinds) return new Map();
+    const byCode = new Map();
+    for (const row of CONTROL_BINDINGS_SCHEMA) {
+        const sig = controlBindingSignature(controlSettings.keybinds[row.key]);
+        if (!sig || sig.includes('key:|')) continue;
+        const list = byCode.get(sig) || [];
+        list.push(row.key);
+        byCode.set(sig, list);
+    }
+    const conflicts = new Map();
+    for (const [code, actions] of byCode.entries()) {
+        if (actions.length <= 1) continue;
+        conflicts.set(code, actions);
+    }
+    return conflicts;
+}
+
+function keyCodeLabel(codeRaw) {
+    const code = (codeRaw || '').toString();
+    if (!code) return '-';
+    const m = {
+        Space: 'Espacio',
+        ShiftLeft: 'Shift Izq',
+        ShiftRight: 'Shift Der',
+        ControlLeft: 'Ctrl Izq',
+        ControlRight: 'Ctrl Der',
+        AltLeft: 'Alt Izq',
+        AltRight: 'Alt Der',
+        Enter: 'Enter',
+        Escape: 'Esc',
+        ArrowUp: 'Flecha Arriba',
+        ArrowDown: 'Flecha Abajo',
+        ArrowLeft: 'Flecha Izq',
+        ArrowRight: 'Flecha Der',
+    };
+    if (m[code]) return m[code];
+    if (code.startsWith('Key')) return code.slice(3);
+    if (code.startsWith('Digit')) return code.slice(5);
+    return code;
+}
+
+function mouseButtonLabel(buttonRaw) {
+    const btn = Number(buttonRaw);
+    if (!Number.isFinite(btn)) return 'Mouse?';
+    const map = {
+        0: 'Mouse Izq',
+        1: 'Mouse Centro',
+        2: 'Mouse Der',
+        3: 'Mouse Atrás',
+        4: 'Mouse Adelante',
+    };
+    return map[btn] || `Mouse ${btn}`;
+}
+
+function controlBindingLabel(bindingRaw) {
+    const b = normalizeControlBinding(bindingRaw, { type: 'key', code: '', ctrl: false, alt: false });
+    const chunks = [];
+    if (b.ctrl) chunks.push('Ctrl');
+    if (b.alt) chunks.push('Alt');
+    if (b.type === 'mouse') chunks.push(mouseButtonLabel(b.button));
+    else chunks.push(keyCodeLabel(b.code));
+    return chunks.join(' + ');
+}
+
+function handleVoxelBatchResults(results, reconciledCount = 0) {
+    const rows = Array.isArray(results) ? results : [];
+    if (rows.length <= 0) return;
+    const rejected = rows.filter((r) => r && r.ok === false);
+    if (rejected.length <= 0) return;
+
+    const byError = new Map();
+    for (const row of rejected) {
+        const err = (row?.error || 'rechazo sin detalle').toString().trim() || 'rechazo sin detalle';
+        byError.set(err, (byError.get(err) || 0) + 1);
+    }
+    const summary = Array.from(byError.entries())
+        .slice(0, 2)
+        .map(([err, count]) => (count > 1 ? `${err} x${count}` : err))
+        .join(' | ');
+    const reconcileNote = Number(reconciledCount) > 0 ? ` | rollback=${Math.round(Number(reconciledCount))}` : '';
+    UIToast.show(`${rejected.length} accion(es) voxel rechazadas: ${summary}${reconcileNote}`, 'warning', 2200);
 }
 
 function isMobileUi() {
@@ -146,7 +455,7 @@ function isMobileUi() {
 }
 
 function hotbarSlotSizePx() {
-    return isMobileUi() ? 52 : 54;
+    return isMobileUi() ? 58 : 62;
 }
 
 function styleUtilitySlotButton(btn, tone = 'blue') {
@@ -215,6 +524,7 @@ function mountUtilityButtons() {
     const btns = [];
     if (chatToggleBtn) btns.push({ el: chatToggleBtn, tone: 'blue' });
     if (emotionToggleBtn) btns.push({ el: emotionToggleBtn, tone: 'green' });
+    if (controlsToggleBtn) btns.push({ el: controlsToggleBtn, tone: 'cyan' });
     if (inventoryUi?.getButtonEl?.()) btns.push({ el: inventoryUi.getButtonEl(), tone: 'cyan' });
     if (worldLeaveBtn?.el) btns.push({ el: worldLeaveBtn.el, tone: 'red' });
 
@@ -344,8 +654,9 @@ async function inventoryShiftClick(fromIdx) {
 
 async function useActionSlot(index) {
     if (clientState !== 'IN_WORLD') return;
+    if (inventoryUi?.isOpen?.()) return;
     const idx = Number(index);
-    const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || 8);
+    const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || 4);
     if (!Number.isFinite(idx) || idx < 0 || idx >= hotbarSlots) return;
     const s = inventoryUi?.getSlotData?.(idx) || null;
     if (!s.item_code || (Number(s.quantity) || 0) <= 0) return;
@@ -433,6 +744,8 @@ function isMovePadBlockedTarget(target) {
     if (chatToggleBtn?.contains(target)) return true;
     if (emotionToggleBtn?.contains(target)) return true;
     if (emotionPanel?.contains(target)) return true;
+    if (controlsToggleBtn?.contains(target)) return true;
+    if (controlsPanel?.contains(target)) return true;
     if (inventoryUi?.contains?.(target)) return true;
     if (collectBarRoot?.contains(target)) return true;
     if (worldPanel?.el?.contains && worldPanel.el.contains(target)) return true;
@@ -443,6 +756,7 @@ function tryCollectDecorFromPointer(ev) {
     if (clientState !== 'IN_WORLD') return;
     if (inventoryUi?.isOpen?.()) return;
     if (!ev || ev.button !== 0) return;
+    if (ev.altKey) return;
     if (performance.now() < movePadSuppressClickUntil) return;
     if (isMovePadBlockedTarget(ev.target)) return;
     const x = Number(ev.clientX);
@@ -598,8 +912,162 @@ function pickEmotion(emotionName) {
     closeEmotionPanel();
 }
 
+function closeControlsPanel() {
+    controlsOpen = false;
+    controlsCaptureAction = null;
+    if (controlsCaptureListener) {
+        window.removeEventListener('keydown', controlsCaptureListener, true);
+        window.removeEventListener('mousedown', controlsCaptureListener, true);
+        controlsCaptureListener = null;
+    }
+    if (controlsPanel) controlsPanel.style.display = 'none';
+}
+
+function positionControlsPanel() {
+    if (!controlsPanel || controlsPanel.style.display === 'none') return;
+    const mobile = isMobileUi();
+    const utilRect = utilityBarRoot?.getBoundingClientRect() || null;
+    const viewportW = Math.max(320, Number(window.innerWidth) || 320);
+    const bottom = utilRect
+        ? Math.max(16, Math.round((window.innerHeight || 0) - utilRect.top + 8))
+        : 98;
+    if (mobile) {
+        controlsPanel.style.left = '8px';
+        controlsPanel.style.right = '8px';
+        controlsPanel.style.width = 'auto';
+    } else {
+        controlsPanel.style.right = 'auto';
+        const panelRect = controlsPanel.getBoundingClientRect();
+        const panelW = Math.ceil(panelRect?.width || 360);
+        const desiredLeft = utilRect ? utilRect.left : ((viewportW - panelW) * 0.5);
+        const maxLeft = Math.max(8, viewportW - panelW - 8);
+        const left = Math.max(8, Math.min(Math.round(desiredLeft), maxLeft));
+        controlsPanel.style.left = `${left}px`;
+    }
+    controlsPanel.style.bottom = `${bottom}px`;
+}
+
+function renderControlsPanel() {
+    if (!controlsPanel || !controlSettings) return;
+    const mobile = isMobileUi();
+    controlsPanel.style.maxHeight = mobile ? '72vh' : '78vh';
+    controlsPanel.style.padding = mobile ? '8px' : '10px';
+    const conflicts = getControlsConflictMap();
+    for (const row of CONTROL_BINDINGS_SCHEMA) {
+        const refs = controlsRowRefs.get(row.key);
+        if (!refs) continue;
+        refs.top.style.flexDirection = mobile ? 'column' : 'row';
+        refs.top.style.alignItems = mobile ? 'stretch' : 'center';
+        refs.label.style.fontSize = mobile ? '12px' : '13px';
+        refs.codeBtn.style.width = mobile ? '100%' : 'auto';
+        refs.codeBtn.style.minHeight = mobile ? '34px' : '30px';
+        const binding = controlSettings.keybinds[row.key];
+        const sig = controlBindingSignature(binding);
+        refs.codeBtn.textContent = controlBindingLabel(binding);
+        refs.codeBtn.title = sig ? `Binding: ${sig}` : 'Sin binding';
+        const isCapture = controlsCaptureAction === row.key;
+        refs.codeBtn.style.background = isCapture
+            ? 'linear-gradient(180deg, rgba(198,136,47,0.96), rgba(153,91,22,0.96))'
+            : 'linear-gradient(180deg, rgba(34,86,132,0.96), rgba(22,58,92,0.96))';
+        refs.codeBtn.style.borderColor = isCapture ? 'rgba(255, 229, 154, 0.9)' : 'rgba(176, 208, 237, 0.4)';
+        refs.state.textContent = '';
+        refs.state.style.color = '#9ec4e8';
+        if (isCapture) {
+            refs.state.textContent = 'Pulsa tecla/mouse (Ctrl/Alt opcional). Esc cancela';
+            refs.state.style.color = '#ffd98c';
+        } else if (conflicts.has(sig)) {
+            refs.state.textContent = 'Conflicto de tecla';
+            refs.state.style.color = '#ff9c9c';
+        }
+    }
+    if (controlsSensRow) {
+        controlsSensRow.style.flexDirection = mobile ? 'column' : 'row';
+        controlsSensRow.style.alignItems = mobile ? 'stretch' : 'center';
+    }
+    if (controlsSensitivityInput) {
+        controlsSensitivityInput.style.width = mobile ? '100%' : '92px';
+    }
+    if (controlsFootRow) {
+        controlsFootRow.style.flexDirection = mobile ? 'column' : 'row';
+        controlsFootRow.style.alignItems = mobile ? 'stretch' : 'center';
+    }
+    if (controlsResetBtn) {
+        controlsResetBtn.style.width = mobile ? '100%' : 'auto';
+    }
+    if (controlsNoteEl) {
+        controlsNoteEl.style.textAlign = mobile ? 'left' : 'right';
+    }
+    if (controlsSensitivityInput) {
+        controlsSensitivityInput.value = Number(controlSettings.camera_sensitivity).toFixed(2);
+    }
+    if (controlsInvertYInput) {
+        controlsInvertYInput.checked = !!controlSettings.camera_invert_y;
+    }
+    positionControlsPanel();
+}
+
+function startControlsCapture(actionKey) {
+    controlsCaptureAction = actionKey;
+    if (controlsCaptureListener) {
+        window.removeEventListener('keydown', controlsCaptureListener, true);
+        window.removeEventListener('mousedown', controlsCaptureListener, true);
+        controlsCaptureListener = null;
+    }
+    controlsCaptureListener = (ev) => {
+        if (!controlsOpen || !controlsCaptureAction) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.type === 'keydown' && ev.code === 'Escape') {
+            controlsCaptureAction = null;
+            renderControlsPanel();
+            return;
+        }
+        const nextBinding = ev.type === 'mousedown'
+            ? buildBindingFromMouseEvent(ev)
+            : buildBindingFromKeyEvent(ev);
+        if (!nextBinding) return;
+        const nextSig = controlBindingSignature(nextBinding);
+        const inUseBy = CONTROL_BINDINGS_SCHEMA.find(
+            (row) => row.key !== controlsCaptureAction &&
+                controlBindingSignature(controlSettings?.keybinds?.[row.key]) === nextSig
+        );
+        if (inUseBy) {
+            controlsCaptureAction = null;
+            UIToast.show(`La tecla ya esta en uso por: ${inUseBy.label}`, 'warning', 1600);
+            renderControlsPanel();
+            return;
+        }
+        if (controlSettings?.keybinds) {
+            controlSettings.keybinds[controlsCaptureAction] = nextBinding;
+        }
+        controlsCaptureAction = null;
+        saveControlSettings();
+        applyControlSettingsToRuntime();
+        renderControlsPanel();
+    };
+    window.addEventListener('keydown', controlsCaptureListener, true);
+    window.addEventListener('mousedown', controlsCaptureListener, true);
+    renderControlsPanel();
+}
+
+function toggleControlsPanel() {
+    if (!controlsPanel) return;
+    controlsOpen = !controlsOpen;
+    if (!controlsOpen) {
+        closeControlsPanel();
+        return;
+    }
+    controlsPanel.style.display = '';
+    renderControlsPanel();
+}
+
 function updateChatVisibility() {
     if (!chatRoot || !chatToggleBtn) return;
+    if (!worldHudVisible) {
+        chatRoot.style.display = 'none';
+        chatToggleBtn.style.display = 'none';
+        return;
+    }
     const mobile = isMobileUi();
     if (mobile) {
         chatToggleBtn.style.display = '';
@@ -618,10 +1086,21 @@ function updateChatVisibility() {
 
 function applyWorldHudLayout() {
     if (!actionBarRoot || !chatRoot) return;
+    if (!worldHudVisible) {
+        if (actionBarRoot) actionBarRoot.style.display = 'none';
+        if (utilityBarRoot) utilityBarRoot.style.display = 'none';
+        if (chatRoot) chatRoot.style.display = 'none';
+        if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+        if (emotionToggleBtn) emotionToggleBtn.style.display = 'none';
+        if (controlsToggleBtn) controlsToggleBtn.style.display = 'none';
+        if (emotionPanel) emotionPanel.style.display = 'none';
+        if (controlsPanel) controlsPanel.style.display = 'none';
+        return;
+    }
     const mobile = isMobileUi();
     const slotPx = hotbarSlotSizePx();
     mountUtilityButtons();
-    actionBarRoot.style.gridTemplateColumns = mobile ? `repeat(4, ${slotPx}px)` : `repeat(8, ${slotPx}px)`;
+    actionBarRoot.style.gridTemplateColumns = `repeat(4, ${slotPx}px)`;
     actionBarRoot.style.width = 'fit-content';
     actionBarRoot.style.bottom = mobile ? '10px' : '14px';
     actionBarRoot.style.padding = mobile ? '5px' : '6px';
@@ -715,6 +1194,10 @@ function applyWorldHudLayout() {
         emotionPanel.style.left = `${panelLeft}px`;
         emotionPanel.style.right = 'auto';
     }
+    if (controlsPanel) {
+        controlsPanel.style.display = controlsOpen ? '' : 'none';
+        if (controlsOpen) positionControlsPanel();
+    }
     if (movePadRoot) {
         if (!mobile) {
             resetMovePadInteraction();
@@ -742,12 +1225,12 @@ function createActionBarUi(host) {
     bar.style.backdropFilter = 'blur(2px)';
     bar.style.display = 'grid';
     const slotPx = hotbarSlotSizePx();
-    bar.style.gridTemplateColumns = isMobileUi() ? `repeat(4, ${slotPx}px)` : `repeat(8, ${slotPx}px)`;
+    bar.style.gridTemplateColumns = `repeat(4, ${slotPx}px)`;
     bar.style.gap = '4px';
     bar.style.width = 'fit-content';
     actionSlots = [];
     actionSlotLabels = [];
-    for (let idx = 0; idx < 8; idx += 1) {
+    for (let idx = 0; idx < 4; idx += 1) {
         const slot = document.createElement('button');
         slot.type = 'button';
         slot.dataset.slotIndex = `${idx}`;
@@ -875,6 +1358,95 @@ function createMovePadUi(host) {
     host.appendChild(root);
 }
 
+function createDeathUi(host) {
+    if (deathOverlayRoot) return;
+    const panel = document.createElement('div');
+    deathOverlayRoot = panel;
+    panel.style.position = 'fixed';
+    panel.style.inset = '0';
+    panel.style.zIndex = '60';
+    panel.style.display = 'none';
+    panel.style.alignItems = 'center';
+    panel.style.justifyContent = 'center';
+    panel.style.background = 'rgba(0,0,0,0.55)';
+    panel.dataset.worldUi = '1';
+
+    const card = document.createElement('div');
+    card.style.minWidth = '280px';
+    card.style.maxWidth = 'min(92vw, 420px)';
+    card.style.padding = '18px 16px';
+    card.style.borderRadius = '12px';
+    card.style.border = '1px solid rgba(190, 214, 239, 0.42)';
+    card.style.background = 'rgba(8, 18, 31, 0.95)';
+    card.style.boxShadow = '0 14px 34px rgba(0,0,0,0.42)';
+    card.style.textAlign = 'center';
+
+    const title = document.createElement('div');
+    title.textContent = 'Has muerto';
+    title.style.fontSize = '28px';
+    title.style.fontWeight = '900';
+    title.style.color = '#ffdede';
+    title.style.marginBottom = '8px';
+    card.appendChild(title);
+
+    const msg = document.createElement('div');
+    deathOverlayMessage = msg;
+    msg.textContent = 'Pulsa para reaparecer en la zona inicial.';
+    msg.style.fontSize = '13px';
+    msg.style.color = '#d8e9fa';
+    msg.style.marginBottom = '14px';
+    card.appendChild(msg);
+
+    const btn = document.createElement('button');
+    deathRespawnBtn = btn;
+    btn.type = 'button';
+    btn.textContent = 'Reaparecer';
+    btn.style.border = 'none';
+    btn.style.borderRadius = '10px';
+    btn.style.padding = '10px 14px';
+    btn.style.fontSize = '14px';
+    btn.style.fontWeight = '800';
+    btn.style.cursor = 'pointer';
+    btn.style.background = '#1e75b1';
+    btn.style.color = '#eef7ff';
+    btn.addEventListener('click', async () => {
+        if (!ws || !ws.socket || ws.socket.readyState !== WebSocket.OPEN) return;
+        deathRespawnBtn.disabled = true;
+        try {
+            const resp = await new NetMessage('world_respawn').send();
+            if (!resp?.payload?.ok) {
+                UIToast.show(resp?.payload?.error || 'No se pudo reaparecer', 'error', 1600);
+                deathRespawnBtn.disabled = false;
+            }
+        } catch (_) {
+            UIToast.show('Error de red al reaparecer', 'error', 1600);
+            deathRespawnBtn.disabled = false;
+        }
+    });
+    card.appendChild(btn);
+
+    panel.appendChild(card);
+    host.appendChild(panel);
+}
+
+function showDeathOverlay(reason = '') {
+    ensureWorldHud();
+    deathOverlayOpen = true;
+    if (deathOverlayMessage) {
+        if (reason === 'void_floor') deathOverlayMessage.textContent = 'Has caido al vacio. Pulsa para reaparecer.';
+        else if (reason === 'fall_distance') deathOverlayMessage.textContent = 'Has muerto por caida. Pulsa para reaparecer.';
+        else deathOverlayMessage.textContent = 'Pulsa para reaparecer en la zona inicial.';
+    }
+    if (deathRespawnBtn) deathRespawnBtn.disabled = false;
+    if (deathOverlayRoot) deathOverlayRoot.style.display = 'flex';
+}
+
+function hideDeathOverlay() {
+    deathOverlayOpen = false;
+    if (deathOverlayRoot) deathOverlayRoot.style.display = 'none';
+    if (deathRespawnBtn) deathRespawnBtn.disabled = false;
+}
+
 function createEmotionUi(host) {
     if (emotionToggleBtn && emotionPanel) return;
     emotionToggleBtn = document.createElement('button');
@@ -953,6 +1525,248 @@ function createEmotionUi(host) {
 
     host.appendChild(emotionToggleBtn);
     host.appendChild(emotionPanel);
+    mountUtilityButtons();
+}
+
+function createControlsUi(host) {
+    if (controlsToggleBtn && controlsPanel) return;
+    controlsToggleBtn = document.createElement('button');
+    controlsToggleBtn.type = 'button';
+    controlsToggleBtn.textContent = 'Cfg';
+    controlsToggleBtn.style.position = 'fixed';
+    controlsToggleBtn.style.left = '124px';
+    controlsToggleBtn.style.bottom = '14px';
+    controlsToggleBtn.style.zIndex = '43';
+    controlsToggleBtn.style.border = 'none';
+    controlsToggleBtn.style.borderRadius = '10px';
+    controlsToggleBtn.style.padding = '10px 12px';
+    controlsToggleBtn.style.fontSize = '13px';
+    controlsToggleBtn.style.fontWeight = '700';
+    controlsToggleBtn.style.cursor = 'pointer';
+    controlsToggleBtn.style.background = '#2b70a5';
+    controlsToggleBtn.style.color = '#ecf7ff';
+    controlsToggleBtn.style.userSelect = 'none';
+    controlsToggleBtn.style.webkitUserSelect = 'none';
+    controlsToggleBtn.style.webkitTouchCallout = 'none';
+    controlsToggleBtn.style.touchAction = 'manipulation';
+    controlsToggleBtn.dataset.worldUi = '1';
+    controlsToggleBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        toggleControlsPanel();
+    });
+
+    controlsPanel = document.createElement('div');
+    controlsPanel.style.position = 'fixed';
+    controlsPanel.style.left = '14px';
+    controlsPanel.style.bottom = '112px';
+    controlsPanel.style.zIndex = '45';
+    controlsPanel.style.display = 'none';
+    controlsPanel.style.width = 'min(92vw, 460px)';
+    controlsPanel.style.maxHeight = '78vh';
+    controlsPanel.style.overflowY = 'auto';
+    controlsPanel.style.padding = '10px';
+    controlsPanel.style.borderRadius = '12px';
+    controlsPanel.style.background = 'rgba(8, 18, 31, 0.95)';
+    controlsPanel.style.border = '1px solid rgba(149, 181, 212, 0.42)';
+    controlsPanel.style.boxShadow = '0 10px 24px rgba(0,0,0,0.35)';
+    controlsPanel.style.backdropFilter = 'blur(3px)';
+    controlsPanel.dataset.worldUi = '1';
+
+    const head = document.createElement('div');
+    head.style.display = 'flex';
+    head.style.alignItems = 'center';
+    head.style.justifyContent = 'space-between';
+    head.style.gap = '8px';
+    head.style.marginBottom = '8px';
+    const title = document.createElement('div');
+    title.textContent = 'Configuracion de Teclas';
+    title.style.color = '#d8ecff';
+    title.style.fontWeight = '800';
+    title.style.fontSize = '14px';
+    head.appendChild(title);
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = 'Cerrar';
+    closeBtn.style.border = '1px solid rgba(166, 198, 226, 0.45)';
+    closeBtn.style.borderRadius = '8px';
+    closeBtn.style.padding = '4px 10px';
+    closeBtn.style.fontSize = '12px';
+    closeBtn.style.cursor = 'pointer';
+    closeBtn.style.background = 'rgba(19,44,76,0.92)';
+    closeBtn.style.color = '#d3e9ff';
+    closeBtn.addEventListener('click', () => closeControlsPanel());
+    head.appendChild(closeBtn);
+    controlsPanel.appendChild(head);
+
+    const list = document.createElement('div');
+    list.style.display = 'grid';
+    list.style.gap = '8px';
+    controlsPanel.appendChild(list);
+
+    controlsRowRefs = new Map();
+    for (const row of CONTROL_BINDINGS_SCHEMA) {
+        const line = document.createElement('div');
+        line.style.border = '1px solid rgba(122, 160, 196, 0.3)';
+        line.style.borderRadius = '10px';
+        line.style.padding = '7px 8px';
+        line.style.background = 'rgba(7, 16, 30, 0.56)';
+        const top = document.createElement('div');
+        top.style.display = 'flex';
+        top.style.alignItems = 'center';
+        top.style.justifyContent = 'space-between';
+        top.style.gap = '8px';
+        const label = document.createElement('div');
+        label.textContent = row.label;
+        label.style.fontSize = '13px';
+        label.style.fontWeight = '700';
+        label.style.color = '#dbecff';
+        label.style.lineHeight = '1.2';
+        top.appendChild(label);
+        const codeBtn = document.createElement('button');
+        codeBtn.type = 'button';
+        codeBtn.textContent = '-';
+        codeBtn.style.border = '1px solid rgba(176, 208, 237, 0.4)';
+        codeBtn.style.borderRadius = '8px';
+        codeBtn.style.padding = '3px 10px';
+        codeBtn.style.fontSize = '12px';
+        codeBtn.style.fontWeight = '700';
+        codeBtn.style.fontFamily = 'Consolas, "Courier New", monospace';
+        codeBtn.style.letterSpacing = '0.15px';
+        codeBtn.style.whiteSpace = 'nowrap';
+        codeBtn.style.overflow = 'hidden';
+        codeBtn.style.textOverflow = 'ellipsis';
+        codeBtn.style.maxWidth = '220px';
+        codeBtn.style.minHeight = '30px';
+        codeBtn.style.cursor = 'pointer';
+        codeBtn.style.color = '#ecf7ff';
+        codeBtn.style.background = 'linear-gradient(180deg, rgba(34,86,132,0.96), rgba(22,58,92,0.96))';
+        codeBtn.addEventListener('click', () => startControlsCapture(row.key));
+        top.appendChild(codeBtn);
+        line.appendChild(top);
+        const state = document.createElement('div');
+        state.style.marginTop = '4px';
+        state.style.fontSize = '11px';
+        state.style.minHeight = '13px';
+        state.style.color = '#9ec4e8';
+        state.style.lineHeight = '1.25';
+        line.appendChild(state);
+        list.appendChild(line);
+        controlsRowRefs.set(row.key, { line, top, label, codeBtn, state });
+    }
+
+    const cameraBox = document.createElement('div');
+    cameraBox.style.marginTop = '10px';
+    cameraBox.style.border = '1px solid rgba(122, 160, 196, 0.3)';
+    cameraBox.style.borderRadius = '10px';
+    cameraBox.style.padding = '8px';
+    cameraBox.style.background = 'rgba(7, 16, 30, 0.56)';
+    const cameraHead = document.createElement('div');
+    cameraHead.textContent = 'Camara';
+    cameraHead.style.fontSize = '13px';
+    cameraHead.style.fontWeight = '700';
+    cameraHead.style.color = '#dbecff';
+    cameraHead.style.marginBottom = '8px';
+    cameraBox.appendChild(cameraHead);
+
+    const sensRow = document.createElement('div');
+    controlsSensRow = sensRow;
+    sensRow.style.display = 'flex';
+    sensRow.style.alignItems = 'center';
+    sensRow.style.justifyContent = 'space-between';
+    sensRow.style.gap = '8px';
+    const sensLabel = document.createElement('div');
+    sensLabel.textContent = 'Sensibilidad (0.25 - 2.50)';
+    sensLabel.style.fontSize = '12px';
+    sensLabel.style.color = '#cce4fb';
+    sensRow.appendChild(sensLabel);
+    controlsSensitivityInput = document.createElement('input');
+    controlsSensitivityInput.type = 'number';
+    controlsSensitivityInput.min = '0.25';
+    controlsSensitivityInput.max = '2.50';
+    controlsSensitivityInput.step = '0.05';
+    controlsSensitivityInput.style.width = '92px';
+    controlsSensitivityInput.style.padding = '4px 6px';
+    controlsSensitivityInput.style.borderRadius = '6px';
+    controlsSensitivityInput.style.border = '1px solid rgba(174, 204, 230, 0.4)';
+    controlsSensitivityInput.style.background = '#eef5fc';
+    controlsSensitivityInput.style.fontSize = '12px';
+    controlsSensitivityInput.addEventListener('change', () => {
+        const raw = Number(controlsSensitivityInput.value);
+        const next = Number.isFinite(raw) ? Math.max(0.25, Math.min(2.5, raw)) : 1.0;
+        controlSettings.camera_sensitivity = next;
+        saveControlSettings();
+        applyControlSettingsToRuntime();
+        renderControlsPanel();
+    });
+    sensRow.appendChild(controlsSensitivityInput);
+    cameraBox.appendChild(sensRow);
+
+    const invertRow = document.createElement('label');
+    invertRow.style.display = 'flex';
+    invertRow.style.alignItems = 'center';
+    invertRow.style.gap = '8px';
+    invertRow.style.marginTop = '8px';
+    invertRow.style.cursor = 'pointer';
+    controlsInvertYInput = document.createElement('input');
+    controlsInvertYInput.type = 'checkbox';
+    controlsInvertYInput.addEventListener('change', () => {
+        controlSettings.camera_invert_y = !!controlsInvertYInput.checked;
+        saveControlSettings();
+        applyControlSettingsToRuntime();
+        renderControlsPanel();
+    });
+    invertRow.appendChild(controlsInvertYInput);
+    const invertLabel = document.createElement('div');
+    invertLabel.textContent = 'Invertir eje Y';
+    invertLabel.style.fontSize = '12px';
+    invertLabel.style.color = '#cce4fb';
+    invertRow.appendChild(invertLabel);
+    cameraBox.appendChild(invertRow);
+    controlsPanel.appendChild(cameraBox);
+
+    const foot = document.createElement('div');
+    controlsFootRow = foot;
+    foot.style.display = 'flex';
+    foot.style.justifyContent = 'space-between';
+    foot.style.alignItems = 'center';
+    foot.style.gap = '8px';
+    foot.style.marginTop = '10px';
+    const resetBtn = document.createElement('button');
+    controlsResetBtn = resetBtn;
+    resetBtn.type = 'button';
+    resetBtn.textContent = 'Restaurar por defecto';
+    resetBtn.style.border = '1px solid rgba(166, 198, 226, 0.45)';
+    resetBtn.style.borderRadius = '8px';
+    resetBtn.style.padding = '5px 10px';
+    resetBtn.style.fontSize = '12px';
+    resetBtn.style.cursor = 'pointer';
+    resetBtn.style.background = 'rgba(26,64,104,0.92)';
+    resetBtn.style.color = '#e5f2ff';
+    resetBtn.addEventListener('click', () => {
+        controlSettings = cloneDefaultControlSettings();
+        saveControlSettings();
+        applyControlSettingsToRuntime();
+        renderControlsPanel();
+        UIToast.show('Teclas restauradas', 'info', 1100);
+    });
+    foot.appendChild(resetBtn);
+    const note = document.createElement('div');
+    controlsNoteEl = note;
+    note.textContent = 'Soporta tecla, mouse y combinaciones con Ctrl/Alt.';
+    note.style.fontSize = '11px';
+    note.style.color = '#95bbde';
+    foot.appendChild(note);
+    controlsPanel.appendChild(foot);
+
+    document.addEventListener('click', (ev) => {
+        if (!controlsOpen) return;
+        const t = ev.target;
+        if (t === controlsToggleBtn || controlsPanel?.contains(t)) return;
+        closeControlsPanel();
+    });
+
+    host.appendChild(controlsToggleBtn);
+    host.appendChild(controlsPanel);
     mountUtilityButtons();
 }
 
@@ -1295,10 +2109,12 @@ function ensureWorldHud() {
     createUtilityBarUi(host);
     createChatUi(host);
     createEmotionUi(host);
+    createControlsUi(host);
     createCollectUi(host);
     createBiomeBannerUi(host);
     createInventoryUi(host);
     createMovePadUi(host);
+    createDeathUi(host);
 
     window.addEventListener('resize', () => {
         applyWorldHudLayout();
@@ -1310,15 +2126,60 @@ function ensureWorldHud() {
         const target = ev.target;
         const tag = (target?.tagName || '').toLowerCase();
         if (tag === 'input' || tag === 'textarea') return;
-        if (ev.key.toLowerCase() === 'i') {
+        if (isControlKeyEvent(ev, 'open_controls')) {
+            ev.preventDefault();
+            toggleControlsPanel();
+            return;
+        }
+        if (isControlKeyEvent(ev, 'toggle_inventory')) {
+            ev.preventDefault();
             inventoryUi?.toggleOpen?.();
             return;
         }
-        if (!/^[1-8]$/.test(ev.key)) return;
+        if (isControlKeyEvent(ev, 'toggle_chat')) {
+            ev.preventDefault();
+            chatOpen = !chatOpen;
+            updateChatVisibility();
+            return;
+        }
+        if (isControlKeyEvent(ev, 'toggle_emotion')) {
+            ev.preventDefault();
+            toggleEmotionPanel();
+            return;
+        }
+        if (!/^[1-4]$/.test(ev.key)) return;
         const idx = Number(ev.key) - 1;
-        const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || 8);
+        const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || 4);
         if (idx >= 0 && idx < hotbarSlots) useActionSlot(idx);
     });
+    window.addEventListener('mousedown', (ev) => {
+        if (clientState !== 'IN_WORLD') return;
+        if (isMovePadBlockedTarget(ev.target)) return;
+        if (isControlMouseEvent(ev, 'open_controls')) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            toggleControlsPanel();
+            return;
+        }
+        if (isControlMouseEvent(ev, 'toggle_inventory')) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            inventoryUi?.toggleOpen?.();
+            return;
+        }
+        if (isControlMouseEvent(ev, 'toggle_chat')) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            chatOpen = !chatOpen;
+            updateChatVisibility();
+            return;
+        }
+        if (isControlMouseEvent(ev, 'toggle_emotion')) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            toggleEmotionPanel();
+        }
+    }, true);
     window.addEventListener('pointerdown', startMovePadPointer, { passive: false });
     window.addEventListener('pointermove', movePadPointer, { passive: false });
     window.addEventListener('pointerup', endMovePadPointer, { passive: false });
@@ -1337,14 +2198,17 @@ function ensureWorldHud() {
 
 function setWorldHudVisible(visible) {
     ensureWorldHud();
+    worldHudVisible = !!visible;
     setWorldTouchInteractionMode(!!visible);
     if (actionBarRoot) actionBarRoot.style.display = visible ? 'grid' : 'none';
     if (utilityBarRoot) utilityBarRoot.style.display = visible ? 'grid' : 'none';
     if (chatRoot) chatRoot.style.display = visible ? '' : 'none';
     if (chatToggleBtn) chatToggleBtn.style.display = visible ? '' : 'none';
     if (emotionToggleBtn) emotionToggleBtn.style.display = visible ? '' : 'none';
+    if (controlsToggleBtn) controlsToggleBtn.style.display = visible ? '' : 'none';
     if (inventoryUi) inventoryUi.setVisible(visible);
     if (emotionPanel) emotionPanel.style.display = visible && emotionOpen ? 'grid' : 'none';
+    if (controlsPanel) controlsPanel.style.display = visible && controlsOpen ? '' : 'none';
     if (collectBarRoot) collectBarRoot.style.display = 'none';
     if (biomeBannerRoot) biomeBannerRoot.style.display = 'none';
     if (biomeBannerHideTimer) {
@@ -1352,6 +2216,7 @@ function setWorldHudVisible(visible) {
         biomeBannerHideTimer = null;
     }
     if (movePadRoot) movePadRoot.style.display = 'none';
+    if (!visible) hideDeathOverlay();
     if (visible) {
         chatOpen = !isMobileUi();
         resetMovePadInteraction();
@@ -1361,6 +2226,7 @@ function setWorldHudVisible(visible) {
         inventoryUi?.close?.();
         resetMovePadInteraction();
         closeEmotionPanel();
+        closeControlsPanel();
     }
 }
 
@@ -1376,6 +2242,7 @@ function setWorldUiMode(inWorld) {
 
 function hideWorldPanel() {
     setWorldUiMode(false);
+    hideDeathOverlay();
     worldData = null;
     simple3D.dispose();
     if (rootLayout && rootLayout.refresh) rootLayout.refresh();
@@ -1383,6 +2250,8 @@ function hideWorldPanel() {
 
 function showWorldPanel(payload) {
     worldData = payload;
+    controlSettings = loadControlSettings();
+    applyControlSettingsToRuntime();
     simple3D.dispose();
     simple3D.init({
         world: payload.world,
@@ -1390,14 +2259,17 @@ function showWorldPanel(payload) {
         spawn: payload.spawn,
         terrainConfig: payload.terrain_config,
         decor: payload.decor,
-        worldLoot: payload.world_loot
+        worldLoot: payload.world_loot,
+        voxelOverrides: payload.voxel_overrides
     });
     simple3D.setEmoticon(payload?.player?.active_emotion || 'neutral', 0);
+    applyControlSettingsToRuntime();
     simple3D.setLocalPlayerId(payload?.player?.id);
     const others = Array.isArray(payload?.other_players) ? payload.other_players : [];
     others.forEach((p) => simple3D.upsertRemotePlayer(p));
     applyInventoryPayload(payload?.inventory || null);
     setWorldUiMode(true);
+    hideDeathOverlay();
 
     if (worldHeadLabel) {
         worldHeadLabel.setText(`Mundo: ${payload.world.world_name}`);
@@ -1411,9 +2283,11 @@ function showWorldPanel(payload) {
         worldSpawnLabel.setText(`Spawn: x=${s.x.toFixed(1)} y=${s.y.toFixed(1)} z=${s.z.toFixed(1)}`);
     }
     if (worldTerrainLabel) {
-        const islands = payload.world.island_count ?? '?';
-        const biomeMode = payload.world.biome_mode || payload.world.main_biome;
-        worldTerrainLabel.setText(`Layout: Hub+Islas (${islands}) | Biomas: ${biomeMode}`);
+        const terrainCfg = payload?.terrain_config || {};
+        const layout = (terrainCfg.biome_layout || 'quadrants').toString();
+        const h = Number(terrainCfg.voxel_world_height ?? 128);
+        const s = Number(terrainCfg.surface_height ?? terrainCfg.base_height ?? 64);
+        worldTerrainLabel.setText(`Layout: ${layout} | altura=${h} | suelo=${s}`);
     }
     const gen = simple3D.getDebugInfo();
     if (worldGenLabel) {
@@ -1505,6 +2379,52 @@ async function ensureConnected(url) {
             const username = p?.username;
             if (username) addChatLine(`${username} salio del mundo.`, 'system');
         });
+        ws.on('world_player_died', (msg) => {
+            const p = msg?.payload || {};
+            const username = (p?.username || '').toString().trim();
+            if (!username) return;
+            const reason = (p?.reason || '').toString();
+            if (reason === 'void_floor') {
+                addChatLine(`${username} cayo al vacio.`, 'system');
+                return;
+            }
+            if (reason === 'fall_distance') {
+                addChatLine(`${username} murio por caida.`, 'system');
+                return;
+            }
+            addChatLine(`${username} murio.`, 'system');
+        });
+        ws.on('world_local_respawn', (msg) => {
+            const p = msg?.payload || {};
+            const pos = p?.position || null;
+            if (pos) simple3D.forceLocalPosition?.(pos);
+            const hp = Number(p?.hp);
+            const maxHp = Number(p?.max_hp);
+            if (Number.isFinite(hp) && Number.isFinite(maxHp)) {
+                simple3D.setLocalHealth?.(hp, maxHp);
+            }
+            hideDeathOverlay();
+            UIToast.show('Has reaparecido.', 'info', 1200);
+        });
+        ws.on('world_local_died', (msg) => {
+            const p = msg?.payload || {};
+            const hp = Number(p?.hp);
+            const maxHp = Number(p?.max_hp);
+            if (Number.isFinite(hp) && Number.isFinite(maxHp)) {
+                simple3D.setLocalHealth?.(hp, maxHp);
+            }
+            showDeathOverlay((p?.death_reason || '').toString());
+        });
+        ws.on('world_local_fall_damage', (msg) => {
+            const p = msg?.payload || {};
+            const hp = Number(p?.hp);
+            const maxHp = Number(p?.max_hp);
+            if (Number.isFinite(hp) && Number.isFinite(maxHp)) {
+                simple3D.setLocalHealth?.(hp, maxHp);
+            }
+            const dmg = Number(p?.damage || 0);
+            if (dmg > 0) UIToast.show(`Danio por caida: -${Math.round(dmg)} HP`, 'warning', 1200);
+        });
         ws.on('world_player_emotion', (msg) => {
             const p = msg?.payload || {};
             if (p.id == null) return;
@@ -1548,6 +2468,18 @@ async function ensureConnected(url) {
             }
             simple3D.removeWorldLootKey?.(key);
         });
+        ws.on('world_block_changed', (msg) => {
+            const p = msg?.payload || {};
+            const change = p?.change || null;
+            if (!change) return;
+            simple3D.applyServerVoxelChange?.(change);
+        });
+        ws.on('world_chunk_patch', (msg) => {
+            const p = msg?.payload || {};
+            const changes = Array.isArray(p?.changes) ? p.changes : [];
+            if (changes.length <= 0) return;
+            simple3D.applyServerVoxelChanges?.(changes);
+        });
         ws.on('world_chat_message', (msg) => {
             const p = msg?.payload || {};
             const username = p?.username || 'desconocido';
@@ -1558,6 +2490,7 @@ async function ensureConnected(url) {
 
         ws.socket.onclose = () => {
             setStatus('Conexion WS cerrada', 0xe67e22);
+            hideDeathOverlay();
             if (clientState === 'IN_WORLD' || clientState === 'CHAR_SELECT') {
                 hideWorldPanel();
                 hideCharacterSelect();
@@ -1791,6 +2724,7 @@ function showCharacterSelect(payload) {
     applyCharacterSelectPayload(payload || null);
     setWorldUiMode(false);
     setCharacterUiVisible(true);
+    resetCharacterEnterFxStyles();
     layoutCharacterCreateModal();
     initCharacterSelectScene3d();
     renderCharacterCards();
@@ -1800,6 +2734,39 @@ function showCharacterSelect(payload) {
 function hideCharacterSelect() {
     destroyCharacterSelectScene3d();
     setCharacterUiVisible(false);
+}
+
+function resetCharacterEnterFxStyles() {
+    if (characterPanelEl) {
+        characterPanelEl.style.opacity = '1';
+        characterPanelEl.style.filter = '';
+        characterPanelEl.style.transition = '';
+    }
+    if (characterSceneWrapEl) {
+        characterSceneWrapEl.style.transform = '';
+        characterSceneWrapEl.style.opacity = '1';
+        characterSceneWrapEl.style.transition = '';
+    }
+}
+
+async function playEnterWorldConfirmFx() {
+    characterSelect3d?.playEnterConfirm?.(280);
+    if (characterPanelEl) {
+        characterPanelEl.style.transition = 'opacity 220ms ease, filter 220ms ease';
+        characterPanelEl.style.filter = 'saturate(1.06)';
+    }
+    if (characterSceneWrapEl) {
+        characterSceneWrapEl.style.transition = 'transform 220ms ease, opacity 220ms ease';
+        characterSceneWrapEl.style.transformOrigin = '50% 58%';
+    }
+    requestAnimationFrame(() => {
+        if (characterPanelEl) characterPanelEl.style.opacity = '0.28';
+        if (characterSceneWrapEl) {
+            characterSceneWrapEl.style.opacity = '0.2';
+            characterSceneWrapEl.style.transform = 'scale(1.035)';
+        }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 240));
 }
 
 async function enterWorld(characterId = null) {
@@ -1812,10 +2779,12 @@ async function enterWorld(characterId = null) {
         UIToast.show('Debes seleccionar un personaje', 'warning', 1400);
         return false;
     }
+    await playEnterWorldConfirmFx();
     setClientState('LOADING_WORLD');
     try {
         const resp = await new NetMessage('enter_world').set('character_id', charIdNum).send();
         if (!resp?.payload?.ok) {
+            resetCharacterEnterFxStyles();
             setClientState('CHAR_SELECT', 'No se pudo entrar al mundo');
             UIToast.show(resp?.payload?.error || 'enter_world fallo', 'error', 3500);
             return false;
@@ -1827,6 +2796,7 @@ async function enterWorld(characterId = null) {
         return true;
     } catch (err) {
         console.error(err);
+        resetCharacterEnterFxStyles();
         setClientState('CHAR_SELECT', 'Error al entrar al mundo');
         UIToast.show('Error de red durante enter_world', 'error');
         return false;
@@ -1849,6 +2819,8 @@ async function performLogout() {
 }
 
 export function setup() {
+    controlSettings = loadControlSettings();
+    applyControlSettingsToRuntime();
     const defaultWsUrl = getDetectedWsUrl();
     const root = new UIColumn({ gap: 16 });
     rootLayout = root;
@@ -2437,6 +3409,49 @@ export function main(delta) {
                 }
             })
             .catch(() => { });
+    }
+    const voxelActions = simple3D.pullPendingVoxelActions?.(6) || [];
+    if (voxelActions.length > 0 && ws && ws.socket && ws.socket.readyState === WebSocket.OPEN) {
+        const wire = voxelActions.map((a) => {
+            const actionName = (a?.action || '').toString();
+            if (actionName === 'world_block_break') {
+                return {
+                    type: 'break',
+                    x: Number(a?.x) || 0,
+                    y: Number(a?.y) || 0,
+                    z: Number(a?.z) || 0,
+                };
+            }
+            return {
+                type: 'place',
+                x: Number(a?.x) || 0,
+                y: Number(a?.y) || 0,
+                z: Number(a?.z) || 0,
+                block_id: Number(a?.block_id) || 2,
+            };
+        });
+        new NetMessage('world_block_batch')
+            .set('actions', wire)
+            .send()
+            .then((resp) => {
+                if (!resp?.payload?.ok) {
+                    const reverted = simple3D.rollbackVoxelActions?.(voxelActions) || 0;
+                    const err = (resp?.payload?.error || 'world_block_batch rechazado').toString();
+                    UIToast.show(`Edicion voxel rechazada: ${err}${reverted > 0 ? ` | rollback=${reverted}` : ''}`, 'warning', 2200);
+                    return;
+                }
+                const results = Array.isArray(resp?.payload?.results) ? resp.payload.results : [];
+                const reconciled = simple3D.reconcileVoxelBatchResults?.(voxelActions, results) || 0;
+                handleVoxelBatchResults(results, reconciled);
+                const changes = Array.isArray(resp?.payload?.changes) ? resp.payload.changes : [];
+                if (changes.length > 0) simple3D.applyServerVoxelChanges?.(changes);
+            })
+            .catch(() => {
+                const reverted = simple3D.rollbackVoxelActions?.(voxelActions) || 0;
+                if (reverted > 0) {
+                    UIToast.show('Error de red: acciones voxel revertidas localmente', 'error', 1800);
+                }
+            });
     }
     if (worldRuntimeLabel) {
         worldRuntimeLabel.setText(`Runtime: ${simple3D.elapsed.toFixed(2)}s`);

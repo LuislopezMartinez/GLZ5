@@ -75,9 +75,19 @@ export class CharacterSelectScene {
         this.pointer = new THREE.Vector2();
         this.frameHandle = 0;
         this.elapsed = 0;
+        this.lastFrameMs = 0;
         this.lastW = 0;
         this.lastH = 0;
         this.selectedSlotIndex = 0;
+        this.cameraBase = {
+            y: 5.2,
+            z: 11.4,
+            lookY: 1.5,
+        };
+        this.cameraFocusX = 0;
+        this.cameraFocusXTarget = 0;
+        this.cameraOrbit = 0;
+        this.confirmAnim = null;
         this.onResize = this.onResize.bind(this);
         this.onPointerDown = this.onPointerDown.bind(this);
         this.animate = this.animate.bind(this);
@@ -119,8 +129,8 @@ export class CharacterSelectScene {
         this.scene.fog = new THREE.Fog(0x14263e, 18, 42);
 
         this.camera = new THREE.PerspectiveCamera(43, 1.6, 0.1, 200);
-        this.camera.position.set(0, 5.2, 11.4);
-        this.camera.lookAt(0, 1.5, 0);
+        this.camera.position.set(0, this.cameraBase.y, this.cameraBase.z);
+        this.camera.lookAt(0, this.cameraBase.lookY, 0);
 
         const amb = new THREE.AmbientLight(0xffffff, 0.72);
         this.scene.add(amb);
@@ -194,6 +204,9 @@ export class CharacterSelectScene {
             return {
                 idx,
                 group,
+                baseX: x,
+                baseY: 0,
+                baseZ: -0.2,
                 pedestal,
                 ring,
                 placeholder,
@@ -204,7 +217,12 @@ export class CharacterSelectScene {
                 modelRoot: null,
                 mixer: null,
                 animAction: null,
+                modelKey: '',
                 loadToken: 0,
+                idlePhase: Math.random() * Math.PI * 2,
+                spinRate: 0.0008 + (Math.random() * 0.0025),
+                focusBlend: 0,
+                selectKick: 0,
             };
         });
 
@@ -216,7 +234,12 @@ export class CharacterSelectScene {
 
     setSelectedSlot(slotIndex) {
         const idx = Number(slotIndex);
-        this.selectedSlotIndex = Number.isFinite(idx) ? idx : 0;
+        const next = Number.isFinite(idx) ? idx : 0;
+        if (Number(next) === Number(this.selectedSlotIndex)) return;
+        this.selectedSlotIndex = next;
+        const selected = this.slots.find((s) => Number(s.idx) === Number(this.selectedSlotIndex)) || null;
+        this.cameraFocusXTarget = Number(selected?.baseX || 0);
+        if (selected) selected.selectKick = 1;
     }
 
     setSlots(slotData = []) {
@@ -226,6 +249,7 @@ export class CharacterSelectScene {
             const row = data?.row || null;
             const isPreviewSlot = !!data?.isPreview;
             const modelKeyToShow = (data?.modelKey || '').toString().trim();
+            const prevModelKey = (slot.modelKey || '').toString();
             slot.row = row;
             slot.isPreview = isPreviewSlot;
             if (slot.nameplateEl) {
@@ -233,6 +257,9 @@ export class CharacterSelectScene {
                 slot.nameplateEl.textContent = nm;
                 slot.nameplateEl.style.display = nm ? '' : 'none';
             }
+
+            // Si el modelo no cambia, no reconstruimos el slot para evitar parpadeo.
+            if (prevModelKey === modelKeyToShow) return;
 
             if (slot.modelRoot) {
                 slot.group.remove(slot.modelRoot);
@@ -242,6 +269,7 @@ export class CharacterSelectScene {
                 slot.animAction = null;
                 slot.headOffsetY = 3.0;
             }
+            slot.modelKey = modelKeyToShow;
 
             if (!modelKeyToShow) return;
 
@@ -297,6 +325,14 @@ export class CharacterSelectScene {
         });
     }
 
+    playEnterConfirm(durationMs = 260) {
+        const d = Math.max(120, Math.min(1000, Number(durationMs) || 260));
+        this.confirmAnim = {
+            startAt: this.elapsed,
+            duration: d / 1000,
+        };
+    }
+
     onResize() {
         if (!this.renderer || !this.camera || !this.container) return;
         const w = Math.max(320, this.container.clientWidth);
@@ -346,8 +382,11 @@ export class CharacterSelectScene {
         this.onSlotSelected?.({ idx: slotHit.idx, row: slotHit.row || null });
     }
 
-    animate() {
+    animate(nowMs = 0) {
         if (!this.renderer || !this.camera || !this.scene) return;
+        const rawDt = this.lastFrameMs > 0 ? ((Number(nowMs) - this.lastFrameMs) / 1000) : 0.016;
+        this.lastFrameMs = Number(nowMs) || 0;
+        const dt = Math.max(0.001, Math.min(0.05, Number.isFinite(rawDt) ? rawDt : 0.016));
         const wNow = Math.max(320, this.container?.clientWidth || 0);
         const hNow = Math.max(220, this.container?.clientHeight || 0);
         if (wNow !== this.lastW || hNow !== this.lastH) {
@@ -358,19 +397,65 @@ export class CharacterSelectScene {
             this.lastH = hNow;
         }
 
-        this.elapsed += 0.016;
+        this.elapsed += dt;
+        let confirm01 = 0;
+        if (this.confirmAnim) {
+            const t = (this.elapsed - Number(this.confirmAnim.startAt || 0)) / Math.max(0.001, Number(this.confirmAnim.duration || 0.26));
+            if (t >= 1) {
+                confirm01 = 1;
+            } else if (t > 0) {
+                // smoothstep
+                confirm01 = t * t * (3 - (2 * t));
+            }
+        }
+        // Camara viva: orbit leve + seguimiento suave del slot seleccionado.
+        this.cameraOrbit += dt * 0.35;
+        this.cameraFocusX += (this.cameraFocusXTarget - this.cameraFocusX) * Math.min(1, dt * 5.0);
+        const camX = this.cameraFocusX + Math.sin(this.cameraOrbit) * 0.42;
+        const camY = this.cameraBase.y + Math.sin(this.elapsed * 0.8) * 0.07;
+        const camZ = this.cameraBase.z + Math.cos(this.cameraOrbit * 0.85) * 0.22 - (confirm01 * 2.1);
+        const lookX = this.cameraFocusX + Math.sin(this.cameraOrbit * 0.75) * 0.16;
+        const lookY = this.cameraBase.lookY + Math.sin(this.elapsed * 0.9) * 0.05 + (confirm01 * 0.25);
+        this.camera.position.set(camX, camY, camZ);
+        this.camera.lookAt(lookX, lookY, 0);
+
         const worldPos = new THREE.Vector3();
         this.slots.forEach((slot) => {
-            if (slot.modelRoot) slot.modelRoot.rotation.y += 0.002;
-            if (slot.mixer) slot.mixer.update(0.016);
+            const selected = Number(this.selectedSlotIndex) === Number(slot.idx);
+            const focusTarget = selected ? 1 : 0;
+            slot.focusBlend += (focusTarget - slot.focusBlend) * Math.min(1, dt * 8.0);
+            slot.selectKick *= Math.max(0, 1 - (dt * 4.8));
+
+            const idleT = this.elapsed + Number(slot.idlePhase || 0);
+            const sway = Math.sin(idleT * 1.25) * 0.03;
+            const bob = Math.sin(idleT * 1.9) * 0.045;
+            const selectedLift = slot.focusBlend * 0.16;
+            const selectedForward = slot.focusBlend * 0.24;
+            const kickUp = Math.sin(Math.max(0, slot.selectKick) * Math.PI) * 0.06;
+            slot.group.position.set(
+                slot.baseX + sway,
+                slot.baseY + bob + selectedLift + kickUp,
+                slot.baseZ + selectedForward
+            );
+
+            if (slot.modelRoot) {
+                slot.modelRoot.rotation.y += Number(slot.spinRate || 0.002);
+                slot.modelRoot.rotation.z = Math.sin(idleT * 1.15) * 0.03 * (1 - slot.focusBlend);
+                const s = 1 + (slot.focusBlend * 0.06);
+                slot.modelRoot.scale.set(s, s, s);
+            }
+            if (slot.mixer) slot.mixer.update(dt);
             const showPlaceholder = !slot.row && !slot.modelRoot;
             if (slot.placeholder) slot.placeholder.visible = showPlaceholder;
             if (showPlaceholder && slot.placeholder) {
-                slot.placeholder.rotation.y += 0.008;
+                slot.placeholder.rotation.y += 0.008 + (slot.focusBlend * 0.01);
+                const ps = 1 + (slot.focusBlend * 0.08);
+                slot.placeholder.scale.set(ps, ps, ps);
             }
-            const selected = Number(this.selectedSlotIndex) === Number(slot.idx);
             slot.ring.material.opacity = selected ? (0.26 + (0.24 * (0.5 + 0.5 * Math.sin(this.elapsed * 3.8)))) : 0.06;
             slot.ring.material.color.setHex(selected ? 0x82dcff : 0x69d3ff);
+            const ringPulse = selected ? (1 + (0.05 * Math.sin(this.elapsed * 4.5))) : 1;
+            slot.ring.scale.set(ringPulse, ringPulse, ringPulse);
 
             if (slot.nameplateEl && slot.row && slot.modelRoot) {
                 worldPos.copy(slot.group.position);
@@ -384,7 +469,7 @@ export class CharacterSelectScene {
                 if (visible) {
                     slot.nameplateEl.style.display = '';
                     slot.nameplateEl.style.transform = `translate(-50%, -100%) translate(${Math.round(sx)}px, ${Math.round(sy)}px)`;
-                    slot.nameplateEl.style.opacity = selected ? '1' : '0.92';
+                    slot.nameplateEl.style.opacity = selected ? '1' : '0.9';
                     slot.nameplateEl.style.borderColor = selected ? 'rgba(130,220,255,0.9)' : 'rgba(168,205,236,0.48)';
                 } else {
                     slot.nameplateEl.style.display = 'none';
@@ -429,5 +514,7 @@ export class CharacterSelectScene {
         this.labelsLayer = null;
         this.slots = [];
         this.frameHandle = 0;
+        this.lastFrameMs = 0;
+        this.confirmAnim = null;
     }
 }

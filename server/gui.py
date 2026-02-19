@@ -50,12 +50,23 @@ class ServerGui:
         self.hub_size = tk.StringVar(value="Mediano")
         self.island_size = tk.StringVar(value="Grande")
         self.platform_gap = tk.StringVar(value="Media")
-        self.water_enabled = tk.StringVar(value="Si")
         self.caves_enabled = tk.StringVar(value="No")
         self.main_biome = tk.StringVar(value="Stone")
         self.island_count = tk.StringVar(value="4")
-        self.bridge_width = tk.StringVar(value="N/A")
+        self.bridge_width = tk.StringVar(value="Normal")
         self.biome_mode = tk.StringVar(value="CardinalFixed")
+        self.biome_shape_mode = tk.StringVar(value="Organico")
+        self.organic_noise_scale = tk.DoubleVar(value=0.095)
+        self.organic_noise_strength = tk.DoubleVar(value=0.36)
+        self.organic_edge_falloff = tk.DoubleVar(value=0.24)
+        self.bridge_curve_strength = tk.DoubleVar(value=0.20)
+        self.world_height_voxels = tk.IntVar(value=128)
+        self.surface_height_voxels = tk.IntVar(value=64)
+        self.mountain_amplitude = tk.DoubleVar(value=20.0)
+        self.mountain_noise_scale = tk.DoubleVar(value=0.02)
+        self.fall_death_enabled = tk.StringVar(value="Si")
+        self.void_death_enabled = tk.StringVar(value="Si")
+        self.fall_death_threshold_voxels = tk.DoubleVar(value=10.0)
         self.decor_density = tk.StringVar(value="N/A")
         self.npc_slots = tk.StringVar(value="4")
         self.view_distance = tk.StringVar(value="Media")
@@ -65,6 +76,16 @@ class ServerGui:
         self.fog_near = tk.DoubleVar(value=66.0)
         self.fog_far = tk.DoubleVar(value=300.0)
         self.fog_density = tk.DoubleVar(value=0.0025)
+        self.physics_move_speed = tk.DoubleVar(value=4.6)
+        self.physics_sprint_mult = tk.DoubleVar(value=1.45)
+        self.physics_accel = tk.DoubleVar(value=16.0)
+        self.physics_decel = tk.DoubleVar(value=18.0)
+        self.physics_step_height = tk.DoubleVar(value=0.75)
+        self.physics_max_slope_deg = tk.DoubleVar(value=48.0)
+        self.physics_ground_snap = tk.DoubleVar(value=1.20)
+        self.physics_jump_velocity = tk.DoubleVar(value=8.8)
+        self.physics_gravity = tk.DoubleVar(value=26.0)
+        self.physics_air_control = tk.DoubleVar(value=0.45)
         self.fog_color_preview = None
         self.item_code = tk.StringVar(value="")
         self.item_name = tk.StringVar(value="")
@@ -197,14 +218,56 @@ class ServerGui:
         self.network_expanded_actions: set[str] = set()
         self.network_monitor_line_count = 0
         self.network_monitor_max_lines = 6000
-        self.network_settings = {"client_request_timeout_ms": 12000}
+        self.network_settings = {
+            "client_request_timeout_ms": 12000,
+            "movement_sync": {
+                "send_interval_ms": 100,
+                "send_min_distance": 0.08,
+                "send_min_y_distance": 0.12,
+                "remote_near_distance": 0.35,
+                "remote_far_distance": 4.0,
+                "remote_min_follow_speed": 7.0,
+                "remote_max_follow_speed": 24.0,
+                "remote_teleport_distance": 25.0,
+                "remote_stop_epsilon": 0.03,
+            },
+        }
         self.network_settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "network_settings.json")
         self.network_monitor_paused = False
         self.network_pause_btn = None
         self._load_network_settings_from_json()
 
         self._build()
+        self._autoload_world_config_on_startup()
         self._poll_logs()
+
+    def _make_scrollable_tab(self, notebook, padx=10, pady=10):
+        outer = tk.Frame(notebook)
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        yscroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=yscroll.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        yscroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        content = tk.Frame(canvas, padx=padx, pady=pady)
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _sync_scroll_region(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_content_width(event):
+            canvas.itemconfigure(window_id, width=event.width)
+
+        def _on_mousewheel(event):
+            delta = int(-1 * (event.delta / 120)) if getattr(event, "delta", 0) else 0
+            if delta != 0:
+                canvas.yview_scroll(delta, "units")
+
+        content.bind("<Configure>", _sync_scroll_region)
+        canvas.bind("<Configure>", _sync_content_width)
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        return outer, content
 
     def _build(self):
         notebook = ttk.Notebook(self.root)
@@ -212,13 +275,13 @@ class ServerGui:
         self.main_notebook = notebook
 
         server_tab = tk.Frame(notebook, padx=10, pady=10)
-        world_tab = tk.Frame(notebook, padx=10, pady=10)
+        world_tab_outer, world_tab = self._make_scrollable_tab(notebook, padx=10, pady=10)
         items_tab = tk.Frame(notebook, padx=10, pady=10)
         decor_tab = tk.Frame(notebook, padx=10, pady=10)
         admin_tab = tk.Frame(notebook, padx=10, pady=10)
         network_tab = tk.Frame(notebook, padx=10, pady=10)
         notebook.add(server_tab, text="Servidor")
-        notebook.add(world_tab, text="Mundo")
+        notebook.add(world_tab_outer, text="Mundo")
         notebook.add(items_tab, text="Items")
         notebook.add(decor_tab, text="Decor")
         notebook.add(admin_tab, text="Admin")
@@ -262,7 +325,7 @@ class ServerGui:
         server_tab.grid_columnconfigure(1, weight=1)
         server_tab.grid_columnconfigure(3, weight=1)
 
-        tk.Label(world_tab, text="Generador de Mundo (Hub + Islas Flotantes)", font=("Segoe UI", 11, "bold")).grid(
+        tk.Label(world_tab, text="Generador de Mundo (4 Cuadrantes)", font=("Segoe UI", 11, "bold")).grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 10)
         )
         tk.Label(world_tab, text="Nombre del mundo:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
@@ -272,101 +335,173 @@ class ServerGui:
         tk.Entry(world_tab, textvariable=self.world_seed, width=24).grid(row=2, column=1, sticky="w", pady=4)
         tk.Label(world_tab, text="(vacio = aleatoria)").grid(row=2, column=2, sticky="w")
 
-        tk.Label(world_tab, text="Tamano del hub central:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Altura total (voxeles):").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
         ttk.Combobox(
             world_tab,
-            textvariable=self.hub_size,
-            values=["Mediano", "Grande"],
+            textvariable=self.world_height_voxels,
+            values=["64", "128", "192", "256"],
             width=21,
             state="readonly",
         ).grid(row=3, column=1, sticky="w", pady=4)
 
-        tk.Label(world_tab, text="Tamano de islas:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Capa base del suelo:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
         ttk.Combobox(
             world_tab,
-            textvariable=self.island_size,
-            values=["Grande", "Enorme"],
+            textvariable=self.surface_height_voxels,
+            values=["24", "32", "48", "64", "80", "96", "112", "128"],
             width=21,
             state="readonly",
         ).grid(row=4, column=1, sticky="w", pady=4)
 
-        tk.Label(world_tab, text="Separacion entre plataformas:").grid(row=5, column=0, sticky="e", padx=(0, 6), pady=4)
-        ttk.Combobox(
-            world_tab,
-            textvariable=self.platform_gap,
-            values=["Media", "Amplia"],
-            width=21,
-            state="readonly",
-        ).grid(row=5, column=1, sticky="w", pady=4)
+        tk.Label(world_tab, text="Distribucion biomas:").grid(row=5, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Cuadrantes fijos (X+/Z+, X-/Z+, X-/Z-, X+/Z-)").grid(row=5, column=1, columnspan=2, sticky="w", pady=4)
 
-        tk.Label(world_tab, text="Islas cardinales:").grid(row=6, column=0, sticky="e", padx=(0, 6), pady=4)
-        tk.Label(world_tab, text="4 (Norte/Sur/Este/Oeste)", fg="#2c3e50").grid(row=6, column=1, sticky="w", pady=4)
+        tk.Label(world_tab, text="Altura de montanas:").grid(row=6, column=0, sticky="e", padx=(0, 6), pady=4)
+        mountain_amp_row = tk.Frame(world_tab)
+        mountain_amp_row.grid(row=6, column=1, sticky="w", pady=4)
+        tk.Scale(mountain_amp_row, from_=4.0, to=40.0, resolution=0.5, orient=tk.HORIZONTAL, length=220, variable=self.mountain_amplitude).pack(side=tk.LEFT)
+        tk.Label(mountain_amp_row, textvariable=self.mountain_amplitude, width=8, anchor="w").pack(side=tk.LEFT, padx=(6, 0))
 
-        tk.Label(world_tab, text="Biomas fijos:").grid(row=7, column=0, sticky="e", padx=(0, 6), pady=4)
-        tk.Label(world_tab, text="Centro=Stone | N=Fire | S=Earth | E=Wind | O=Grass", fg="#2c3e50").grid(
-            row=7, column=1, columnspan=2, sticky="w", pady=4
-        )
+        tk.Label(world_tab, text="Escala ruido montanas:").grid(row=7, column=0, sticky="e", padx=(0, 6), pady=4)
+        mountain_noise_row = tk.Frame(world_tab)
+        mountain_noise_row.grid(row=7, column=1, sticky="w", pady=4)
+        tk.Scale(mountain_noise_row, from_=0.003, to=0.12, resolution=0.001, orient=tk.HORIZONTAL, length=220, variable=self.mountain_noise_scale).pack(side=tk.LEFT)
+        tk.Label(mountain_noise_row, textvariable=self.mountain_noise_scale, width=8, anchor="w").pack(side=tk.LEFT, padx=(6, 0))
 
-        tk.Label(world_tab, text="Slots NPC reservados (hub):").grid(row=8, column=0, sticky="e", padx=(0, 6), pady=4)
-        ttk.Combobox(world_tab, textvariable=self.npc_slots, values=["2", "4", "6", "8"], width=21, state="readonly").grid(
+        tk.Label(world_tab, text="Muerte por caida por umbral:").grid(row=8, column=0, sticky="e", padx=(0, 6), pady=4)
+        ttk.Combobox(world_tab, textvariable=self.fall_death_enabled, values=["Si", "No"], width=21, state="readonly").grid(
             row=8, column=1, sticky="w", pady=4
         )
 
-        tk.Label(world_tab, text="Distancia de carga:").grid(row=9, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Muerte al tocar fondo del vacio:").grid(row=9, column=0, sticky="e", padx=(0, 6), pady=4)
+        ttk.Combobox(world_tab, textvariable=self.void_death_enabled, values=["Si", "No"], width=21, state="readonly").grid(
+            row=9, column=1, sticky="w", pady=4
+        )
+
+        tk.Label(world_tab, text="Umbral caida mortal (voxeles):").grid(row=10, column=0, sticky="e", padx=(0, 6), pady=4)
+        fall_threshold_row = tk.Frame(world_tab)
+        fall_threshold_row.grid(row=10, column=1, sticky="w", pady=4)
+        tk.Scale(
+            fall_threshold_row,
+            from_=1,
+            to=120,
+            resolution=1,
+            orient=tk.HORIZONTAL,
+            length=220,
+            variable=self.fall_death_threshold_voxels,
+        ).pack(side=tk.LEFT)
+        tk.Label(fall_threshold_row, textvariable=self.fall_death_threshold_voxels, width=8, anchor="w").pack(side=tk.LEFT, padx=(6, 0))
+        fall_preset_row = tk.Frame(world_tab)
+        fall_preset_row.grid(row=10, column=2, sticky="w", pady=4)
+        tk.Label(fall_preset_row, text="Presets:").pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(fall_preset_row, text="5", width=4, command=lambda: self.fall_death_threshold_voxels.set(5.0)).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(fall_preset_row, text="10", width=4, command=lambda: self.fall_death_threshold_voxels.set(10.0)).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(fall_preset_row, text="20", width=4, command=lambda: self.fall_death_threshold_voxels.set(20.0)).pack(side=tk.LEFT)
+
+        tk.Label(world_tab, text="Slots NPC reservados (spawn):").grid(row=11, column=0, sticky="e", padx=(0, 6), pady=4)
+        ttk.Combobox(world_tab, textvariable=self.npc_slots, values=["2", "4", "6", "8"], width=21, state="readonly").grid(
+            row=11, column=1, sticky="w", pady=4
+        )
+
+        tk.Label(world_tab, text="Distancia de carga:").grid(row=12, column=0, sticky="e", padx=(0, 6), pady=4)
         ttk.Combobox(
             world_tab,
             textvariable=self.view_distance,
             values=["Corta", "Media", "Larga"],
             width=21,
             state="readonly",
-        ).grid(row=9, column=1, sticky="w", pady=4)
+        ).grid(row=12, column=1, sticky="w", pady=4)
 
-        tk.Label(world_tab, text="Niebla activa:").grid(row=10, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Niebla activa:").grid(row=13, column=0, sticky="e", padx=(0, 6), pady=4)
         ttk.Combobox(world_tab, textvariable=self.fog_enabled, values=["Si", "No"], width=21, state="readonly").grid(
-            row=10, column=1, sticky="w", pady=4
+            row=13, column=1, sticky="w", pady=4
         )
 
-        tk.Label(world_tab, text="Modo niebla:").grid(row=11, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Modo niebla:").grid(row=14, column=0, sticky="e", padx=(0, 6), pady=4)
         ttk.Combobox(
             world_tab,
             textvariable=self.fog_mode,
             values=["linear", "exp2"],
             width=21,
             state="readonly",
-        ).grid(row=11, column=1, sticky="w", pady=4)
+        ).grid(row=14, column=1, sticky="w", pady=4)
 
-        tk.Label(world_tab, text="Color niebla:").grid(row=12, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Color niebla:").grid(row=15, column=0, sticky="e", padx=(0, 6), pady=4)
         fog_color_row = tk.Frame(world_tab)
-        fog_color_row.grid(row=12, column=1, sticky="w", pady=4)
+        fog_color_row.grid(row=15, column=1, sticky="w", pady=4)
         tk.Button(fog_color_row, text="Elegir color", width=14, command=self.choose_fog_color).pack(side=tk.LEFT)
         self.fog_color_preview = tk.Label(fog_color_row, text="    ", relief=tk.SOLID, borderwidth=1)
         self.fog_color_preview.pack(side=tk.LEFT, padx=(8, 0))
 
-        tk.Label(world_tab, text="Niebla near:").grid(row=13, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Niebla near:").grid(row=16, column=0, sticky="e", padx=(0, 6), pady=4)
         near_row = tk.Frame(world_tab)
-        near_row.grid(row=13, column=1, sticky="w", pady=4)
+        near_row.grid(row=16, column=1, sticky="w", pady=4)
         tk.Scale(near_row, from_=1, to=300, resolution=1, orient=tk.HORIZONTAL, length=220, variable=self.fog_near).pack(side=tk.LEFT)
         tk.Label(near_row, textvariable=self.fog_near, width=8, anchor="w").pack(side=tk.LEFT, padx=(6, 0))
 
-        tk.Label(world_tab, text="Niebla far:").grid(row=14, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Niebla far:").grid(row=17, column=0, sticky="e", padx=(0, 6), pady=4)
         far_row = tk.Frame(world_tab)
-        far_row.grid(row=14, column=1, sticky="w", pady=4)
+        far_row.grid(row=17, column=1, sticky="w", pady=4)
         tk.Scale(far_row, from_=20, to=1000, resolution=1, orient=tk.HORIZONTAL, length=220, variable=self.fog_far).pack(side=tk.LEFT)
         tk.Label(far_row, textvariable=self.fog_far, width=8, anchor="w").pack(side=tk.LEFT, padx=(6, 0))
 
-        tk.Label(world_tab, text="Densidad niebla (exp2):").grid(row=15, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Densidad niebla (exp2):").grid(row=22, column=0, sticky="e", padx=(0, 6), pady=4)
         dens_row = tk.Frame(world_tab)
-        dens_row.grid(row=15, column=1, sticky="w", pady=4)
+        dens_row.grid(row=22, column=1, sticky="w", pady=4)
         tk.Scale(dens_row, from_=0.0001, to=0.05, resolution=0.0001, orient=tk.HORIZONTAL, length=220, variable=self.fog_density).pack(side=tk.LEFT)
         tk.Label(dens_row, textvariable=self.fog_density, width=8, anchor="w").pack(side=tk.LEFT, padx=(6, 0))
 
-        tk.Label(world_tab, text="Plano de agua visual:").grid(row=16, column=0, sticky="e", padx=(0, 6), pady=4)
-        ttk.Combobox(world_tab, textvariable=self.water_enabled, values=["Si", "No"], width=21, state="readonly").grid(
-            row=16, column=1, sticky="w", pady=4
-        )
+        physics_frame = tk.LabelFrame(world_tab, text="Fisica del Mundo", padx=10, pady=8)
+        physics_frame.grid(row=1, column=3, rowspan=22, sticky="n", padx=(24, 0), pady=2)
+        tk.Label(physics_frame, text="Velocidad base:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=1.0, to=12.0, resolution=0.1, orient=tk.HORIZONTAL, length=180, variable=self.physics_move_speed).grid(row=0, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_move_speed, width=6, anchor="w").grid(row=0, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(physics_frame, text="Sprint x:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=1.0, to=3.0, resolution=0.05, orient=tk.HORIZONTAL, length=180, variable=self.physics_sprint_mult).grid(row=1, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_sprint_mult, width=6, anchor="w").grid(row=1, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(physics_frame, text="Aceleracion:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=2.0, to=40.0, resolution=0.5, orient=tk.HORIZONTAL, length=180, variable=self.physics_accel).grid(row=2, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_accel, width=6, anchor="w").grid(row=2, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(physics_frame, text="Frenado:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=2.0, to=40.0, resolution=0.5, orient=tk.HORIZONTAL, length=180, variable=self.physics_decel).grid(row=3, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_decel, width=6, anchor="w").grid(row=3, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(physics_frame, text="Escalon max:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=0.1, to=3.0, resolution=0.05, orient=tk.HORIZONTAL, length=180, variable=self.physics_step_height).grid(row=4, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_step_height, width=6, anchor="w").grid(row=4, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(physics_frame, text="Pendiente max (deg):").grid(row=5, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=5.0, to=85.0, resolution=1.0, orient=tk.HORIZONTAL, length=180, variable=self.physics_max_slope_deg).grid(row=5, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_max_slope_deg, width=6, anchor="w").grid(row=5, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(physics_frame, text="Caida max por paso:").grid(row=6, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=0.2, to=4.0, resolution=0.05, orient=tk.HORIZONTAL, length=180, variable=self.physics_ground_snap).grid(row=6, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_ground_snap, width=6, anchor="w").grid(row=6, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(physics_frame, text="Salto (vel):").grid(row=7, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=2.0, to=20.0, resolution=0.1, orient=tk.HORIZONTAL, length=180, variable=self.physics_jump_velocity).grid(row=7, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_jump_velocity, width=6, anchor="w").grid(row=7, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(physics_frame, text="Gravedad:").grid(row=8, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=4.0, to=60.0, resolution=0.5, orient=tk.HORIZONTAL, length=180, variable=self.physics_gravity).grid(row=8, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_gravity, width=6, anchor="w").grid(row=8, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(physics_frame, text="Control aire:").grid(row=9, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(physics_frame, from_=0.0, to=1.0, resolution=0.05, orient=tk.HORIZONTAL, length=180, variable=self.physics_air_control).grid(row=9, column=1, sticky="w", pady=3)
+        tk.Label(physics_frame, textvariable=self.physics_air_control, width=6, anchor="w").grid(row=9, column=2, sticky="w", padx=(6, 0))
+
+        preset_row = tk.Frame(physics_frame)
+        preset_row.grid(row=10, column=0, columnspan=3, sticky="w", pady=(8, 2))
+        tk.Label(preset_row, text="Presets:").pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(preset_row, text="Arcade", width=10, command=lambda: self._apply_physics_preset("arcade")).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(preset_row, text="Equilibrado", width=10, command=lambda: self._apply_physics_preset("balanced")).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Button(preset_row, text="Realista", width=10, command=lambda: self._apply_physics_preset("realistic")).pack(side=tk.LEFT)
 
         world_btns = tk.Frame(world_tab, pady=12)
-        world_btns.grid(row=17, column=0, columnspan=4, sticky="w")
+        world_btns.grid(row=23, column=0, columnspan=4, sticky="w")
         tk.Button(world_btns, text="Crear Mundo", command=self.create_world, width=16).pack(side=tk.LEFT, padx=(0, 8))
         tk.Button(world_btns, text="Actualizar Configuracion Mundo", command=self.update_world_config, width=28).pack(side=tk.LEFT)
         self._refresh_fog_color_preview()
@@ -583,11 +718,12 @@ class ServerGui:
         self._refresh_decor_type_values()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def _build_db_manager(self) -> DatabaseManager | None:
+    def _build_db_manager(self, show_errors: bool = True) -> DatabaseManager | None:
         try:
             db_port = int(self.db_port.get().strip())
         except ValueError:
-            messagebox.showerror("Error", "Puerto DB invalido")
+            if show_errors:
+                messagebox.showerror("Error", "Puerto DB invalido")
             return None
         db_cfg = DbConfig(
             host=self.db_host.get().strip(),
@@ -597,7 +733,8 @@ class ServerGui:
             database=self.db_name.get().strip(),
         )
         if not db_cfg.host or not db_cfg.user or not db_cfg.database:
-            messagebox.showerror("Error", "Completa host/usuario/nombre de base de datos")
+            if show_errors:
+                messagebox.showerror("Error", "Completa host/usuario/nombre de base de datos")
             return None
         try:
             db = DatabaseManager(db_cfg)
@@ -605,7 +742,8 @@ class ServerGui:
             self.db_manager = db
             return db
         except Error as exc:
-            messagebox.showerror("Error MySQL", f"No se pudo inicializar la base de datos:\n{exc}")
+            if show_errors:
+                messagebox.showerror("Error MySQL", f"No se pudo inicializar la base de datos:\n{exc}")
             return None
 
     def _on_main_tab_changed(self, event=None):
@@ -616,6 +754,9 @@ class ServerGui:
             tab_id = nb.select()
             tab_text = (nb.tab(tab_id, "text") or "").strip().lower()
         except Exception:
+            return
+        if tab_text == "mundo":
+            self._load_world_config_from_db_if_connected(log_context="tab Mundo")
             return
         if tab_text == "items":
             self.refresh_items_list()
@@ -628,6 +769,76 @@ class ServerGui:
                     self.refresh_decor_drops_table()
             except Exception:
                 pass
+
+    def _load_world_config_from_db_if_connected(self, log_context: str = "GUI"):
+        db = self.db_manager
+        if not db:
+            return
+        try:
+            row = db.enforce_single_world() or db.get_active_world_config()
+            if not row:
+                return
+            terrain_row = db.get_world_terrain(int(row.get("id") or 0))
+            terrain_cfg = (terrain_row or {}).get("terrain_config") or {}
+            self._apply_world_form_values(row, terrain_cfg)
+            self.log(f"[WORLD] Config cargada desde DB ({log_context}): {row.get('world_name')}")
+        except Error as exc:
+            self.log(f"[ERR] No se pudo cargar config de mundo desde DB ({log_context}): {exc}")
+
+    def _apply_world_form_values(self, row: dict, terrain_cfg: dict | None = None):
+        terrain_cfg = terrain_cfg or {}
+        self.world_name.set(str(row.get("world_name") or self.world_name.get() or "MundoPrincipal"))
+        self.world_seed.set(str(row.get("seed") or ""))
+        self.world_height_voxels.set(max(64, min(256, int(terrain_cfg.get("voxel_world_height") or 128))))
+        self.surface_height_voxels.set(max(1, min(255, int(terrain_cfg.get("surface_height") or terrain_cfg.get("base_height") or 64))))
+        self.mountain_amplitude.set(max(4.0, min(40.0, float(terrain_cfg.get("mountain_amplitude") or terrain_cfg.get("fixed_noise_amplitude") or 20.0))))
+        self.mountain_noise_scale.set(max(0.003, min(0.12, float(terrain_cfg.get("mountain_noise_scale") or terrain_cfg.get("fixed_noise_scale") or 0.02))))
+        self.hub_size.set(row.get("hub_size") or row.get("world_size") or "Mediano")
+        self.island_size.set(row.get("island_size") or "Grande")
+        self.platform_gap.set(row.get("platform_gap") or row.get("terrain_type") or "Media")
+        bridge_width = (row.get("bridge_width") or "Normal").strip().title()
+        if bridge_width not in {"Fino", "Normal", "Ancho"}:
+            bridge_width = "Normal"
+        self.bridge_width.set(bridge_width)
+        shape_mode = (row.get("biome_shape_mode") or terrain_cfg.get("biome_shape_mode") or "organic").strip().lower()
+        self.biome_shape_mode.set("Cuadrado" if shape_mode == "square" or shape_mode == "cuadrado" else "Organico")
+        self.organic_noise_scale.set(max(0.01, min(0.35, float(row.get("organic_noise_scale") or terrain_cfg.get("organic_noise_scale") or 0.095))))
+        self.organic_noise_strength.set(max(0.0, min(0.95, float(row.get("organic_noise_strength") or terrain_cfg.get("organic_noise_strength") or 0.36))))
+        self.organic_edge_falloff.set(max(0.05, min(0.55, float(row.get("organic_edge_falloff") or terrain_cfg.get("organic_edge_falloff") or 0.24))))
+        self.bridge_curve_strength.set(max(0.0, min(0.8, float(row.get("bridge_curve_strength") or terrain_cfg.get("bridge_curve_strength") or 0.20))))
+        self.fall_death_enabled.set("Si" if int(row.get("fall_death_enabled") or 1) == 1 else "No")
+        self.void_death_enabled.set("Si" if int(row.get("void_death_enabled") or 1) == 1 else "No")
+        self.fall_death_threshold_voxels.set(
+            max(1.0, min(120.0, float(row.get("fall_death_threshold_voxels") or terrain_cfg.get("fall_death_threshold_voxels") or 10.0)))
+        )
+        self.view_distance.set(row.get("view_distance") or "Media")
+        self.fog_enabled.set("Si" if int(row.get("fog_enabled") or 1) == 1 else "No")
+        self.fog_mode.set((row.get("fog_mode") or "linear").lower())
+        self.fog_color.set((row.get("fog_color") or "#b8def2").lower())
+        fog_near = max(1.0, min(300.0, float(row.get("fog_near") or 66.0)))
+        fog_far = max(fog_near + 1.0, min(1000.0, float(row.get("fog_far") or 300.0)))
+        self.fog_near.set(fog_near)
+        self.fog_far.set(fog_far)
+        self.fog_density.set(float(row.get("fog_density") or 0.0025))
+        self._refresh_fog_color_preview()
+        self.npc_slots.set(str(row.get("npc_slots") or 4))
+        self.physics_move_speed.set(float(terrain_cfg.get("physics_move_speed") or 4.6))
+        self.physics_sprint_mult.set(float(terrain_cfg.get("physics_sprint_mult") or 1.45))
+        self.physics_accel.set(float(terrain_cfg.get("physics_accel") or 16.0))
+        self.physics_decel.set(float(terrain_cfg.get("physics_decel") or 18.0))
+        self.physics_step_height.set(float(terrain_cfg.get("physics_step_height") or 0.75))
+        self.physics_max_slope_deg.set(float(terrain_cfg.get("physics_max_slope_deg") or 48.0))
+        self.physics_ground_snap.set(float(terrain_cfg.get("physics_ground_snap") or 1.20))
+        self.physics_jump_velocity.set(float(terrain_cfg.get("physics_jump_velocity") or 8.8))
+        self.physics_gravity.set(float(terrain_cfg.get("physics_gravity") or 26.0))
+        self.physics_air_control.set(float(terrain_cfg.get("physics_air_control") or 0.45))
+
+    def _autoload_world_config_on_startup(self):
+        if not self.db_manager:
+            db = self._build_db_manager(show_errors=False)
+            if not db:
+                return
+        self._load_world_config_from_db_if_connected(log_context="inicio GUI")
 
     def _collect_world_config(self, active: bool = False):
         name = self.world_name.get().strip()
@@ -642,6 +853,8 @@ class ServerGui:
         hub_size = self.hub_size.get().strip() or "Mediano"
         island_size = self.island_size.get().strip() or "Grande"
         platform_gap = self.platform_gap.get().strip() or "Media"
+        bridge_width = self.bridge_width.get().strip() or "Normal"
+        biome_shape_mode = self.biome_shape_mode.get().strip() or "Organico"
         fog_mode = (self.fog_mode.get().strip().lower() or "linear")
         if fog_mode not in {"linear", "exp2"}:
             fog_mode = "linear"
@@ -658,21 +871,42 @@ class ServerGui:
             fog_near = max(1.0, min(300.0, float(self.fog_near.get())))
             fog_far = max(fog_near + 1.0, min(1000.0, float(self.fog_far.get())))
             fog_density = max(0.00001, min(0.2, float(self.fog_density.get())))
+            organic_noise_scale = max(0.01, min(0.35, float(self.organic_noise_scale.get())))
+            organic_noise_strength = max(0.0, min(0.95, float(self.organic_noise_strength.get())))
+            organic_edge_falloff = max(0.05, min(0.55, float(self.organic_edge_falloff.get())))
+            bridge_curve_strength = max(0.0, min(0.8, float(self.bridge_curve_strength.get())))
+            world_height_voxels = max(64, min(256, int(self.world_height_voxels.get())))
+            surface_height_voxels = max(1, min(world_height_voxels - 1, int(self.surface_height_voxels.get())))
+            mountain_amplitude = max(4.0, min(40.0, float(self.mountain_amplitude.get())))
+            mountain_noise_scale = max(0.003, min(0.12, float(self.mountain_noise_scale.get())))
+            fall_death_threshold_voxels = max(1.0, min(120.0, float(self.fall_death_threshold_voxels.get())))
         except ValueError:
-            messagebox.showerror("Error", "Valores de niebla invalidos")
+            messagebox.showerror("Error", "Valores numericos invalidos")
             return None
         return {
             "world_name": name,
             "seed": seed,
             "world_size": hub_size,
             "terrain_type": platform_gap,
-            "water_enabled": 1 if self.water_enabled.get() == "Si" else 0,
+            "water_enabled": 0,
             "caves_enabled": 0,
             "main_biome": "Stone",
             "view_distance": self.view_distance.get(),
             "island_count": 4,
-            "bridge_width": "N/A",
+            "bridge_width": bridge_width,
             "biome_mode": "CardinalFixed",
+            "biome_shape_mode": biome_shape_mode,
+            "organic_noise_scale": organic_noise_scale,
+            "organic_noise_strength": organic_noise_strength,
+            "organic_edge_falloff": organic_edge_falloff,
+            "bridge_curve_strength": bridge_curve_strength,
+            "voxel_world_height": world_height_voxels,
+            "surface_height": surface_height_voxels,
+            "mountain_amplitude": mountain_amplitude,
+            "mountain_noise_scale": mountain_noise_scale,
+            "fall_death_enabled": 1 if self.fall_death_enabled.get() == "Si" else 0,
+            "void_death_enabled": 1 if self.void_death_enabled.get() == "Si" else 0,
+            "fall_death_threshold_voxels": fall_death_threshold_voxels,
             "decor_density": "N/A",
             "npc_slots": npc_slots,
             "hub_size": hub_size,
@@ -684,6 +918,16 @@ class ServerGui:
             "fog_near": fog_near,
             "fog_far": fog_far,
             "fog_density": fog_density,
+            "physics_move_speed": max(1.0, min(12.0, float(self.physics_move_speed.get()))),
+            "physics_sprint_mult": max(1.0, min(3.0, float(self.physics_sprint_mult.get()))),
+            "physics_accel": max(2.0, min(40.0, float(self.physics_accel.get()))),
+            "physics_decel": max(2.0, min(40.0, float(self.physics_decel.get()))),
+            "physics_step_height": max(0.1, min(3.0, float(self.physics_step_height.get()))),
+            "physics_max_slope_deg": max(5.0, min(85.0, float(self.physics_max_slope_deg.get()))),
+            "physics_ground_snap": max(0.2, min(4.0, float(self.physics_ground_snap.get()))),
+            "physics_jump_velocity": max(2.0, min(20.0, float(self.physics_jump_velocity.get()))),
+            "physics_gravity": max(4.0, min(60.0, float(self.physics_gravity.get()))),
+            "physics_air_control": max(0.0, min(1.0, float(self.physics_air_control.get()))),
             "is_active": 1 if active else 0,
         }
 
@@ -694,6 +938,60 @@ class ServerGui:
         if not (len(color) == 7 and color.startswith("#")):
             color = "#b8def2"
         self.fog_color_preview.configure(bg=color)
+
+    def _apply_physics_preset(self, preset: str):
+        key = (preset or "").strip().lower()
+        presets = {
+            "arcade": {
+                "speed": 6.8,
+                "sprint": 1.75,
+                "accel": 26.0,
+                "decel": 28.0,
+                "step": 1.10,
+                "slope": 62.0,
+                "snap": 1.70,
+                "jump": 10.8,
+                "gravity": 20.0,
+                "air": 0.75,
+            },
+            "balanced": {
+                "speed": 4.6,
+                "sprint": 1.45,
+                "accel": 16.0,
+                "decel": 18.0,
+                "step": 0.75,
+                "slope": 48.0,
+                "snap": 1.20,
+                "jump": 8.8,
+                "gravity": 26.0,
+                "air": 0.45,
+            },
+            "realistic": {
+                "speed": 3.8,
+                "sprint": 1.25,
+                "accel": 10.0,
+                "decel": 12.0,
+                "step": 0.45,
+                "slope": 34.0,
+                "snap": 0.85,
+                "jump": 7.2,
+                "gravity": 32.0,
+                "air": 0.20,
+            },
+        }
+        cfg = presets.get(key)
+        if not cfg:
+            return
+        self.physics_move_speed.set(cfg["speed"])
+        self.physics_sprint_mult.set(cfg["sprint"])
+        self.physics_accel.set(cfg["accel"])
+        self.physics_decel.set(cfg["decel"])
+        self.physics_step_height.set(cfg["step"])
+        self.physics_max_slope_deg.set(cfg["slope"])
+        self.physics_ground_snap.set(cfg["snap"])
+        self.physics_jump_velocity.set(cfg["jump"])
+        self.physics_gravity.set(cfg["gravity"])
+        self.physics_air_control.set(cfg["air"])
 
     def choose_fog_color(self):
         initial = (self.fog_color.get() or "#b8def2").strip()
@@ -730,18 +1028,27 @@ class ServerGui:
         if not config:
             return
         try:
+            db.clear_all_worlds()
             world_id = db.save_world_config(config)
             terrain_config, terrain_cells = build_fixed_world_terrain(config)
             if world_id:
                 db.save_world_terrain(world_id, terrain_config, terrain_cells)
+            if self.server:
+                try:
+                    self.server.world_voxel_loaded_worlds.clear()
+                    self.server.world_voxel_changes_by_world.clear()
+                    self.server.world_loot_by_world.clear()
+                except Exception:
+                    pass
             self.world_seed.set(config["seed"])
             self.log(
-                "[WORLD] Mundo activo: "
+                "[WORLD] Mundo recreado desde cero y activo: "
                 f"{config['world_name']} | seed={config['seed']} | "
-                f"hub={config['hub_size']} | islas={config['island_size']} | "
-                f"separacion={config['platform_gap']} | celdas={len(terrain_cells)}"
+                f"layout=quadrants | altura={config['voxel_world_height']} | "
+                f"suelo={config['surface_height']} | montanas={config['mountain_amplitude']} | "
+                f"ruido={config['mountain_noise_scale']} | celdas={len(terrain_cells)}"
             )
-            messagebox.showinfo("Mundo", f"Mundo '{config['world_name']}' creado/activado")
+            messagebox.showinfo("Mundo", f"Mundo '{config['world_name']}' recreado desde cero")
         except Error as exc:
             messagebox.showerror("Error MySQL", f"No se pudo crear/activar el mundo:\n{exc}")
 
@@ -780,7 +1087,9 @@ class ServerGui:
             terrain_cfg = (terrain_row or {}).get("terrain_config") or {}
             terrain_cells = (terrain_row or {}).get("terrain_cells") or {}
             world_style = (terrain_cfg.get("world_style") or "").lower()
-            if (not terrain_cells) or (world_style != "fixed_biome_grid"):
+            biome_layout = (terrain_cfg.get("biome_layout") or "").strip().lower()
+            needs_sparse_cells = biome_layout not in {"quadrants"}
+            if (world_style != "fixed_biome_grid") or (needs_sparse_cells and (not terrain_cells)):
                 terrain_config, new_cells = build_fixed_world_terrain(world)
                 db.save_world_terrain(world_id, terrain_config, new_cells)
                 self.log(f"[WORLD] Terreno regenerado en inicio para '{world.get('world_name')}'")
@@ -804,22 +1113,9 @@ class ServerGui:
             if not row:
                 messagebox.showwarning("Mundo", f"No existe el mundo '{name}'")
                 return
-            self.world_seed.set(row["seed"])
-            self.hub_size.set(row.get("hub_size") or row.get("world_size") or "Mediano")
-            self.island_size.set(row.get("island_size") or "Grande")
-            self.platform_gap.set(row.get("platform_gap") or row.get("terrain_type") or "Media")
-            self.water_enabled.set("Si" if row["water_enabled"] else "No")
-            self.view_distance.set(row["view_distance"])
-            self.fog_enabled.set("Si" if int(row.get("fog_enabled") or 1) == 1 else "No")
-            self.fog_mode.set((row.get("fog_mode") or "linear").lower())
-            self.fog_color.set((row.get("fog_color") or "#b8def2").lower())
-            fog_near = max(1.0, min(300.0, float(row.get("fog_near") or 66.0)))
-            fog_far = max(fog_near + 1.0, min(1000.0, float(row.get("fog_far") or 300.0)))
-            self.fog_near.set(fog_near)
-            self.fog_far.set(fog_far)
-            self.fog_density.set(float(row.get("fog_density") or 0.0025))
-            self._refresh_fog_color_preview()
-            self.npc_slots.set(str(row.get("npc_slots") or 4))
+            terrain_row = db.get_world_terrain(int(row.get("id") or 0))
+            terrain_cfg = (terrain_row or {}).get("terrain_config") or {}
+            self._apply_world_form_values(row, terrain_cfg)
             self.log(f"[WORLD] Config cargada: {name}")
             messagebox.showinfo("Mundo", f"Configuracion cargada de '{name}'")
         except Error as exc:
@@ -969,14 +1265,36 @@ class ServerGui:
         if not item_code:
             messagebox.showwarning("Items", "Selecciona un item en la tabla")
             return
-        if not messagebox.askyesno("Items", f"Desactivar item '{item_code}'?"):
+        if not messagebox.askyesno("Items", f"Eliminar item '{item_code}' de forma permanente?"):
             return
         try:
-            db.set_item_active(item_code, 0)
-            self.log(f"[ITEMS] Item desactivado (tabla): {item_code}")
-            self.refresh_items_list()
+            result = db.delete_item_catalog(item_code, purge_references=False)
+            if result.get("ok"):
+                self.log(f"[ITEMS] Item eliminado: {item_code}")
+                self.refresh_items_list()
+                return
+            usage = result.get("usage") or {}
+            drops = int(usage.get("drops") or 0)
+            inv = int(usage.get("inventory_slots") or 0)
+            if result.get("error") == "item en uso":
+                force_msg = (
+                    f"El item '{item_code}' esta en uso.\n\n"
+                    f"- Referencias en drops de decor: {drops}\n"
+                    f"- Slots de inventario con este item: {inv}\n\n"
+                    "Quieres eliminarlo igualmente y limpiar esas referencias?"
+                )
+                if messagebox.askyesno("Items", force_msg):
+                    forced = db.delete_item_catalog(item_code, purge_references=True)
+                    if forced.get("ok"):
+                        self.log(
+                            "[ITEMS] Item eliminado con limpieza de referencias: "
+                            f"{item_code} (drops={drops}, inventario={inv})"
+                        )
+                        self.refresh_items_list()
+                        return
+            messagebox.showwarning("Items", f"No se pudo eliminar '{item_code}': {result.get('error') or 'error desconocido'}")
         except Error as exc:
-            messagebox.showerror("Error MySQL", f"No se pudo desactivar item:\n{exc}")
+            messagebox.showerror("Error MySQL", f"No se pudo eliminar item:\n{exc}")
 
     def item_new_popup(self, item_code: str | None = None):
         if self.item_editor_window and self.item_editor_window.winfo_exists():
@@ -4059,8 +4377,36 @@ class ServerGui:
             parsed = int(fallback)
         return max(500, min(120000, parsed))
 
+    def _coerce_float_clamped(self, raw_value, fallback: float, lo: float, hi: float) -> float:
+        try:
+            parsed = float(raw_value)
+        except (TypeError, ValueError):
+            parsed = float(fallback)
+        return max(float(lo), min(float(hi), float(parsed)))
+
+    def _normalize_movement_sync_settings(self, raw_sync) -> dict:
+        src = raw_sync if isinstance(raw_sync, dict) else {}
+        defaults = (self.network_settings.get("movement_sync") or {})
+        out = {
+            "send_interval_ms": int(self._coerce_float_clamped(src.get("send_interval_ms"), defaults.get("send_interval_ms", 100), 33, 1000)),
+            "send_min_distance": self._coerce_float_clamped(src.get("send_min_distance"), defaults.get("send_min_distance", 0.08), 0.01, 2.0),
+            "send_min_y_distance": self._coerce_float_clamped(src.get("send_min_y_distance"), defaults.get("send_min_y_distance", 0.12), 0.01, 2.0),
+            "remote_near_distance": self._coerce_float_clamped(src.get("remote_near_distance"), defaults.get("remote_near_distance", 0.35), 0.01, 5.0),
+            "remote_far_distance": self._coerce_float_clamped(src.get("remote_far_distance"), defaults.get("remote_far_distance", 4.0), 0.1, 60.0),
+            "remote_min_follow_speed": self._coerce_float_clamped(src.get("remote_min_follow_speed"), defaults.get("remote_min_follow_speed", 7.0), 0.2, 120.0),
+            "remote_max_follow_speed": self._coerce_float_clamped(src.get("remote_max_follow_speed"), defaults.get("remote_max_follow_speed", 24.0), 0.2, 160.0),
+            "remote_teleport_distance": self._coerce_float_clamped(src.get("remote_teleport_distance"), defaults.get("remote_teleport_distance", 25.0), 1.0, 500.0),
+            "remote_stop_epsilon": self._coerce_float_clamped(src.get("remote_stop_epsilon"), defaults.get("remote_stop_epsilon", 0.03), 0.001, 2.0),
+        }
+        if out["remote_far_distance"] < out["remote_near_distance"]:
+            out["remote_far_distance"] = out["remote_near_distance"]
+        if out["remote_max_follow_speed"] < out["remote_min_follow_speed"]:
+            out["remote_max_follow_speed"] = out["remote_min_follow_speed"]
+        return out
+
     def _load_network_settings_from_json(self):
         timeout_ms = self._coerce_network_timeout(self.network_settings.get("client_request_timeout_ms", 12000), 12000)
+        movement_sync = self._normalize_movement_sync_settings(self.network_settings.get("movement_sync"))
         if os.path.exists(self.network_settings_file):
             try:
                 with open(self.network_settings_file, "r", encoding="utf-8") as fh:
@@ -4070,11 +4416,13 @@ class ServerGui:
                     raw_settings = data
                 if isinstance(raw_settings, dict):
                     timeout_ms = self._coerce_network_timeout(raw_settings.get("client_request_timeout_ms"), timeout_ms)
+                    movement_sync = self._normalize_movement_sync_settings(raw_settings.get("movement_sync"))
             except Exception:
                 self.log_queue.put(
                     f"{datetime.now().strftime('%H:%M:%S')} [NETWORK] No se pudo leer {self.network_settings_file}, usando defaults."
                 )
         self.network_settings["client_request_timeout_ms"] = timeout_ms
+        self.network_settings["movement_sync"] = movement_sync
         self.network_client_request_timeout_ms.set(str(timeout_ms))
 
     def _save_network_settings_to_json(self, show_error=False) -> bool:
@@ -4100,9 +4448,11 @@ class ServerGui:
         timeout_ms = self._coerce_network_timeout(timeout_raw, 12000)
         self.network_client_request_timeout_ms.set(str(timeout_ms))
         self.network_settings["client_request_timeout_ms"] = timeout_ms
+        self.network_settings["movement_sync"] = self._normalize_movement_sync_settings(self.network_settings.get("movement_sync"))
         self._save_network_settings_to_json(show_error=True)
         if self.server:
             self.server.network_settings["client_request_timeout_ms"] = timeout_ms
+            self.server.network_settings["movement_sync"] = dict(self.network_settings["movement_sync"])
         self.log(f"[NETWORK] client_request_timeout_ms actualizado a {timeout_ms}")
 
     def enqueue_network_event(self, event: dict):
