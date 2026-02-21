@@ -1155,7 +1155,7 @@ class ServerGui:
             return None
 
         if model_key:
-            model_root, _ = self._decor_assets_roots()
+            model_root, _ = self._item_assets_roots()
             model_rel = self._decor_relpath(model_key, model_root)
             if not model_rel or not model_rel.lower().endswith(SUPPORTED_MODEL_EXTS):
                 messagebox.showerror("Items", "model_key invalido. Usa ruta relativa .obj/.glb/.gltf")
@@ -1577,7 +1577,7 @@ class ServerGui:
             messagebox.showerror("Error MySQL", f"No se pudo listar items:\n{exc}")
 
     def _list_item_obj_files(self):
-        model_root, _ = self._decor_assets_roots()
+        model_root, _ = self._item_assets_roots()
         if not os.path.isdir(model_root):
             return []
         out = []
@@ -1597,7 +1597,7 @@ class ServerGui:
         if not files:
             messagebox.showwarning("Items", f"No hay modelos 3D para el tipo '{selected_type}'")
             return
-        model_root, _ = self._decor_assets_roots()
+        model_root, _ = self._item_assets_roots()
         current_rel = self._decor_relpath(self.item_model_key.get().strip(), model_root)
         idx = -1
         if current_rel:
@@ -1621,7 +1621,7 @@ class ServerGui:
         self._cycle_item_model_file(1)
 
     def item_browse_model_path(self):
-        model_root, _ = self._decor_assets_roots()
+        model_root, _ = self._item_assets_roots()
         path = filedialog.askopenfilename(
             title="Seleccionar modelo 3D",
             initialdir=model_root if os.path.isdir(model_root) else os.getcwd(),
@@ -1631,7 +1631,7 @@ class ServerGui:
             return
         rel = self._decor_relpath(path, model_root)
         if not rel:
-            messagebox.showerror("Items", "El archivo debe estar dentro de assets/modelos/entorno")
+            messagebox.showerror("Items", "El archivo debe estar dentro de assets/modelos/objetos")
             return
         if not rel.lower().endswith(SUPPORTED_MODEL_EXTS):
             messagebox.showerror("Items", "Formato no soportado. Usa .obj, .glb o .gltf")
@@ -1643,7 +1643,7 @@ class ServerGui:
         self._item_publish_live_preview()
 
     def item_browse_icon_path(self):
-        _, icon_root = self._decor_assets_roots()
+        _, icon_root = self._item_assets_roots()
         path = filedialog.askopenfilename(
             title="Seleccionar icono .png",
             initialdir=icon_root if os.path.isdir(icon_root) else os.getcwd(),
@@ -1660,7 +1660,7 @@ class ServerGui:
         self._item_publish_live_preview()
 
     def item_open_webgl_preview(self):
-        model_root, icon_root = self._decor_assets_roots()
+        model_root, icon_root = self._item_assets_roots()
         model_rel = self._decor_relpath(self.item_model_key.get().strip(), model_root)
         if not model_rel:
             messagebox.showerror("Items", "Modelo 3D invalido para preview WebGL")
@@ -1669,7 +1669,7 @@ class ServerGui:
         if not os.path.exists(abs_model):
             messagebox.showerror("Items", "Modelo 3D no encontrado")
             return
-        obj_rel = f"assets/modelos/entorno/{model_rel.replace(os.sep, '/').replace('\\', '/')}"
+        obj_rel = f"assets/modelos/objetos/{model_rel.replace(os.sep, '/').replace('\\', '/')}"
         icon_rel = self._decor_relpath(self.item_icon_key.get().strip(), icon_root)
         icon_path = None
         if icon_rel:
@@ -1677,11 +1677,11 @@ class ServerGui:
         self._open_live_web_preview("item", obj_rel, icon_path)
 
     def _item_publish_live_preview(self):
-        model_root, icon_root = self._decor_assets_roots()
+        model_root, icon_root = self._item_assets_roots()
         model_rel = self._decor_relpath(self.item_model_key.get().strip(), model_root)
         if not model_rel:
             return
-        obj_rel = f"assets/modelos/entorno/{model_rel.replace(os.sep, '/').replace('\\', '/')}"
+        obj_rel = f"assets/modelos/objetos/{model_rel.replace(os.sep, '/').replace('\\', '/')}"
         icon_rel = self._decor_relpath(self.item_icon_key.get().strip(), icon_root)
         icon_path = None
         if icon_rel:
@@ -1689,14 +1689,14 @@ class ServerGui:
         self._preview_publish("item", obj_rel, icon_path)
 
     def _item_abs_model_path(self):
-        model_root, _ = self._decor_assets_roots()
+        model_root, _ = self._item_assets_roots()
         rel = self._decor_relpath(self.item_model_key.get().strip(), model_root)
         if not rel:
             return None
         return os.path.join(model_root, rel)
 
     def _item_abs_icon_path(self):
-        _, icon_root = self._decor_assets_roots()
+        _, icon_root = self._item_assets_roots()
         rel = self._decor_relpath(self.item_icon_key.get().strip(), icon_root)
         if not rel:
             return None
@@ -1903,7 +1903,13 @@ class ServerGui:
 
     def _decor_assets_roots(self):
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        model_root = os.path.join(base, "assets", "modelos", "entorno")
+        model_root = os.path.join(base, "assets", "modelos", "objetos")
+        icon_root = os.path.join(base, "assets", "sprites", "iconos")
+        return model_root, icon_root
+
+    def _item_assets_roots(self):
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        model_root = os.path.join(base, "assets", "modelos", "objetos")
         icon_root = os.path.join(base, "assets", "sprites", "iconos")
         return model_root, icon_root
 
@@ -1930,7 +1936,7 @@ class ServerGui:
         return self._infer_decor_type_from_filename(rel)
 
     def _refresh_item_model_type_values(self):
-        self.item_model_type_values = self._list_decor_type_dirs(ensure_varios=True)
+        self.item_model_type_values = self._list_item_type_dirs(ensure_varios=True)
         current = self._normalize_decor_type_name(self.item_model_type.get())
         if current not in self.item_model_type_values:
             current = self.item_model_type_values[0]
@@ -1939,12 +1945,41 @@ class ServerGui:
             self.item_model_type_combo.configure(values=self.item_model_type_values)
 
     def _list_item_model_files_by_type(self, model_type: str):
-        return self._list_decor_model_files_by_type(model_type)
+        model_root, _ = self._item_assets_roots()
+        if not os.path.isdir(model_root):
+            return []
+        t = self._normalize_decor_type_name(model_type)
+        target_dir = os.path.join(model_root, t)
+        out = []
+
+        def _collect_from(base_dir: str):
+            for root, _dirs, files in os.walk(base_dir):
+                for name in files:
+                    if not name.lower().endswith(SUPPORTED_MODEL_EXTS):
+                        continue
+                    abs_path = os.path.join(root, name)
+                    rel = os.path.relpath(abs_path, model_root).replace("\\", "/")
+                    out.append(rel)
+
+        if os.path.isdir(target_dir):
+            _collect_from(target_dir)
+
+        if t == "varios":
+            for name in os.listdir(model_root):
+                abs_path = os.path.join(model_root, name)
+                if not os.path.isfile(abs_path):
+                    continue
+                if not name.lower().endswith(SUPPORTED_MODEL_EXTS):
+                    continue
+                out.append(name.replace("\\", "/"))
+
+        out.sort(key=lambda s: s.lower())
+        return out
 
     def _item_autoselect_model_for_selected_type(self, force: bool = False):
         selected_type = self._normalize_decor_type_name(self.item_model_type.get())
         files = self._list_item_model_files_by_type(selected_type)
-        model_root, _ = self._decor_assets_roots()
+        model_root, _ = self._item_assets_roots()
         current_rel = self._decor_relpath(self.item_model_key.get().strip(), model_root)
         current_norm = (current_rel or "").replace("\\", "/").lower()
         if files:
@@ -1963,6 +1998,22 @@ class ServerGui:
             self.item_obj_preview_vertices = []
             self.item_obj_preview_edges = []
             self._draw_item_obj_preview_frame()
+
+    def _list_item_type_dirs(self, ensure_varios: bool = True) -> list[str]:
+        model_root, _ = self._item_assets_roots()
+        os.makedirs(model_root, exist_ok=True)
+        types = set()
+        for entry in os.scandir(model_root):
+            if not entry.is_dir():
+                continue
+            t = self._normalize_decor_type_name(entry.name)
+            if t:
+                types.add(t)
+        if ensure_varios:
+            types.add("varios")
+            os.makedirs(os.path.join(model_root, "varios"), exist_ok=True)
+        ordered = sorted(types)
+        return ordered or ["varios"]
 
     def _on_item_model_type_selected(self, _event=None):
         self._item_autoselect_model_for_selected_type(force=True)
@@ -2495,7 +2546,7 @@ class ServerGui:
         if not rel:
             messagebox.showerror(
                 "Decor",
-                "El archivo debe estar dentro de assets/modelos/entorno",
+                "El archivo debe estar dentro de assets/modelos/objetos",
             )
             return
         if not rel.lower().endswith(SUPPORTED_MODEL_EXTS):
@@ -2561,8 +2612,31 @@ class ServerGui:
     async def _preview_ws_handler(self, websocket):
         channel = "decor"
         try:
-            parsed = urlparse(getattr(websocket, "path", "") or "")
-            q = parse_qs(parsed.query or "")
+            ws_path = getattr(websocket, "path", "") or ""
+            query_text = ""
+            if not ws_path:
+                req = getattr(websocket, "request", None)
+                if req is not None:
+                    ws_path = (
+                        getattr(req, "path", "")
+                        or getattr(req, "target", "")
+                        or getattr(req, "raw_path", "")
+                        or getattr(req, "resource_name", "")
+                        or ""
+                    )
+                    raw_query = (
+                        getattr(req, "query", None)
+                        or getattr(req, "query_string", None)
+                        or ""
+                    )
+                    if isinstance(raw_query, bytes):
+                        raw_query = raw_query.decode("utf-8", errors="ignore")
+                    query_text = str(raw_query or "")
+            parsed = urlparse(ws_path or "")
+            query_raw = (parsed.query or "").strip()
+            if not query_raw and query_text:
+                query_raw = query_text.lstrip("?").strip()
+            q = parse_qs(query_raw)
             channel = (q.get("channel", ["decor"])[0] or "decor").strip().lower()
             clients = self.preview_ws_clients.setdefault(channel, set())
             clients.add(websocket)
@@ -2616,10 +2690,14 @@ class ServerGui:
             loop = asyncio.new_event_loop()
             self.preview_ws_loop = loop
             asyncio.set_event_loop(loop)
-            try:
-                ws_srv = loop.run_until_complete(
-                    websockets.serve(self._preview_ws_handler, "127.0.0.1", port)
+            async def _bootstrap():
+                return await websockets.serve(
+                    self._preview_ws_handler,
+                    "127.0.0.1",
+                    port,
                 )
+            try:
+                ws_srv = loop.run_until_complete(_bootstrap())
                 self.preview_ws_server = ws_srv
                 self.preview_ws_port = port
                 holder["ok"] = True
@@ -2701,7 +2779,7 @@ class ServerGui:
         if not os.path.exists(abs_model):
             messagebox.showerror("Decor", "Modelo 3D no encontrado")
             return
-        obj_rel = f"assets/modelos/entorno/{model_rel.replace(os.sep, '/').replace('\\', '/')}"
+        obj_rel = f"assets/modelos/objetos/{model_rel.replace(os.sep, '/').replace('\\', '/')}"
         _ = icon_root  # mantenido por compatibilidad de firma/flujo
         self._open_live_web_preview("decor", obj_rel, None)
 
@@ -2710,7 +2788,7 @@ class ServerGui:
         model_rel = self._decor_relpath(self.decor_model_path.get().strip(), model_root)
         if not model_rel:
             return
-        obj_rel = f"assets/modelos/entorno/{model_rel.replace(os.sep, '/').replace('\\', '/')}"
+        obj_rel = f"assets/modelos/objetos/{model_rel.replace(os.sep, '/').replace('\\', '/')}"
         self._preview_publish("decor", obj_rel, None)
 
     def _decor_relpath(self, raw_path: str, root: str):

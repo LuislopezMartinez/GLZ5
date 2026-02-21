@@ -210,6 +210,36 @@ export class InventoryUi {
         return this.hotbarSlots;
     }
 
+    getSelectedSlotIndex() {
+        const idx = Number(this.selectedSlotIndex);
+        if (!Number.isFinite(idx)) return null;
+        return idx;
+    }
+
+    setSelectedHotbarSlot(index, opts = {}) {
+        const wrap = opts?.wrap !== false;
+        const hotbar = Math.max(1, Number(this.hotbarSlots) || 4);
+        let idx = Number(index);
+        if (!Number.isFinite(idx)) return null;
+        if (wrap) {
+            idx = ((Math.round(idx) % hotbar) + hotbar) % hotbar;
+        } else {
+            idx = Math.max(0, Math.min(hotbar - 1, Math.round(idx)));
+        }
+        this.selectedSlotIndex = idx;
+        if (this.open) this.renderInventoryGrid();
+        this.renderHotbarFromInventory();
+        return idx;
+    }
+
+    cycleHotbarSelection(stepRaw = 1) {
+        const hotbar = Math.max(1, Number(this.hotbarSlots) || 4);
+        const step = Number(stepRaw) >= 0 ? 1 : -1;
+        const cur = this.getSelectedSlotIndex();
+        const start = Number.isFinite(cur) ? cur : (step > 0 ? -1 : hotbar);
+        return this.setSelectedHotbarSlot(start + step, { wrap: true });
+    }
+
     getSlotData(idx) {
         const i = Number(idx);
         if (!Number.isFinite(i) || i < 0 || i >= this.slots.length) {

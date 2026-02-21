@@ -91,6 +91,8 @@ let controlsCaptureListener = null;
 let controlsRowRefs = new Map();
 let controlsSensitivityInput = null;
 let controlsInvertYInput = null;
+let controlsCameraDistanceInput = null;
+let controlsCameraDistanceValue = null;
 let controlsSensRow = null;
 let controlsFootRow = null;
 let controlsNoteEl = null;
@@ -112,6 +114,7 @@ const CONTROL_BINDINGS_SCHEMA = [
     { key: 'break_block', label: 'Romper bloque', runtimeKey: 'break_block' },
     { key: 'interact_collect', label: 'Interactuar', runtimeKey: 'interact_collect' },
     { key: 'sprint', label: 'Sprint', runtimeKey: 'sprint' },
+    { key: 'use_hotbar', label: 'Usar item hotbar' },
     { key: 'toggle_inventory', label: 'Abrir inventario' },
     { key: 'toggle_chat', label: 'Abrir chat' },
     { key: 'toggle_emotion', label: 'Panel emociones' },
@@ -125,6 +128,7 @@ const DEFAULT_CONTROL_SETTINGS = Object.freeze({
         break_block: Object.freeze({ type: 'key', code: 'KeyQ', ctrl: false, alt: false }),
         interact_collect: Object.freeze({ type: 'key', code: 'KeyE', ctrl: false, alt: false }),
         sprint: Object.freeze({ type: 'key', code: 'ShiftLeft', ctrl: false, alt: false }),
+        use_hotbar: Object.freeze({ type: 'mouse', button: 0, ctrl: false, alt: false }),
         toggle_inventory: Object.freeze({ type: 'key', code: 'KeyI', ctrl: false, alt: false }),
         toggle_chat: Object.freeze({ type: 'key', code: 'KeyC', ctrl: false, alt: false }),
         toggle_emotion: Object.freeze({ type: 'key', code: 'KeyV', ctrl: false, alt: false }),
@@ -132,6 +136,7 @@ const DEFAULT_CONTROL_SETTINGS = Object.freeze({
     }),
     camera_sensitivity: 1.0,
     camera_invert_y: false,
+    camera_distance: 7.8,
 });
 
 let controlSettings = null;
@@ -198,6 +203,7 @@ function cloneDefaultControlSettings() {
         keybinds,
         camera_sensitivity: Number(DEFAULT_CONTROL_SETTINGS.camera_sensitivity),
         camera_invert_y: !!DEFAULT_CONTROL_SETTINGS.camera_invert_y,
+        camera_distance: Number(DEFAULT_CONTROL_SETTINGS.camera_distance),
     };
 }
 
@@ -304,6 +310,10 @@ function normalizeControlSettings(raw) {
         next.camera_sensitivity = Math.max(0.25, Math.min(2.5, sens));
     }
     next.camera_invert_y = !!src.camera_invert_y;
+    const dist = Number(src.camera_distance);
+    if (Number.isFinite(dist)) {
+        next.camera_distance = Math.max(3.2, Math.min(15.0, dist));
+    }
     return next;
 }
 
@@ -355,6 +365,7 @@ function applyControlSettingsToRuntime() {
         keybinds: getRuntimeControlBindings(),
         camera_sensitivity: controlSettings.camera_sensitivity,
         camera_invert_y: controlSettings.camera_invert_y,
+        camera_distance: controlSettings.camera_distance,
     });
 }
 
@@ -693,6 +704,14 @@ async function useActionSlot(index) {
     }
 }
 
+function useSelectedHotbarSlot() {
+    const hotbarSlots = Math.max(1, Number(inventoryUi?.getHotbarSlots?.() || 4));
+    let idx = Number(inventoryUi?.getSelectedSlotIndex?.());
+    if (!Number.isFinite(idx) || idx < 0 || idx >= hotbarSlots) idx = 0;
+    inventoryUi?.setSelectedHotbarSlot?.(idx, { wrap: false });
+    useActionSlot(idx);
+}
+
 function setMoveDirectionState(direction, active) {
     const keys = simple3D?.keys;
     if (!keys) return;
@@ -752,10 +771,21 @@ function isMovePadBlockedTarget(target) {
     return false;
 }
 
+function isHotbarWheelBlockedTarget(target) {
+    if (!target) return false;
+    if (target.closest('input, textarea, select, [contenteditable="true"]')) return true;
+    if (controlsOpen && controlsPanel?.contains(target)) return true;
+    if (chatOpen && chatRoot?.contains(target)) return true;
+    if (inventoryUi?.isOpen?.() && inventoryUi?.contains?.(target)) return true;
+    if (emotionOpen && emotionPanel?.contains(target)) return true;
+    return false;
+}
+
 function tryCollectDecorFromPointer(ev) {
     if (clientState !== 'IN_WORLD') return;
     if (inventoryUi?.isOpen?.()) return;
     if (!ev || ev.button !== 0) return;
+    if (isControlMouseEvent(ev, 'use_hotbar')) return;
     if (ev.altKey) return;
     if (performance.now() < movePadSuppressClickUntil) return;
     if (isMovePadBlockedTarget(ev.target)) return;
@@ -1002,6 +1032,12 @@ function renderControlsPanel() {
     }
     if (controlsInvertYInput) {
         controlsInvertYInput.checked = !!controlSettings.camera_invert_y;
+    }
+    if (controlsCameraDistanceInput) {
+        controlsCameraDistanceInput.value = Number(controlSettings.camera_distance ?? 7.8).toFixed(1);
+    }
+    if (controlsCameraDistanceValue) {
+        controlsCameraDistanceValue.textContent = Number(controlSettings.camera_distance ?? 7.8).toFixed(1);
     }
     positionControlsPanel();
 }
@@ -1701,6 +1737,50 @@ function createControlsUi(host) {
     sensRow.appendChild(controlsSensitivityInput);
     cameraBox.appendChild(sensRow);
 
+    const distanceRow = document.createElement('div');
+    distanceRow.style.display = 'grid';
+    distanceRow.style.gridTemplateColumns = '1fr auto';
+    distanceRow.style.alignItems = 'center';
+    distanceRow.style.gap = '8px';
+    distanceRow.style.marginTop = '8px';
+    const distanceLabel = document.createElement('div');
+    distanceLabel.textContent = 'Distancia camara';
+    distanceLabel.style.fontSize = '12px';
+    distanceLabel.style.color = '#cce4fb';
+    distanceRow.appendChild(distanceLabel);
+    const distanceValue = document.createElement('div');
+    controlsCameraDistanceValue = distanceValue;
+    distanceValue.style.fontSize = '12px';
+    distanceValue.style.color = '#d8ecff';
+    distanceValue.style.minWidth = '28px';
+    distanceValue.style.textAlign = 'right';
+    distanceRow.appendChild(distanceValue);
+    cameraBox.appendChild(distanceRow);
+
+    controlsCameraDistanceInput = document.createElement('input');
+    controlsCameraDistanceInput.type = 'range';
+    controlsCameraDistanceInput.min = '3.2';
+    controlsCameraDistanceInput.max = '15.0';
+    controlsCameraDistanceInput.step = '0.1';
+    controlsCameraDistanceInput.style.width = '100%';
+    controlsCameraDistanceInput.style.marginTop = '4px';
+    controlsCameraDistanceInput.addEventListener('input', () => {
+        const raw = Number(controlsCameraDistanceInput.value);
+        const next = Number.isFinite(raw) ? Math.max(3.2, Math.min(15.0, raw)) : 7.8;
+        controlSettings.camera_distance = next;
+        if (controlsCameraDistanceValue) controlsCameraDistanceValue.textContent = next.toFixed(1);
+        applyControlSettingsToRuntime();
+    });
+    controlsCameraDistanceInput.addEventListener('change', () => {
+        const raw = Number(controlsCameraDistanceInput.value);
+        const next = Number.isFinite(raw) ? Math.max(3.2, Math.min(15.0, raw)) : 7.8;
+        controlSettings.camera_distance = next;
+        saveControlSettings();
+        applyControlSettingsToRuntime();
+        renderControlsPanel();
+    });
+    cameraBox.appendChild(controlsCameraDistanceInput);
+
     const invertRow = document.createElement('label');
     invertRow.style.display = 'flex';
     invertRow.style.alignItems = 'center';
@@ -2046,6 +2126,12 @@ function createChatUi(host) {
         new NetMessage('world_chat')
             .set('message', text)
             .send()
+            .then((resp) => {
+                const p = resp?.payload || {};
+                if (p?.inventory) applyInventoryPayload(p.inventory);
+                if (p?.message) addChatLine(String(p.message), 'system');
+                if (p?.ok === false && p?.error) addChatLine(`Comando: ${p.error}`, 'system');
+            })
             .catch(() => {
                 UIToast.show('No se pudo enviar mensaje', 'error', 1200);
             });
@@ -2147,14 +2233,38 @@ function ensureWorldHud() {
             toggleEmotionPanel();
             return;
         }
+        if (isControlKeyEvent(ev, 'use_hotbar')) {
+            ev.preventDefault();
+            useSelectedHotbarSlot();
+            return;
+        }
         if (!/^[1-4]$/.test(ev.key)) return;
         const idx = Number(ev.key) - 1;
         const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || 4);
-        if (idx >= 0 && idx < hotbarSlots) useActionSlot(idx);
+        if (idx >= 0 && idx < hotbarSlots) {
+            inventoryUi?.setSelectedHotbarSlot?.(idx, { wrap: false });
+            useActionSlot(idx);
+        }
     });
+    window.addEventListener('wheel', (ev) => {
+        if (clientState !== 'IN_WORLD') return;
+        if (!inventoryUi) return;
+        if (isHotbarWheelBlockedTarget(ev.target)) return;
+        const dy = Number(ev.deltaY);
+        if (!Number.isFinite(dy) || Math.abs(dy) < 0.01) return;
+        ev.preventDefault();
+        const step = dy > 0 ? 1 : -1;
+        inventoryUi.cycleHotbarSelection?.(step);
+    }, { passive: false });
     window.addEventListener('mousedown', (ev) => {
         if (clientState !== 'IN_WORLD') return;
         if (isMovePadBlockedTarget(ev.target)) return;
+        if (isControlMouseEvent(ev, 'use_hotbar')) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            useSelectedHotbarSlot();
+            return;
+        }
         if (isControlMouseEvent(ev, 'open_controls')) {
             ev.preventDefault();
             ev.stopPropagation();
@@ -2257,6 +2367,7 @@ function showWorldPanel(payload) {
         world: payload.world,
         player: payload.player,
         spawn: payload.spawn,
+        serverTimeUtc: payload.server_time_utc,
         terrainConfig: payload.terrain_config,
         decor: payload.decor,
         worldLoot: payload.world_loot,
@@ -2265,6 +2376,9 @@ function showWorldPanel(payload) {
     simple3D.setEmoticon(payload?.player?.active_emotion || 'neutral', 0);
     applyControlSettingsToRuntime();
     simple3D.setLocalPlayerId(payload?.player?.id);
+    // Publica estado inicial (pos+anim) para que clientes ya conectados
+    // instancien el remoto sin esperar al primer movimiento local.
+    simple3D.queueImmediateNetworkSnapshot?.(true);
     const others = Array.isArray(payload?.other_players) ? payload.other_players : [];
     others.forEach((p) => simple3D.upsertRemotePlayer(p));
     applyInventoryPayload(payload?.inventory || null);
@@ -2336,11 +2450,14 @@ async function ensureConnected(url) {
             simple3D.upsertRemotePlayer({
                 id: p.id,
                 username: p.username || `P${p.id}`,
+                character_name: p.character_name || '',
                 rol: p.rol || 'user',
                 model_key: p.model_key || '',
                 character_class: p.character_class || 'rogue',
                 active_emotion: p.active_emotion || 'neutral',
                 animation_state: p.animation_state || 'idle',
+                hp: p.hp,
+                max_hp: p.max_hp,
                 position: p.position || { x: 0, y: 60, z: 0 }
             });
             if (p.position) {
@@ -2358,13 +2475,19 @@ async function ensureConnected(url) {
                 simple3D.upsertRemotePlayer({
                     id: p.id,
                     username: p.username || `P${p.id}`,
+                    character_name: p.character_name || '',
                     rol: p.rol || 'user',
                     model_key: p.model_key || '',
                     character_class: p.character_class || 'rogue',
                     active_emotion: p.active_emotion || 'neutral',
                     animation_state: p.animation_state || 'idle',
+                    hp: p.hp,
+                    max_hp: p.max_hp,
                     position: p.position || { x: 0, y: 60, z: 0 }
                 });
+            }
+            if (p?.id != null && (p?.hp != null || p?.max_hp != null)) {
+                simple3D.setRemotePlayerHealth?.(p.id, Number(p?.hp ?? 1000), Number(p?.max_hp ?? 1000));
             }
             if (p.position) simple3D.setRemotePlayerTarget(p.id, p.position);
             if (p.animation_state) simple3D.setRemotePlayerAnimationState?.(p.id, p.animation_state);
@@ -2381,6 +2504,9 @@ async function ensureConnected(url) {
         });
         ws.on('world_player_died', (msg) => {
             const p = msg?.payload || {};
+            if (p?.id != null) {
+                simple3D.setRemotePlayerHealth?.(p.id, Number(p?.hp ?? 0), Number(p?.max_hp ?? 1000));
+            }
             const username = (p?.username || '').toString().trim();
             if (!username) return;
             const reason = (p?.reason || '').toString();

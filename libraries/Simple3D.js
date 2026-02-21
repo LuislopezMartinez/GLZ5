@@ -69,6 +69,10 @@ export class Simple3D {
         this.pendingNetworkClassChange = null;
         this.localNameTag = null;
         this.localHealth = { hp: 1000, maxHp: 1000 };
+        this.damageFxGroup = null;
+        this.damageFxEntries = [];
+        this.localDamageFlash = 0;
+        this.localDamageOverlayEl = null;
         this.vegetationConfig = null;
         this.vegetationSlots = [];
         this.vegetationSlotByKey = new Map();
@@ -129,6 +133,13 @@ export class Simple3D {
         this.voxelHighlightMesh = null;
         this.voxelPlacePreviewMesh = null;
         this.voxelPlaceBlockId = 2;
+        this.voxelSkylightEnabled = true;
+        this.voxelSkylightMax = 15;
+        this.voxelSkylightMinFace = 0.18;
+        this.voxelSkylightStrength = 0.92;
+        this.voxelAoEnabled = true;
+        this.voxelAoMin = 0.52;
+        this.voxelAoStrength = 0.78;
         this.pendingVoxelActions = [];
         this.worldVoxelOverrides = new Map();
         this.worldVoxelOverridesByChunk = new Map();
@@ -140,6 +151,18 @@ export class Simple3D {
         this.dirLight = null;
         this.fillLight = null;
         this.hemiLight = null;
+        this.dirLightTarget = null;
+        this.sunMesh = null;
+        this.sunOrbitCenter = { x: 0, y: 72, z: 0 };
+        this.sunOrbitRadius = 190;
+        this.sunOrbitHeightBase = 0;
+        this.sunOrbitHeightAmplitude = 132;
+        this.sunOrbitSpeedRad = 0.055;
+        this.sunOrbitPhase = 1.5707963267948966;
+        this.sunVisualRadius = 7.5;
+        this.sunVisualColor = 0xffe29a;
+        this.sunServerEpochSec = null;
+        this.sunClientPerfStartSec = 0;
         this.clockStarted = false;
         this.worldCanvas = null;
 
@@ -148,6 +171,8 @@ export class Simple3D {
         this.gridMoveDuration = 0.14;
         this.actorCollisionRadius = 0.28;
         this.playerGroundOffset = 0.5;
+        this.capsuleBodyHeight = 1.72;
+        this.capsuleWallSkin = 0.10;
         this.desktopThirdPersonEnabled = true;
         this.desktopThirdPersonActive = false;
         this.moveSpeed = 4.6;
@@ -157,12 +182,29 @@ export class Simple3D {
         this.maxSlopeDeg = 48.0;
         this.maxStepHeight = 0.75;
         this.maxDownStep = 1.20;
+        this.autoStepEnabled = true;
+        this.autoStepMinHeight = 0.45;
+        this.autoStepMaxHeight = 1.05;
+        this.autoStepDurationSec = 0.11;
+        this.autoStepState = {
+            active: false,
+            progress: 0,
+            duration: 0.11,
+            fromX: 0,
+            fromY: 0,
+            fromZ: 0,
+            toX: 0,
+            toY: 0,
+            toZ: 0,
+        };
         this.jumpVelocity = 8.8;
         this.gravity = 26.0;
         this.airControl = 0.45;
         this.desktopVelX = 0;
         this.desktopVelZ = 0;
         this.actorVelY = 0;
+        this.autoStepState.active = false;
+        this.autoStepState.progress = 0;
         this.jumpQueued = false;
         this.actorGrounded = true;
         this.turnLerp = 14;
@@ -185,13 +227,7 @@ export class Simple3D {
         this.cameraCollisionGroundClearance = 0.34;
         this.cameraCollisionRaycaster = null;
         this.mouseLookActive = false;
-        this.mouseLookButton = 2;
-        this.mouseButtonsDown = new Set();
-        this.mouseLookLastX = 0;
-        this.mouseLookLastY = 0;
         this.pointerLocked = false;
-        this.pointerLockRequestedByRmb = false;
-        this.enablePointerLock = false;
         this.controlKeybinds = {
             jump: { type: 'key', code: 'Space', ctrl: false, alt: false },
             place_block: { type: 'key', code: 'KeyF', ctrl: false, alt: false },
@@ -236,7 +272,7 @@ export class Simple3D {
         this.onPointerLockError = this.onPointerLockError.bind(this);
     }
 
-    init({ world, player, spawn, terrainConfig, decor, worldLoot, voxelOverrides } = {}) {
+    init({ world, player, spawn, serverTimeUtc, terrainConfig, decor, worldLoot, voxelOverrides } = {}) {
         const THREE = THREE_MODULE;
         if (!THREE) {
             console.error('Simple3D: THREE no está disponible. Verifica index.html.');
@@ -247,6 +283,7 @@ export class Simple3D {
         this.player = player || null;
         this.spawn = spawn || { x: 0, y: 80, z: 0 };
         this.elapsed = 0;
+        this.setSunServerTime(serverTimeUtc || null);
         this.params = this.buildTerrainParams(this.world, terrainConfig || null);
         this.voxelChunkHeight = Math.max(16, Math.min(512, Math.round(Number(this.params?.voxelWorldHeight ?? 128))));
         this.voxelLayerSize = this.chunkSize * this.chunkSize;
@@ -265,6 +302,8 @@ export class Simple3D {
         this.desktopVelX = 0;
         this.desktopVelZ = 0;
         this.actorVelY = 0;
+        this.autoStepState.active = false;
+        this.autoStepState.progress = 0;
         this.jumpQueued = false;
         this.actorGrounded = true;
         this.seedHash = this.hashSeed(this.params.seed);
@@ -416,6 +455,7 @@ export class Simple3D {
         this.updateVegetationInteraction();
         this.updateVoxelPointerSelection();
         this.updateRemotePlayers(safeDt);
+        this.updateDamageEffects(safeDt);
         this.updateLights();
         this.renderer.render(this.scene, this.camera);
     }
@@ -492,6 +532,10 @@ export class Simple3D {
         this.dirLight = null;
         this.fillLight = null;
         this.hemiLight = null;
+        this.dirLightTarget = null;
+        this.sunMesh = null;
+        this.sunServerEpochSec = null;
+        this.sunClientPerfStartSec = 0;
 
         if (this.renderer) {
             this.renderer.dispose();
@@ -528,6 +572,10 @@ export class Simple3D {
         this.pendingNetworkClassChange = null;
         this.localNameTag = null;
         this.localHealth = { hp: 1000, maxHp: 1000 };
+        this.damageFxGroup = null;
+        this.damageFxEntries = [];
+        this.localDamageFlash = 0;
+        this._removeLocalDamageOverlay();
         this.vegetationConfig = null;
         this.vegetationSlots = [];
         this.vegetationSlotByKey.clear();
@@ -589,10 +637,11 @@ export class Simple3D {
         this.removeDebugCharacterUi();
         this.mouseLookActive = false;
         this.pointerLocked = false;
-        this.pointerLockRequestedByRmb = false;
         this.desktopVelX = 0;
         this.desktopVelZ = 0;
         this.actorVelY = 0;
+        this.autoStepState.active = false;
+        this.autoStepState.progress = 0;
         this.jumpQueued = false;
         this.actorGrounded = true;
         if (this.worldCanvas) this.worldCanvas.style.cursor = '';
@@ -621,7 +670,7 @@ export class Simple3D {
         this.renderer.setSize(window.innerWidth, window.innerHeight, false);
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.22;
+        this.renderer.toneMappingExposure = 1.02;
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -676,7 +725,7 @@ export class Simple3D {
             );
             this.camera.lookAt(this.spawn.x, this.spawn.y + 1.0, this.spawn.z);
         } else {
-            this.camera = new THREE.PerspectiveCamera(68, aspect, 0.1, 3000);
+            this.camera = new THREE.PerspectiveCamera(68, aspect, 0.05, 3000);
             const targetY = this.spawn.y + this.cameraTargetHeight;
             const horizDist = this.cameraDistance * Math.cos(this.cameraPitch);
             this.camera.position.set(
@@ -687,29 +736,48 @@ export class Simple3D {
             this.camera.lookAt(this.spawn.x, targetY, this.spawn.z);
         }
 
-        this.ambientLight = new THREE.AmbientLight(0xffffff, 1.08);
+        this.ambientLight = new THREE.AmbientLight(0xffffff, 0.52);
         this.scene.add(this.ambientLight);
 
-        this.dirLight = new THREE.DirectionalLight(0xfff6d9, 1.15);
+        this.dirLight = new THREE.DirectionalLight(0xfff6d9, 1.00);
         this.dirLight.position.set(72, 140, 58);
         this.dirLight.castShadow = true;
-        this.dirLight.shadow.mapSize.width = 1024;
-        this.dirLight.shadow.mapSize.height = 1024;
-        this.dirLight.shadow.camera.near = 10;
-        this.dirLight.shadow.camera.far = 260;
-        this.dirLight.shadow.camera.left = -80;
-        this.dirLight.shadow.camera.right = 80;
-        this.dirLight.shadow.camera.top = 80;
-        this.dirLight.shadow.camera.bottom = -80;
-        this.dirLight.shadow.bias = -0.00015;
+        this.dirLight.shadow.mapSize.width = 2048;
+        this.dirLight.shadow.mapSize.height = 2048;
+        this.dirLight.shadow.camera.near = 12;
+        this.dirLight.shadow.camera.far = 240;
+        this.dirLight.shadow.camera.left = -64;
+        this.dirLight.shadow.camera.right = 64;
+        this.dirLight.shadow.camera.top = 64;
+        this.dirLight.shadow.camera.bottom = -64;
+        this.dirLight.shadow.bias = -0.00008;
+        this.dirLight.shadow.normalBias = 0.02;
+        this.dirLight.shadow.camera.updateProjectionMatrix();
+        this.dirLightTarget = new THREE.Object3D();
+        this.dirLightTarget.position.set(0, Number(this.params?.hubHeight ?? this.spawn.y ?? 58), 0);
+        this.scene.add(this.dirLightTarget);
+        this.dirLight.target = this.dirLightTarget;
         this.scene.add(this.dirLight);
 
-        this.fillLight = new THREE.DirectionalLight(0xd5e9ff, 0.48);
+        this.fillLight = new THREE.DirectionalLight(0xd5e9ff, 0.28);
         this.fillLight.position.set(-110, 90, -70);
         this.scene.add(this.fillLight);
 
-        this.hemiLight = new THREE.HemisphereLight(0xcde7ff, 0x5d4f3f, 0.68);
+        this.hemiLight = new THREE.HemisphereLight(0xcde7ff, 0x5d4f3f, 0.42);
         this.scene.add(this.hemiLight);
+
+        const hubY = Number(this.params?.hubHeight ?? this.spawn.y ?? 58);
+        this.sunOrbitCenter = { x: 0, y: hubY, z: 0 };
+        const sunGeo = new THREE.SphereGeometry(this.sunVisualRadius, 20, 20);
+        const sunMat = new THREE.MeshBasicMaterial({
+            color: this.sunVisualColor,
+            transparent: true,
+            opacity: 0.98,
+            toneMapped: false,
+        });
+        this.sunMesh = new THREE.Mesh(sunGeo, sunMat);
+        this.sunMesh.userData.tag = 'sun_orb';
+        this.scene.add(this.sunMesh);
 
         this.terrainGroup = new THREE.Group();
         this.scene.add(this.terrainGroup);
@@ -718,12 +786,17 @@ export class Simple3D {
         this.spawnMarker.position.set(this.spawn.x, this.spawn.y, this.spawn.z);
         this.spawnMarker.userData.characterModelKey = '';
         this.spawnMarker.userData.nameTagYOffset = 3.2;
+        this.spawnMarker.userData.characterVisualScale = 0.9;
         this.scene.add(this.spawnMarker);
         this.characterRig = this.spawnMarker;
         this._applyCharacterModelToRig(this.spawnMarker, this.player?.model_key || '');
-        const localName = this.player?.username || 'Jugador';
+        const localName = this._resolveDisplayPlayerName(this.player, 'Jugador');
         this.localNameTag = this.createNameTag(THREE, localName, this.localHealth.hp, this.localHealth.maxHp);
         this.scene.add(this.localNameTag.sprite);
+        this.damageFxGroup = new THREE.Group();
+        this.damageFxGroup.userData.tag = 'damage_fx';
+        this.scene.add(this.damageFxGroup);
+        this._ensureLocalDamageOverlay();
         this.vegetationInteractHint = null;
         this._ensureVoxelCursorVisuals(THREE);
         this.createDebugCameraUi();
@@ -1205,7 +1278,8 @@ export class Simple3D {
             const model = template.clone(true);
             const h = Math.max(0.25, Number(template.userData?.baseHeight) || 2.0);
             const targetH = 2.05;
-            const s = targetH / h;
+            const visualScale = Math.max(0.5, Math.min(1.5, Number(rig.userData?.characterVisualScale) || 1.0));
+            const s = (targetH / h) * visualScale;
             model.scale.set(s, s, s);
             // El actor mantiene un offset de suelo para logica de juego;
             // compensamos visualmente el modelo para que no "flote".
@@ -1216,7 +1290,8 @@ export class Simple3D {
             rig.add(model);
             rig.userData.modelRoot = model;
             rig.userData.characterModelKey = modelKey;
-            rig.userData.nameTagYOffset = Math.max(2.2, targetH + 1.0);
+            const renderedH = targetH * visualScale;
+            rig.userData.nameTagYOffset = Math.max(2.2, renderedH + 1.0);
             rig.userData.animator = this._buildCharacterAnimator(THREE, model, animations);
             this._setRigAnimationState(rig, rig.userData.animationState || 'idle');
         });
@@ -1844,6 +1919,130 @@ export class Simple3D {
         return false;
     }
 
+    _isVoxelCapsuleBlockingPosition(px, pz, actorY = null) {
+        if (!this.useVoxelTerrainMeshing) return false;
+        const x = Number(px) || 0;
+        const z = Number(pz) || 0;
+        const yCenter = Number.isFinite(Number(actorY)) ? Number(actorY) : (Number(this.actor?.y) || 0);
+        const feetY = yCenter - this.playerGroundOffset;
+        const bodyHeight = Math.max(0.8, Number(this.capsuleBodyHeight) || 1.72);
+        const minY = feetY + 0.08;
+        const maxY = feetY + bodyHeight;
+        if (maxY <= minY) return false;
+
+        const radius = Math.max(0.05, (Number(this.actorCollisionRadius) || 0.28) + (Number(this.capsuleWallSkin) || 0.10));
+        const minX = Math.floor(x - radius - 0.5);
+        const maxX = Math.ceil(x + radius + 0.5);
+        const minZ = Math.floor(z - radius - 0.5);
+        const maxZ = Math.ceil(z + radius + 0.5);
+        const y0 = Math.max(0, Math.floor(minY - 0.5));
+        const y1 = Math.min(this.voxelChunkHeight - 1, Math.ceil(maxY + 0.5));
+
+        for (let vy = y0; vy <= y1; vy += 1) {
+            const voxelMinY = vy - 0.5;
+            const voxelMaxY = vy + 0.5;
+            if (voxelMaxY <= minY || voxelMinY >= maxY) continue;
+            for (let vx = minX; vx <= maxX; vx += 1) {
+                for (let vz = minZ; vz <= maxZ; vz += 1) {
+                    if (!this._isSolidBlockId(this.getVoxelAtWorld(vx, vy, vz))) continue;
+                    const boxMinX = vx - 0.5;
+                    const boxMaxX = vx + 0.5;
+                    const boxMinZ = vz - 0.5;
+                    const boxMaxZ = vz + 0.5;
+                    const cx = Math.max(boxMinX, Math.min(x, boxMaxX));
+                    const cz = Math.max(boxMinZ, Math.min(z, boxMaxZ));
+                    const dx = x - cx;
+                    const dz = z - cz;
+                    if ((dx * dx) + (dz * dz) < (radius * radius)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    _resolveCapsuleHorizontalMotion(fromX, fromZ, toX, toZ, actorY = null) {
+        let fx = Number(fromX) || 0;
+        let fz = Number(fromZ) || 0;
+        let tx = Number(toX) || fx;
+        let tz = Number(toZ) || fz;
+        const y = Number.isFinite(Number(actorY)) ? Number(actorY) : (Number(this.actor?.y) || 0);
+        if (this._isVoxelCapsuleBlockingPosition(fx, fz, y)) {
+            const unstuck = this._resolveCapsuleUnstuckPosition(fx, fz, y, tx - fx, tz - fz);
+            if (unstuck.changed) {
+                fx = unstuck.x;
+                fz = unstuck.z;
+                tx = Number(toX) || fx;
+                tz = Number(toZ) || fz;
+            }
+        }
+        if (!this._isVoxelCapsuleBlockingPosition(tx, tz, y)) {
+            return { x: tx, z: tz, blocked: false };
+        }
+
+        const canX = !this._isVoxelCapsuleBlockingPosition(tx, fz, y);
+        const canZ = !this._isVoxelCapsuleBlockingPosition(fx, tz, y);
+        if (canX && canZ) {
+            if (Math.abs(tx - fx) >= Math.abs(tz - fz)) tz = fz;
+            else tx = fx;
+            return { x: tx, z: tz, blocked: true };
+        }
+        if (canX) return { x: tx, z: fz, blocked: true };
+        if (canZ) return { x: fx, z: tz, blocked: true };
+
+        const dx = tx - fx;
+        const dz = tz - fz;
+        for (let i = 6; i >= 1; i -= 1) {
+            const t = i / 6;
+            const sx = fx + (dx * t);
+            const sz = fz + (dz * t);
+            if (!this._isVoxelCapsuleBlockingPosition(sx, sz, y)) {
+                return { x: sx, z: sz, blocked: true };
+            }
+        }
+        return { x: fx, z: fz, blocked: true };
+    }
+
+    _resolveCapsuleUnstuckPosition(xRaw, zRaw, actorY = null, preferDx = 0, preferDz = 0) {
+        const x = Number(xRaw) || 0;
+        const z = Number(zRaw) || 0;
+        const y = Number.isFinite(Number(actorY)) ? Number(actorY) : (Number(this.actor?.y) || 0);
+        if (!this._isVoxelCapsuleBlockingPosition(x, z, y)) {
+            return { x, z, changed: false };
+        }
+        const dxRaw = Number(preferDx) || 0;
+        const dzRaw = Number(preferDz) || 0;
+        const dirLen = Math.hypot(dxRaw, dzRaw);
+        const ux = dirLen > 0.0001 ? (dxRaw / dirLen) : 0;
+        const uz = dirLen > 0.0001 ? (dzRaw / dirLen) : 0;
+        const radii = [0.05, 0.08, 0.12, 0.16, 0.22, 0.28, 0.36, 0.46, 0.58];
+        let best = null;
+        let bestScore = Infinity;
+        for (const r of radii) {
+            const steps = 12 + Math.round(r * 18);
+            for (let i = 0; i < steps; i += 1) {
+                const a = (i / steps) * Math.PI * 2;
+                const cx = x + (Math.cos(a) * r);
+                const cz = z + (Math.sin(a) * r);
+                if (this._isVoxelCapsuleBlockingPosition(cx, cz, y)) continue;
+                const mdx = cx - x;
+                const mdz = cz - z;
+                const dist = Math.hypot(mdx, mdz);
+                let score = dist;
+                if (dirLen > 0.0001 && dist > 0.0001) {
+                    const align = ((mdx / dist) * ux) + ((mdz / dist) * uz);
+                    score -= (align * 0.06);
+                }
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = { x: cx, z: cz };
+                }
+            }
+            if (best) break;
+        }
+        if (!best) return { x, z, changed: false };
+        return { x: best.x, z: best.z, changed: true };
+    }
+
     updateDecorCollectHighlight() {
         const THREE = THREE_MODULE;
         if (!THREE || !this.scene) return;
@@ -2460,6 +2659,10 @@ export class Simple3D {
         const mul = Number.isFinite(sensMul) ? Math.max(0.25, Math.min(2.5, sensMul)) : 1.0;
         this.cameraRotateSensitivity = this.cameraRotateSensitivityBase * mul;
         this.cameraInvertY = !!config?.camera_invert_y;
+        const camDist = Number(config?.camera_distance);
+        if (Number.isFinite(camDist)) {
+            this.cameraDistance = Math.max(this.cameraDistanceMin, Math.min(this.cameraDistanceMax, camDist));
+        }
     }
 
     setNetworkSyncConfig(config = null) {
@@ -2503,6 +2706,11 @@ export class Simple3D {
     }
 
     onKeyDown(ev) {
+        if (ev.code === 'Tab') {
+            ev.preventDefault();
+            this.toggleMouseLookLock();
+            return;
+        }
         const tag = (ev?.target?.tagName || '').toLowerCase();
         if (tag === 'input' || tag === 'textarea') return;
         if (ev.code.startsWith('Arrow') || this._isActionKey(ev, 'jump')) ev.preventDefault();
@@ -2573,26 +2781,8 @@ export class Simple3D {
         if (!this.desktopThirdPersonActive) return;
         const hitCollectable = this._pickCollectableDecorKeyFromScreenPoint(Number(ev.clientX) || 0, Number(ev.clientY) || 0);
         if (hitCollectable) return;
-        ev.preventDefault();
-        this.mouseButtonsDown.add(ev.button);
-        this.mouseLookActive = true;
-        this.mouseLookButton = ev.button;
-        this.mouseLookLastX = Number(ev.clientX) || 0;
-        this.mouseLookLastY = Number(ev.clientY) || 0;
-        if (this.mouseLookButton === 2 && this.actor) {
-            this.moveYaw = this.cameraYaw;
-            this.actor.yaw = this.moveYaw;
-            if (this.worldCanvas) this.worldCanvas.style.cursor = 'none';
-            const lockEl = this.worldCanvas;
-            if (this.enablePointerLock && lockEl && document.pointerLockElement !== lockEl && lockEl.requestPointerLock) {
-                this.pointerLockRequestedByRmb = true;
-                try {
-                    lockEl.requestPointerLock();
-                } catch (_) {
-                    // Si falla, mantenemos control tradicional sin lock.
-                }
-            }
-        }
+        // Rotacion de camara por mouse desactivada aqui.
+        // Solo se activa con TAB (pointer lock toggle).
     }
 
     onMouseMove(ev) {
@@ -2602,20 +2792,11 @@ export class Simple3D {
         this.voxelPointerBlockedByUi = this.isUiInteractiveTarget(ev.target);
         if (!this.desktopThirdPersonActive) return;
         if (!this.mouseLookActive) return;
-        const usingPointerLock = this.pointerLocked && (document.pointerLockElement === this.worldCanvas);
-        const cx = Number(ev.clientX) || 0;
-        const cy = Number(ev.clientY) || 0;
-        const dx = usingPointerLock ? (Number(ev.movementX) || 0) : (cx - this.mouseLookLastX);
-        const dy = usingPointerLock ? (Number(ev.movementY) || 0) : (cy - this.mouseLookLastY);
-        if (!usingPointerLock) {
-            this.mouseLookLastX = cx;
-            this.mouseLookLastY = cy;
-        }
+        if (!(this.pointerLocked && (document.pointerLockElement === this.worldCanvas))) return;
+        const dx = Number(ev.movementX) || 0;
+        const dy = Number(ev.movementY) || 0;
         const yawDelta = dx * this.cameraRotateSensitivity;
         this.cameraYaw -= yawDelta;
-        // RMB: acopla orientacion del personaje a la camara (estilo WoW).
-        // LMB: solo orienta camara, sin afectar yaw del personaje.
-        if (this.mouseButtonsDown.has(2)) this.moveYaw = this.cameraYaw;
         const pitchSign = this.cameraInvertY ? -1 : 1;
         this.cameraPitch = Math.max(
             this.cameraPitchMin,
@@ -2625,26 +2806,14 @@ export class Simple3D {
 
     onMouseUp(ev) {
         if (!this.desktopThirdPersonActive) return;
-        this.mouseButtonsDown.delete(ev.button);
-        this.mouseLookActive = this.mouseButtonsDown.size > 0;
-        if (ev.button === 2 && this.worldCanvas) {
-            this.worldCanvas.style.cursor = '';
-        }
-        if (ev.button === 2 && document.pointerLockElement === this.worldCanvas && document.exitPointerLock) {
-            try {
-                document.exitPointerLock();
-            } catch (_) {
-                // noop
-            }
-        }
     }
 
     onWheel(ev) {
+        // Zoom por rueda deshabilitado:
+        // la distancia de camara se ajusta desde CFG (slider).
         if (!this.desktopThirdPersonActive || !this.initialized) return;
         if (this.isUiInteractiveTarget(ev.target)) return;
         ev.preventDefault();
-        const step = ev.deltaY > 0 ? 0.7 : -0.7;
-        this.cameraDistance = Math.max(this.cameraDistanceMin, Math.min(this.cameraDistanceMax, this.cameraDistance + step));
     }
 
     onContextMenu(ev) {
@@ -2655,18 +2824,32 @@ export class Simple3D {
 
     onPointerLockChange() {
         this.pointerLocked = (document.pointerLockElement === this.worldCanvas);
-        if (!this.pointerLocked) {
-            this.pointerLockRequestedByRmb = false;
-            if (this.mouseButtonsDown.has(2)) {
-                this.mouseButtonsDown.delete(2);
-                this.mouseLookActive = this.mouseButtonsDown.size > 0;
-            }
-        }
+        this.mouseLookActive = this.pointerLocked;
+        if (this.worldCanvas) this.worldCanvas.style.cursor = this.pointerLocked ? 'none' : '';
     }
 
     onPointerLockError() {
         this.pointerLocked = false;
-        this.pointerLockRequestedByRmb = false;
+        this.mouseLookActive = false;
+        if (this.worldCanvas) this.worldCanvas.style.cursor = '';
+    }
+
+    toggleMouseLookLock() {
+        if (!this.initialized || !this.desktopThirdPersonActive || !this.worldCanvas) return;
+        const lockEl = this.worldCanvas;
+        if (document.pointerLockElement === lockEl) {
+            if (document.exitPointerLock) {
+                try {
+                    document.exitPointerLock();
+                } catch (_) { }
+            }
+            return;
+        }
+        if (lockEl.requestPointerLock) {
+            try {
+                lockEl.requestPointerLock();
+            } catch (_) { }
+        }
     }
 
     _isSolidVoxelAtPoint(x, y, z) {
@@ -2744,16 +2927,65 @@ export class Simple3D {
         return bestGroundY;
     }
 
+    _sampleGroundYFromTargetColumn(x, z) {
+        const cx = Math.round(Number(x) || 0);
+        const cz = Math.round(Number(z) || 0);
+        const topY = this.getTopSolidYAtWorld(cx, cz);
+        if (!Number.isFinite(topY)) return null;
+        if (topY < 0 || topY >= (this.voxelChunkHeight - 1)) return null;
+        if (this._isSolidBlockId(this.getVoxelAtWorld(cx, topY + 1, cz))) return null;
+        const gy = Number(topY) + 0.5;
+        if (!this._hasMovementHeadroomAt(cx, cz, gy)) return null;
+        return gy;
+    }
+
+    _resolveNextGroundCandidate(fromGroundY, toX, toZ) {
+        const ref = Number.isFinite(fromGroundY)
+            ? Number(fromGroundY)
+            : ((Number(this.actor?.y) || 0) - this.playerGroundOffset);
+        const sampled = this._sampleGroundYNearHeight(toX, toZ, fromGroundY);
+        const column = this._sampleGroundYFromTargetColumn(toX, toZ);
+        const candidates = [];
+        if (Number.isFinite(sampled)) candidates.push(Number(sampled));
+        if (Number.isFinite(column)) candidates.push(Number(column));
+        if (candidates.length <= 0) return null;
+        candidates.sort((a, b) => {
+            const da = Math.abs(a - ref);
+            const db = Math.abs(b - ref);
+            if (Math.abs(da - db) <= 0.0001) return Math.abs(a) - Math.abs(b);
+            return da - db;
+        });
+        return candidates[0];
+    }
+
+    _resolveAutoStepGroundCandidate(fromGroundY, toX, toZ) {
+        const actorRefGround = (Number(this.actor?.y) || 0) - this.playerGroundOffset;
+        const nearFrom = this._sampleGroundYNearHeight(toX, toZ, fromGroundY);
+        const nearActor = this._sampleGroundYNearHeight(toX, toZ, actorRefGround);
+        const column = this._sampleGroundYFromTargetColumn(toX, toZ);
+        const candidates = [];
+        if (Number.isFinite(nearFrom)) candidates.push(Number(nearFrom));
+        if (Number.isFinite(nearActor)) candidates.push(Number(nearActor));
+        if (Number.isFinite(column)) candidates.push(Number(column));
+        if (candidates.length <= 0) return null;
+        let best = null;
+        for (const g of candidates) {
+            if (best == null || g > best) best = g;
+        }
+        return best;
+    }
+
     _canTraverseToPosition(fromX, fromZ, fromGroundY, toX, toZ) {
         if (this._isDecorColliderBlockingPosition(toX, toZ)) return { ok: false, groundY: null };
-        const nextGround = this._sampleGroundYNearHeight(toX, toZ, fromGroundY);
+        const nextGround = this._resolveNextGroundCandidate(fromGroundY, toX, toZ);
         // Permite salir de plataformas al vacio: no bloquea movimiento horizontal por falta de suelo.
         if (nextGround === null) return { ok: true, groundY: null };
         if (!Number.isFinite(fromGroundY)) return { ok: true, groundY: nextGround };
 
         const dy = nextGround - fromGroundY;
         const stepUp = Math.max(0.05, Number(this.maxStepHeight) || 0.75);
-        if (dy > stepUp) return { ok: false, groundY: nextGround };
+        const oneVoxelStep = Math.max(stepUp, Number(this.autoStepMaxHeight) || 1.05);
+        if (dy > oneVoxelStep) return { ok: false, groundY: nextGround };
 
         const dx = toX - fromX;
         const dz = toZ - fromZ;
@@ -2761,10 +2993,149 @@ export class Simple3D {
         if (horiz > 0.0001) {
             const slopeDeg = Math.abs(Math.atan2(dy, horiz) * (180 / Math.PI));
             const slopeMax = Math.max(5, Math.min(89, Number(this.maxSlopeDeg) || 48));
-            if (dy > 0.01 && slopeDeg > slopeMax) return { ok: false, groundY: nextGround };
+            const allowSteppable = dy <= (Number(this.autoStepMaxHeight) || 1.05);
+            if (!allowSteppable && dy > 0.01 && slopeDeg > slopeMax) return { ok: false, groundY: nextGround };
         }
+        // Para step-up de 1 voxel, comprobamos capsula a la altura objetivo para no bloquear
+        // prematuramente por el bloque frontal del escalon.
+        const actorY = Number(this.actor?.y) || 0;
+        const minAuto = Math.max(0.05, Number(this.autoStepMinHeight) || 0.45);
+        const maxAuto = Math.max(minAuto, Number(this.autoStepMaxHeight) || 1.05);
+        const steppable = dy >= minAuto && dy <= maxAuto;
+        const probeY = steppable ? Math.max(actorY, nextGround + this.playerGroundOffset) : actorY;
+        if (this._isVoxelCapsuleBlockingPosition(toX, toZ, probeY)) return { ok: false, groundY: nextGround };
         if (!this._hasMovementHeadroomAt(toX, toZ, nextGround)) return { ok: false, groundY: nextGround };
         return { ok: true, groundY: nextGround };
+    }
+
+    _beginAutoStep(targetX, targetZ, targetGroundY) {
+        const actor = this.actor;
+        const endY = Number(targetGroundY) + this.playerGroundOffset;
+        const startY = Number(actor.y) || 0;
+        const dy = Math.max(0, endY - startY);
+        const base = Math.max(0.06, Number(this.autoStepDurationSec) || 0.11);
+        const duration = Math.max(0.06, Math.min(0.22, base + (dy * 0.05)));
+        this.autoStepState.active = true;
+        this.autoStepState.progress = 0;
+        this.autoStepState.duration = duration;
+        this.autoStepState.fromX = Number(actor.x) || 0;
+        this.autoStepState.fromY = startY;
+        this.autoStepState.fromZ = Number(actor.z) || 0;
+        this.autoStepState.toX = Number(targetX) || 0;
+        this.autoStepState.toY = endY;
+        this.autoStepState.toZ = Number(targetZ) || 0;
+        this.actorVelY = 0;
+        this.actorGrounded = false;
+        this.jumpQueued = false;
+        actor.moving = true;
+    }
+
+    _tryStartAutoStep(fromGroundY, toX, toZ) {
+        if (!this.autoStepEnabled || this.autoStepState.active) return false;
+        if (!Number.isFinite(fromGroundY)) return false;
+        if (this.jumpQueued) return false;
+        if (this._isDecorColliderBlockingPosition(toX, toZ)) return false;
+        const candidates = [];
+        const baseGround = this._resolveAutoStepGroundCandidate(fromGroundY, toX, toZ);
+        if (Number.isFinite(baseGround)) {
+            candidates.push({ x: Number(toX) || 0, z: Number(toZ) || 0, ground: Number(baseGround), lookAhead: false });
+        }
+        const actorX = Number(this.actor?.x) || 0;
+        const actorZ = Number(this.actor?.z) || 0;
+        const dirX = (Number(toX) || 0) - actorX;
+        const dirZ = (Number(toZ) || 0) - actorZ;
+        const dirLen = Math.hypot(dirX, dirZ);
+        if (dirLen > 0.0001) {
+            const ux = dirX / dirLen;
+            const uz = dirZ / dirLen;
+            const lookAhead = Math.max(0.4, (Number(this.actorCollisionRadius) || 0.28) + (Number(this.capsuleWallSkin) || 0.10) + 0.22);
+            const aheadX = (Number(toX) || 0) + (ux * lookAhead);
+            const aheadZ = (Number(toZ) || 0) + (uz * lookAhead);
+            const aheadGround = this._resolveAutoStepGroundCandidate(fromGroundY, aheadX, aheadZ);
+            if (Number.isFinite(aheadGround)) {
+                candidates.push({ x: aheadX, z: aheadZ, ground: Number(aheadGround), lookAhead: true });
+            }
+        }
+        if (candidates.length <= 0) return false;
+        const minH = Math.max(0.05, Number(this.autoStepMinHeight) || 0.45);
+        const maxH = Math.max(minH, Number(this.autoStepMaxHeight) || 1.05);
+        const valid = [];
+        for (const c of candidates) {
+            const dy = Number(c.ground) - fromGroundY;
+            if (dy < minH || dy > maxH) continue;
+            if (!this._hasMovementHeadroomAt(c.x, c.z, c.ground)) continue;
+            const probeY = Number(c.ground) + this.playerGroundOffset;
+            if (this._isVoxelCapsuleBlockingPosition(c.x, c.z, probeY)) continue;
+            valid.push({ ...c, dy });
+        }
+        if (valid.length <= 0) return false;
+        valid.sort((a, b) => {
+            if (Math.abs(a.ground - b.ground) > 0.0001) return b.ground - a.ground;
+            if (a.lookAhead !== b.lookAhead) return a.lookAhead ? 1 : -1;
+            const da = Math.hypot(a.x - actorX, a.z - actorZ);
+            const db = Math.hypot(b.x - actorX, b.z - actorZ);
+            return da - db;
+        });
+        const pick = valid[0];
+        this._beginAutoStep(pick.x, pick.z, pick.ground);
+        return true;
+    }
+
+    _updateAutoStepTransition(safeDt) {
+        if (!this.autoStepState.active) return false;
+        const actor = this.actor;
+        const st = this.autoStepState;
+        const duration = Math.max(0.01, Number(st.duration) || 0.11);
+        st.progress = Math.min(1, st.progress + (safeDt / duration));
+        const tRaw = st.progress;
+        const t = tRaw * tRaw * (3 - (2 * tRaw));
+        actor.x = this.lerp(st.fromX, st.toX, t);
+        actor.y = this.lerp(st.fromY, st.toY, t);
+        actor.z = this.lerp(st.fromZ, st.toZ, t);
+        const dx = st.toX - st.fromX;
+        const dz = st.toZ - st.fromZ;
+        const planar = Math.hypot(dx, dz);
+        if (planar > 0.0001) {
+            const targetYaw = Math.atan2(dx, dz);
+            const delta = Math.atan2(Math.sin(targetYaw - actor.yaw), Math.cos(targetYaw - actor.yaw));
+            actor.yaw += delta * Math.min(1, this.turnLerp * safeDt);
+        }
+        actor.moving = true;
+        this.actorGrounded = false;
+        this.actorVelY = 0;
+        if (tRaw >= 1) {
+            actor.x = st.toX;
+            actor.z = st.toZ;
+            const groundY = this._sampleGroundYNearHeight(actor.x, actor.z, st.toY - this.playerGroundOffset);
+            if (Number.isFinite(groundY)) {
+                actor.y = groundY + this.playerGroundOffset;
+                this.actorGrounded = true;
+                this.actorVelY = 0;
+            } else {
+                actor.y = st.toY;
+                this.actorGrounded = false;
+            }
+            st.active = false;
+            st.progress = 0;
+        }
+        return true;
+    }
+
+    _updateDesktopCameraFollow(safeDt) {
+        const actor = this.actor;
+        const targetX = actor.x;
+        const targetY = actor.y + this.cameraTargetHeight;
+        const targetZ = actor.z;
+        const horizDist = this.cameraDistance * Math.cos(this.cameraPitch);
+        const camX = targetX - (Math.sin(this.cameraYaw) * horizDist);
+        const camZ = targetZ - (Math.cos(this.cameraYaw) * horizDist);
+        const camY = targetY + (Math.sin(this.cameraPitch) * this.cameraDistance);
+        const safeCam = this._resolveDesktopCameraCollision(targetX, targetY, targetZ, camX, camY, camZ);
+        const followLerp = Math.min(1, this.cameraFollowLerp * safeDt);
+        this.camera.position.x += (safeCam.x - this.camera.position.x) * followLerp;
+        this.camera.position.y += (safeCam.y - this.camera.position.y) * followLerp;
+        this.camera.position.z += (safeCam.z - this.camera.position.z) * followLerp;
+        this.camera.lookAt(targetX, targetY, targetZ);
     }
 
     _resolveDesktopCameraCollision(targetX, targetY, targetZ, desiredX, desiredY, desiredZ) {
@@ -2807,8 +3178,10 @@ export class Simple3D {
                 return true;
             });
             if (hit) {
+                // Si hay obstaculo real entre actor y camara, priorizar NO atravesarlo.
+                // No forzar cameraCollisionMinDistance en este caso.
                 const safeDist = Math.max(
-                    this.cameraCollisionMinDistance,
+                    0.03,
                     Math.min(dist, Number(hit.distance) - this.cameraCollisionPadding)
                 );
                 finalPos = target.clone().add(dir.multiplyScalar(safeDist));
@@ -2842,7 +3215,7 @@ export class Simple3D {
                     });
                     if (!ensureHit) break;
                     const pull = Math.max(
-                        this.cameraCollisionMinDistance,
+                        0.02,
                         Math.min(ensureDist, Number(ensureHit.distance) - this.cameraCollisionPadding)
                     );
                     finalPos.copy(target.clone().add(ensureUnit.clone().multiplyScalar(pull)));
@@ -2859,9 +3232,18 @@ export class Simple3D {
 
     _updateDesktopThirdPersonController(safeDt) {
         const actor = this.actor;
-        const comboForward = this.mouseButtonsDown.has(2) && this.mouseButtonsDown.has(0);
+        if (this._isVoxelCapsuleBlockingPosition(actor.x, actor.z, actor.y)) {
+            const nudge = this._resolveCapsuleUnstuckPosition(actor.x, actor.z, actor.y, this.desktopVelX, this.desktopVelZ);
+            if (nudge.changed) {
+                actor.x = nudge.x;
+                actor.z = nudge.z;
+            }
+        }
+        if (this._updateAutoStepTransition(safeDt)) {
+            this._updateDesktopCameraFollow(safeDt);
+            return;
+        }
         let input = this.getDesktopMoveInput();
-        if (!input && comboForward) input = { forward: 1, right: 0 };
         let currentGround = this._sampleGroundYNearHeight(actor.x, actor.z, actor.y - this.playerGroundOffset);
         if (currentGround === null && this.actorGrounded && !this.jumpQueued) {
             currentGround = actor.y - this.playerGroundOffset;
@@ -2889,7 +3271,7 @@ export class Simple3D {
         let desiredVelZ = 0;
         if (input) {
             const speed = this.moveSpeed * (this._isSprintPressed() ? this.sprintMultiplier : 1);
-            if (this.mouseLookActive && this.mouseButtonsDown.has(2)) {
+            if (this.mouseLookActive) {
                 this.moveYaw = this.cameraYaw;
             }
             const sinYaw = Math.sin(this.moveYaw);
@@ -2922,24 +3304,59 @@ export class Simple3D {
             if (grounded) {
                 let test = this._canTraverseToPosition(actor.x, actor.z, currentGround, nextX, nextZ);
                 if (!test.ok) {
+                    if (this._tryStartAutoStep(currentGround, nextX, nextZ)) {
+                        this._updateDesktopCameraFollow(safeDt);
+                        return;
+                    }
                     const testX = this._canTraverseToPosition(actor.x, actor.z, currentGround, actor.x + moveX, actor.z);
                     if (testX.ok) {
                         nextX = actor.x + moveX;
                         nextZ = actor.z;
                         test = testX;
                     } else {
+                        if (this._tryStartAutoStep(currentGround, actor.x + moveX, actor.z)) {
+                            this._updateDesktopCameraFollow(safeDt);
+                            return;
+                        }
                         const testZ = this._canTraverseToPosition(actor.x, actor.z, currentGround, actor.x, actor.z + moveZ);
                         if (testZ.ok) {
                             nextX = actor.x;
                             nextZ = actor.z + moveZ;
                             test = testZ;
+                        } else if (this._tryStartAutoStep(currentGround, actor.x, actor.z + moveZ)) {
+                            this._updateDesktopCameraFollow(safeDt);
+                            return;
                         }
                     }
                 }
                 if (test.ok) {
-                    actor.x = nextX;
-                    actor.z = nextZ;
                     const nextGroundY = Number(test.groundY);
+                    const climbDelta = (Number.isFinite(nextGroundY) && Number.isFinite(currentGround))
+                        ? (nextGroundY - currentGround)
+                        : 0;
+                    const minAuto = Math.max(0.05, Number(this.autoStepMinHeight) || 0.45);
+                    const maxAuto = Math.max(minAuto, Number(this.autoStepMaxHeight) || 1.05);
+                    if (
+                        this.autoStepEnabled &&
+                        Number.isFinite(nextGroundY) &&
+                        climbDelta >= minAuto &&
+                        climbDelta <= maxAuto
+                    ) {
+                        this._beginAutoStep(nextX, nextZ, nextGroundY);
+                        this._updateDesktopCameraFollow(safeDt);
+                        return;
+                    }
+                    const slide = this._resolveCapsuleHorizontalMotion(actor.x, actor.z, nextX, nextZ, actor.y);
+                    nextX = slide.x;
+                    nextZ = slide.z;
+                    if (Math.hypot(nextX - actor.x, nextZ - actor.z) <= 0.0001) {
+                        this.desktopVelX *= 0.18;
+                        this.desktopVelZ *= 0.18;
+                        moving = false;
+                    } else {
+                        actor.x = nextX;
+                        actor.z = nextZ;
+                    }
                     const dropDelta = (Number.isFinite(nextGroundY) && Number.isFinite(currentGround))
                         ? (nextGroundY - currentGround)
                         : 0;
@@ -2961,8 +3378,15 @@ export class Simple3D {
                 // En aire se puede avanzar aunque no haya suelo debajo (caida al vacio).
                 const canPassHeight = (nextGroundY === null) || (feetY >= (nextGroundY - 0.05));
                 if (!blocked && canPassHeight) {
-                    actor.x = nextX;
-                    actor.z = nextZ;
+                    const slide = this._resolveCapsuleHorizontalMotion(actor.x, actor.z, nextX, nextZ, actor.y);
+                    if (Math.hypot(slide.x - actor.x, slide.z - actor.z) > 0.0001) {
+                        actor.x = slide.x;
+                        actor.z = slide.z;
+                    } else {
+                        this.desktopVelX *= 0.45;
+                        this.desktopVelZ *= 0.45;
+                        moving = false;
+                    }
                 } else {
                     this.desktopVelX *= 0.45;
                     this.desktopVelZ *= 0.45;
@@ -3000,19 +3424,7 @@ export class Simple3D {
             actor.yaw += delta * Math.min(1, this.turnLerp * safeDt);
         }
 
-        const targetX = actor.x;
-        const targetY = actor.y + this.cameraTargetHeight;
-        const targetZ = actor.z;
-        const horizDist = this.cameraDistance * Math.cos(this.cameraPitch);
-        const camX = targetX - (Math.sin(this.cameraYaw) * horizDist);
-        const camZ = targetZ - (Math.cos(this.cameraYaw) * horizDist);
-        const camY = targetY + (Math.sin(this.cameraPitch) * this.cameraDistance);
-        const safeCam = this._resolveDesktopCameraCollision(targetX, targetY, targetZ, camX, camY, camZ);
-        const followLerp = Math.min(1, this.cameraFollowLerp * safeDt);
-        this.camera.position.x += (safeCam.x - this.camera.position.x) * followLerp;
-        this.camera.position.y += (safeCam.y - this.camera.position.y) * followLerp;
-        this.camera.position.z += (safeCam.z - this.camera.position.z) * followLerp;
-        this.camera.lookAt(targetX, targetY, targetZ);
+        this._updateDesktopCameraFollow(safeDt);
     }
 
     _updateGridController(safeDt) {
@@ -3146,6 +3558,23 @@ export class Simple3D {
             y: Number((Number(this.actor?.y) || 0).toFixed(2)),
             z: Number((Number(this.actor?.z) || 0).toFixed(2)),
         };
+    }
+
+    queueImmediateNetworkSnapshot(includeAnim = true) {
+        const cur = this.getCurrentNetworkPosition();
+        this.pendingNetworkPosition = cur;
+        this.lastNetworkSentPos = {
+            x: Number(cur.x || 0),
+            y: Number(cur.y || 0),
+            z: Number(cur.z || 0),
+        };
+        this.lastNetworkPositionQueuedAt = this.elapsed;
+        if (includeAnim) {
+            const st = this.determineLocalAnimationState();
+            this.localAnimState = st;
+            this.pendingNetworkAnimState = st;
+        }
+        return cur;
     }
 
     determineLocalAnimationState() {
@@ -3306,6 +3735,14 @@ export class Simple3D {
         this.characterClass = (cls || this.characterClass || 'rogue').toString();
     }
 
+    _resolveDisplayPlayerName(player, fallback = 'Jugador') {
+        const charName = (player?.character_name || player?.char_name || '').toString().trim();
+        if (charName) return charName.slice(0, 24);
+        const userName = (player?.username || '').toString().trim();
+        if (userName) return userName.slice(0, 24);
+        return (fallback || 'Jugador').toString().slice(0, 24);
+    }
+
     createNameTag(THREE, text, hp = 1000, maxHp = 1000) {
         const canvas = document.createElement('canvas');
         canvas.width = 768;
@@ -3413,13 +3850,168 @@ export class Simple3D {
         tag.texture.needsUpdate = true;
     }
 
+    _ensureLocalDamageOverlay() {
+        if (this.localDamageOverlayEl || typeof document === 'undefined') return;
+        const el = document.createElement('div');
+        el.id = 'world-damage-overlay';
+        el.style.position = 'fixed';
+        el.style.left = '0';
+        el.style.top = '0';
+        el.style.width = '100vw';
+        el.style.height = '100vh';
+        el.style.pointerEvents = 'none';
+        el.style.zIndex = '6';
+        el.style.opacity = '0';
+        el.style.background = 'radial-gradient(circle at 50% 50%, rgba(255,40,40,0.00) 22%, rgba(255,40,40,0.22) 100%)';
+        document.body.appendChild(el);
+        this.localDamageOverlayEl = el;
+    }
+
+    _removeLocalDamageOverlay() {
+        if (!this.localDamageOverlayEl) return;
+        if (this.localDamageOverlayEl.parentElement) {
+            this.localDamageOverlayEl.parentElement.removeChild(this.localDamageOverlayEl);
+        }
+        this.localDamageOverlayEl = null;
+    }
+
+    _spawnDamagePopupAt(x, y, z, amount = 0, isLocal = false) {
+        const THREE = THREE_MODULE;
+        if (!THREE || !this.damageFxGroup || !this.scene) return;
+        const dmg = Math.max(1, Math.round(Number(amount) || 0));
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 112;
+        const ctx = canvas.getContext('2d', { alpha: true });
+        if (!ctx) return;
+        const text = `-${dmg}`;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.font = '900 74px "Segoe UI", Tahoma, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 10;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = 'rgba(38,0,0,0.95)';
+        ctx.strokeText(text, canvas.width * 0.5, canvas.height * 0.53);
+        ctx.fillStyle = isLocal ? '#ff6b6b' : '#ff8a8a';
+        ctx.fillText(text, canvas.width * 0.5, canvas.height * 0.53);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.magFilter = THREE.LinearFilter;
+        tex.minFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        const mat = new THREE.SpriteMaterial({
+            map: tex,
+            transparent: true,
+            depthWrite: false,
+            depthTest: false,
+        });
+        const sprite = new THREE.Sprite(mat);
+        sprite.position.set(Number(x) || 0, Number(y) || 0, Number(z) || 0);
+        sprite.scale.set(1.25, 0.58, 1);
+        sprite.renderOrder = 120;
+        this.damageFxGroup.add(sprite);
+        this.damageFxEntries.push({
+            sprite,
+            texture: tex,
+            material: mat,
+            age: 0,
+            life: 0.78,
+            riseSpeed: 0.95,
+            driftX: ((Math.random() * 2) - 1) * 0.16,
+            driftZ: ((Math.random() * 2) - 1) * 0.16,
+            baseScale: 1.0,
+        });
+    }
+
+    _triggerDamageFxAt(x, y, z, amount = 0, isLocal = false) {
+        const dmg = Math.max(1, Math.round(Number(amount) || 0));
+        this._spawnDamagePopupAt(x, y, z, dmg, isLocal);
+        if (isLocal) {
+            const amp = Math.max(0.14, Math.min(0.7, 0.14 + (dmg / 180)));
+            this.localDamageFlash = Math.max(this.localDamageFlash, amp);
+        }
+    }
+
+    playLocalDamageEffect(amount = 0) {
+        const ax = Number(this.actor?.x || 0);
+        const ay = Number(this.actor?.y || 0);
+        const az = Number(this.actor?.z || 0);
+        this._triggerDamageFxAt(ax, ay + 2.0, az, amount, true);
+    }
+
+    updateDamageEffects(dt = 0.016) {
+        const safeDt = Math.max(0, Math.min(0.1, Number(dt) || 0));
+        if (this.localDamageFlash > 0) {
+            this.localDamageFlash = Math.max(0, this.localDamageFlash - (safeDt * 2.4));
+        }
+        if (this.localDamageOverlayEl) {
+            const op = Math.max(0, Math.min(0.42, this.localDamageFlash * 0.55));
+            this.localDamageOverlayEl.style.opacity = op.toFixed(3);
+        }
+        if (!Array.isArray(this.damageFxEntries) || this.damageFxEntries.length <= 0) return;
+        const remove = [];
+        for (let i = 0; i < this.damageFxEntries.length; i += 1) {
+            const fx = this.damageFxEntries[i];
+            const sprite = fx?.sprite;
+            const mat = fx?.material;
+            if (!sprite || !mat) {
+                remove.push(i);
+                continue;
+            }
+            fx.age += safeDt;
+            const t = Math.max(0, Math.min(1, fx.age / Math.max(0.05, Number(fx.life) || 0.78)));
+            const eased = 1 - ((1 - t) * (1 - t));
+            sprite.position.y += (Number(fx.riseSpeed) || 0.95) * safeDt;
+            sprite.position.x += (Number(fx.driftX) || 0) * safeDt;
+            sprite.position.z += (Number(fx.driftZ) || 0) * safeDt;
+            const s = (Number(fx.baseScale) || 1) * (1 + (0.18 * eased));
+            sprite.scale.set(1.25 * s, 0.58 * s, 1);
+            mat.opacity = Math.max(0, 1 - t);
+            if (t >= 1) remove.push(i);
+        }
+        for (let i = remove.length - 1; i >= 0; i -= 1) {
+            const idx = remove[i];
+            const fx = this.damageFxEntries[idx];
+            if (fx?.sprite && this.damageFxGroup) this.damageFxGroup.remove(fx.sprite);
+            try { fx?.texture?.dispose?.(); } catch (_) { }
+            try { fx?.material?.dispose?.(); } catch (_) { }
+            this.damageFxEntries.splice(idx, 1);
+        }
+    }
+
     setLocalHealth(hp, maxHp = 1000) {
+        const prevHp = Math.max(0, Number(this.localHealth?.hp) || 0);
         this.localHealth.maxHp = Math.max(1, Number(maxHp) || 1000);
         this.localHealth.hp = Math.max(0, Math.min(this.localHealth.maxHp, Number(hp) || 0));
         if (this.localNameTag) {
             this.localNameTag.hp = this.localHealth.hp;
             this.localNameTag.maxHp = this.localHealth.maxHp;
             this.drawNameTag(this.localNameTag);
+        }
+        const delta = prevHp - this.localHealth.hp;
+        if (this.initialized && this.elapsed > 0.2 && delta > 0.01) {
+            this.playLocalDamageEffect(delta);
+        }
+    }
+
+    setRemotePlayerHealth(playerId, hp, maxHp = 1000) {
+        if (playerId == null) return;
+        const rp = this.remotePlayers.get(String(playerId));
+        if (!rp?.nameTag) return;
+        const prevHp = Math.max(0, Number(rp.nameTag.hp) || 0);
+        const maxSafe = Math.max(1, Number(maxHp) || 1000);
+        const hpSafe = Math.max(0, Math.min(maxSafe, Number(hp) || 0));
+        rp.nameTag.hp = hpSafe;
+        rp.nameTag.maxHp = maxSafe;
+        this.drawNameTag(rp.nameTag);
+        const delta = prevHp - hpSafe;
+        if (this.initialized && this.elapsed > 0.2 && delta > 0.01) {
+            const rx = Number(rp.rig?.position?.x || 0);
+            const ry = Number(rp.rig?.position?.y || 0);
+            const rz = Number(rp.rig?.position?.z || 0);
+            this._triggerDamageFxAt(rx, ry + 2.1, rz, delta, false);
         }
     }
 
@@ -3528,14 +4120,27 @@ export class Simple3D {
         const cls = this.resolveCharacterClass({ skin_id: player.character_class || player.rol || 'rogue' });
         const modelKey = (player.model_key || '').toString().trim();
         const animState = (player.animation_state || 'idle').toString().toLowerCase();
+        const displayName = this._resolveDisplayPlayerName(player, `P${pid}`);
         const existing = this.remotePlayers.get(pid);
         if (existing) {
+            if (Number(existing.rig?.userData?.characterVisualScale) !== 0.9) {
+                existing.rig.userData.characterVisualScale = 0.9;
+                const currentModelKey = (existing.rig.userData?.characterModelKey || '').toString().trim();
+                if (currentModelKey) this._applyCharacterModelToRig(existing.rig, currentModelKey);
+            }
             if (modelKey && existing.modelKey !== modelKey) {
                 existing.modelKey = modelKey;
                 this._applyCharacterModelToRig(existing.rig, modelKey);
             }
+            if (existing.nameTag && existing.nameTag.name !== displayName) {
+                existing.nameTag.name = displayName;
+                this.drawNameTag(existing.nameTag);
+            }
             existing.networkAnimState = (animState === 'walk' || animState === 'gather') ? animState : 'idle';
             this._setRigAnimationState(existing.rig, existing.networkAnimState);
+            if (player.hp != null || player.max_hp != null) {
+                this.setRemotePlayerHealth(pid, player.hp ?? existing.nameTag?.hp ?? 1000, player.max_hp ?? existing.nameTag?.maxHp ?? 1000);
+            }
             existing.targetPos.set(Number(pos.x) || 0, Number(pos.y) || this.actor.y, Number(pos.z) || 0);
             if (player.active_emotion) {
                 this.setRemotePlayerEmotion(pid, player.active_emotion, 0);
@@ -3546,10 +4151,11 @@ export class Simple3D {
         rig.position.set(Number(pos.x) || 0, Number(pos.y) || this.actor.y, Number(pos.z) || 0);
         rig.userData.nameTagYOffset = 3.2;
         rig.userData.characterModelKey = '';
+        rig.userData.characterVisualScale = 0.9;
         this.scene.add(rig);
         if (modelKey) this._applyCharacterModelToRig(rig, modelKey);
         const emoticonTexture = this.findEmoticonTextureFromRig(rig);
-        const nameTag = this.createNameTag(THREE, player.username || `P${pid}`, player.hp ?? 1000, player.max_hp ?? 1000);
+        const nameTag = this.createNameTag(THREE, displayName, player.hp ?? 1000, player.max_hp ?? 1000);
         this.updateNameTagPosition(nameTag.sprite, rig.position.x, rig.position.y, rig.position.z, rig);
         this.scene.add(nameTag.sprite);
         const remoteEmotion = this.normalizeEmoticonName(player.active_emotion || 'neutral');
@@ -4085,7 +4691,63 @@ export class Simple3D {
     }
 
     updateLights() {
-        // Luces estaticas para reducir costo de sombras.
+        if (!this.dirLight || !this.sunMesh) return;
+        const center = this.sunOrbitCenter || { x: 0, y: 72, z: 0 };
+        const sunClockSec = this.getSunClockSeconds();
+        const angle = this.sunOrbitPhase + (sunClockSec * this.sunOrbitSpeedRad);
+        const orbitCos = Math.cos(angle);
+        const orbitSin = Math.sin(angle);
+        const sunX = center.x + (orbitCos * this.sunOrbitRadius);
+        const sunZ = center.z + (orbitSin * this.sunOrbitRadius * 0.92);
+        const sunY = center.y + this.sunOrbitHeightBase + (orbitSin * this.sunOrbitHeightAmplitude);
+        const daylightRaw = Math.max(0, Math.min(1, (orbitSin + 0.12) / 1.12));
+        const daylight = Math.pow(daylightRaw, 1.35);
+
+        this.sunMesh.position.set(sunX, sunY, sunZ);
+        if (this.sunMesh.material) {
+            this.sunMesh.material.opacity = 0.08 + (0.90 * daylight);
+            this.sunMesh.material.needsUpdate = true;
+        }
+        this.dirLight.position.set(sunX, sunY, sunZ);
+        this.dirLight.intensity = 0.01 + (1.28 * daylight);
+        if (this.ambientLight) this.ambientLight.intensity = 0.04 + (0.58 * daylight);
+        if (this.fillLight) this.fillLight.intensity = 0.02 + (0.34 * daylight);
+        if (this.hemiLight) this.hemiLight.intensity = 0.03 + (0.49 * daylight);
+        if (this.dirLightTarget) {
+            this.dirLightTarget.position.set(center.x, center.y, center.z);
+            this.dirLightTarget.updateMatrixWorld();
+        }
+        this.dirLight.updateMatrixWorld();
+    }
+
+    setSunServerTime(isoUtc = null) {
+        const iso = (isoUtc || '').toString().trim();
+        if (!iso) {
+            this.sunServerEpochSec = null;
+            this.sunClientPerfStartSec = 0;
+            return;
+        }
+        const parsedMs = Date.parse(iso);
+        if (!Number.isFinite(parsedMs)) {
+            this.sunServerEpochSec = null;
+            this.sunClientPerfStartSec = 0;
+            return;
+        }
+        this.sunServerEpochSec = parsedMs / 1000;
+        this.sunClientPerfStartSec = (typeof performance !== 'undefined' && Number.isFinite(performance.now()))
+            ? (performance.now() / 1000)
+            : (Date.now() / 1000);
+    }
+
+    getSunClockSeconds() {
+        if (Number.isFinite(this.sunServerEpochSec)) {
+            const nowPerf = (typeof performance !== 'undefined' && Number.isFinite(performance.now()))
+                ? (performance.now() / 1000)
+                : (Date.now() / 1000);
+            const delta = Math.max(0, nowPerf - (Number(this.sunClientPerfStartSec) || 0));
+            return this.sunServerEpochSec + delta;
+        }
+        return Number(this.elapsed) || 0;
     }
 
     buildTerrainParams(world, terrainConfig = null) {
@@ -4949,7 +5611,129 @@ export class Simple3D {
         return color;
     }
 
-    _appendVoxelFace(positions, normals, colors, indices, cx, cy, cz, faceName, baseColor) {
+    _buildChunkSkylightVolume(chunk) {
+        if (!chunk?.blocks || !this.voxelSkylightEnabled) return null;
+        const w = this.chunkSize;
+        const h = this.voxelChunkHeight;
+        const d = this.chunkSize;
+        const volume = new Uint8Array(w * h * d);
+        const maxL = Math.max(1, Number(this.voxelSkylightMax) | 0);
+        const queue = [];
+        const lidx = (lx, ly, lz) => lx + (lz * w) + (ly * w * d);
+
+        // Semilla de luz solar: celdas de aire con visibilidad directa al cielo.
+        for (let lz = 0; lz < d; lz += 1) {
+            for (let lx = 0; lx < w; lx += 1) {
+                let openSky = true;
+                for (let ly = h - 1; ly >= 0; ly -= 1) {
+                    const idx = lidx(lx, ly, lz);
+                    const blockId = chunk.blocks[idx] || 0;
+                    if (this._isSolidBlockId(blockId)) {
+                        openSky = false;
+                        continue;
+                    }
+                    if (!openSky) continue;
+                    volume[idx] = maxL;
+                    queue.push(idx);
+                }
+            }
+        }
+
+        if (queue.length <= 0) return volume;
+        const dirs = [
+            [1, 0, 0], [-1, 0, 0],
+            [0, 1, 0], [0, -1, 0],
+            [0, 0, 1], [0, 0, -1],
+        ];
+
+        for (let qi = 0; qi < queue.length; qi += 1) {
+            const idx = queue[qi];
+            const curL = volume[idx] | 0;
+            if (curL <= 1) continue;
+            const ly = Math.floor(idx / (w * d));
+            const rem = idx - (ly * w * d);
+            const lz = Math.floor(rem / w);
+            const lx = rem - (lz * w);
+            for (const [dx, dy, dz] of dirs) {
+                const nx = lx + dx;
+                const ny = ly + dy;
+                const nz = lz + dz;
+                if (nx < 0 || nx >= w || ny < 0 || ny >= h || nz < 0 || nz >= d) continue;
+                const nidx = lidx(nx, ny, nz);
+                const nBlock = chunk.blocks[nidx] || 0;
+                if (this._isSolidBlockId(nBlock)) continue;
+                const nextL = curL - 1;
+                if (nextL <= (volume[nidx] | 0)) continue;
+                volume[nidx] = nextL;
+                queue.push(nidx);
+            }
+        }
+        return volume;
+    }
+
+    _estimateSkylightLevelWorld(wx, wy, wz) {
+        const maxL = Math.max(1, Number(this.voxelSkylightMax) | 0);
+        const x = Number(wx) | 0;
+        const y = Number(wy) | 0;
+        const z = Number(wz) | 0;
+        if (y >= (this.voxelChunkHeight - 1)) return maxL;
+        if (y < 0) return 0;
+        const topY = this.getTopSolidYAtWorld(x, z);
+        if (!Number.isFinite(topY)) return maxL;
+        if (y > topY) return maxL;
+        const depth = Math.max(0, (Number(topY) - y) + 1);
+        return Math.max(0, maxL - Math.round(depth * 1.25));
+    }
+
+    _isSolidVoxelWorld(wx, wy, wz) {
+        if (wy < 0 || wy >= this.voxelChunkHeight) return false;
+        return this._isSolidBlockId(this.getVoxelAtWorld(wx, wy, wz));
+    }
+
+    _computeVoxelFaceVertexAo(wx, wy, wz, faceName) {
+        if (!this.voxelAoEnabled) return [1, 1, 1, 1];
+        const aoMin = Math.max(0, Math.min(1, Number(this.voxelAoMin) || 0.52));
+        const aoPow = Math.max(0.2, Math.min(2.5, Number(this.voxelAoStrength) || 0.78));
+        const FACE_AO = {
+            px: { n: [1, 0, 0], u: [0, 1, 0], v: [0, 0, 1], s: [[-1, -1], [1, -1], [1, 1], [-1, 1]] },
+            nx: { n: [-1, 0, 0], u: [0, 1, 0], v: [0, 0, 1], s: [[-1, 1], [1, 1], [1, -1], [-1, -1]] },
+            py: { n: [0, 1, 0], u: [1, 0, 0], v: [0, 0, 1], s: [[-1, -1], [-1, 1], [1, 1], [1, -1]] },
+            ny: { n: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1], s: [[-1, 1], [-1, -1], [1, -1], [1, 1]] },
+            pz: { n: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0], s: [[1, -1], [1, 1], [-1, 1], [-1, -1]] },
+            nz: { n: [0, 0, -1], u: [1, 0, 0], v: [0, 1, 0], s: [[-1, -1], [-1, 1], [1, 1], [1, -1]] },
+        };
+        const cfg = FACE_AO[faceName];
+        if (!cfg) return [1, 1, 1, 1];
+
+        const out = [1, 1, 1, 1];
+        for (let i = 0; i < 4; i += 1) {
+            const su = cfg.s[i][0];
+            const sv = cfg.s[i][1];
+            const s1 = this._isSolidVoxelWorld(
+                wx + cfg.n[0] + (cfg.u[0] * su),
+                wy + cfg.n[1] + (cfg.u[1] * su),
+                wz + cfg.n[2] + (cfg.u[2] * su)
+            ) ? 1 : 0;
+            const s2 = this._isSolidVoxelWorld(
+                wx + cfg.n[0] + (cfg.v[0] * sv),
+                wy + cfg.n[1] + (cfg.v[1] * sv),
+                wz + cfg.n[2] + (cfg.v[2] * sv)
+            ) ? 1 : 0;
+            const c = this._isSolidVoxelWorld(
+                wx + cfg.n[0] + (cfg.u[0] * su) + (cfg.v[0] * sv),
+                wy + cfg.n[1] + (cfg.u[1] * su) + (cfg.v[1] * sv),
+                wz + cfg.n[2] + (cfg.u[2] * su) + (cfg.v[2] * sv)
+            ) ? 1 : 0;
+            let aoLevel = 0;
+            if (s1 && s2) aoLevel = 0;
+            else aoLevel = 3 - (s1 + s2 + c);
+            const ao01 = Math.max(0, Math.min(1, aoLevel / 3));
+            out[i] = aoMin + ((1 - aoMin) * Math.pow(ao01, aoPow));
+        }
+        return out;
+    }
+
+    _appendVoxelFace(positions, normals, colors, indices, cx, cy, cz, faceName, baseColor, skyFactor = 1.0, vertexAo = null) {
         const FACE = {
             px: {
                 n: [1, 0, 0],
@@ -4981,15 +5765,22 @@ export class Simple3D {
 
         const normal = face.n;
         const shade = normal[1] > 0 ? 1.0 : (normal[1] < 0 ? 0.68 : 0.82);
-        const r = Math.max(0, Math.min(1, baseColor.r * shade));
-        const g = Math.max(0, Math.min(1, baseColor.g * shade));
-        const b = Math.max(0, Math.min(1, baseColor.b * shade));
+        const skyMul = Math.max(0.05, Math.min(1.15, Number(skyFactor) || 1.0));
+        const r = Math.max(0, Math.min(1, baseColor.r * shade * skyMul));
+        const g = Math.max(0, Math.min(1, baseColor.g * shade * skyMul));
+        const b = Math.max(0, Math.min(1, baseColor.b * shade * skyMul));
 
         const start = (positions.length / 3);
-        for (const v of face.v) {
+        for (let vi = 0; vi < face.v.length; vi += 1) {
+            const v = face.v[vi];
+            const aoMul = Math.max(0.2, Math.min(1.0, Number(vertexAo?.[vi]) || 1.0));
             positions.push(cx + v[0], cy + v[1], cz + v[2]);
             normals.push(normal[0], normal[1], normal[2]);
-            colors.push(r, g, b);
+            colors.push(
+                Math.max(0, Math.min(1, r * aoMul)),
+                Math.max(0, Math.min(1, g * aoMul)),
+                Math.max(0, Math.min(1, b * aoMul))
+            );
         }
         indices.push(start, start + 1, start + 2, start, start + 2, start + 3);
     }
@@ -5003,6 +5794,10 @@ export class Simple3D {
 
         const baseX = chunk.cx * this.chunkSize;
         const baseZ = chunk.cz * this.chunkSize;
+        const skylightVolume = this._buildChunkSkylightVolume(chunk);
+        const skylightMax = Math.max(1, Number(this.voxelSkylightMax) | 0);
+        const skylightMinFace = Math.max(0, Math.min(1, Number(this.voxelSkylightMinFace) || 0.18));
+        const skylightStrength = Math.max(0, Math.min(1.2, Number(this.voxelSkylightStrength) || 0.92));
         const dirs = [
             { name: 'px', dx: 1, dy: 0, dz: 0 },
             { name: 'nx', dx: -1, dy: 0, dz: 0 },
@@ -5058,7 +5853,26 @@ export class Simple3D {
                         const nz = wz + d.dz;
                         const nBlock = this.getVoxelAtWorld(nx, ny, nz);
                         if (this._isSolidBlockId(nBlock)) continue;
-                        this._appendVoxelFace(positions, normals, colors, indices, wx, y, wz, d.name, color);
+                        let skyLevel = skylightMax;
+                        if (this.voxelSkylightEnabled) {
+                            const nlx = nx - baseX;
+                            const nlz = nz - baseZ;
+                            if (
+                                skylightVolume &&
+                                nlx >= 0 && nlx < this.chunkSize &&
+                                ny >= 0 && ny < this.voxelChunkHeight &&
+                                nlz >= 0 && nlz < this.chunkSize
+                            ) {
+                                const nidx = this.voxelIndex(nlx, ny, nlz);
+                                skyLevel = skylightVolume[nidx] | 0;
+                            } else {
+                                skyLevel = this._estimateSkylightLevelWorld(nx, ny, nz);
+                            }
+                        }
+                        const sky01 = Math.max(0, Math.min(1, skyLevel / skylightMax));
+                        const skyFactor = skylightMinFace + ((1 - skylightMinFace) * Math.pow(sky01, skylightStrength));
+                        const vertexAo = this._computeVoxelFaceVertexAo(wx, y, wz, d.name);
+                        this._appendVoxelFace(positions, normals, colors, indices, wx, y, wz, d.name, color, skyFactor, vertexAo);
                     }
                 }
             }
@@ -5130,20 +5944,13 @@ export class Simple3D {
             this.voxelHighlightMesh.userData.tag = 'voxel_highlight';
             this.scene.add(this.voxelHighlightMesh);
         }
-        if (!this.voxelPlacePreviewMesh) {
-            const placeGeo = new THREE.BoxGeometry(0.98, 0.98, 0.98);
-            const placeMat = new THREE.MeshBasicMaterial({
-                color: 0x7ad8ff,
-                transparent: true,
-                opacity: 0.24,
-                depthTest: true,
-                wireframe: false,
-            });
-            this.voxelPlacePreviewMesh = new THREE.Mesh(placeGeo, placeMat);
-            this.voxelPlacePreviewMesh.visible = false;
-            this.voxelPlacePreviewMesh.renderOrder = 4;
-            this.voxelPlacePreviewMesh.userData.tag = 'voxel_place_preview';
-            this.scene.add(this.voxelPlacePreviewMesh);
+        // Preview semitransparente deshabilitado por UX:
+        // dejamos solo el wireframe del bloque objetivo.
+        if (this.voxelPlacePreviewMesh) {
+            this.scene.remove(this.voxelPlacePreviewMesh);
+            this.voxelPlacePreviewMesh.geometry?.dispose?.();
+            this.voxelPlacePreviewMesh.material?.dispose?.();
+            this.voxelPlacePreviewMesh = null;
         }
     }
 
@@ -5304,15 +6111,6 @@ export class Simple3D {
         if (this.voxelHighlightMesh) {
             this.voxelHighlightMesh.visible = true;
             this.voxelHighlightMesh.position.set(b.x, b.y, b.z);
-        }
-        if (this.voxelPlacePreviewMesh) {
-            if (placeOk) {
-                const occupied = this.getVoxelAtWorld(place.x, place.y, place.z);
-                this.voxelPlacePreviewMesh.visible = !this._isSolidBlockId(occupied);
-                this.voxelPlacePreviewMesh.position.set(place.x, place.y, place.z);
-            } else {
-                this.voxelPlacePreviewMesh.visible = false;
-            }
         }
     }
 

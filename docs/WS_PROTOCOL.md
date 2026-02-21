@@ -186,6 +186,8 @@ Reglas:
   "username": "player1",
   "reason": "fall_distance|void_floor",
   "fall_distance": 12.4,
+  "hp": 0,
+  "max_hp": 1000,
   "position": { "x": 0, "y": 60, "z": 0 }
 }
 ```
@@ -212,7 +214,13 @@ Campos relevantes sincronizados:
 - `character_class`
 - `active_emotion`
 - `animation_state`
+- `hp`
+- `max_hp`
 - `position`
+
+Notas de uso:
+- `world_player_joined` y `world_player_moved` transportan este payload de jugador.
+- Cliente debe actualizar HP remoto al recibir `world_player_moved`, incluso si el jugador ya existe en escena.
 
 ## Error Contract
 En errores, el servidor responde con `ok=false` y `error` descriptivo en `payload`.

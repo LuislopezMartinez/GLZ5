@@ -2,6 +2,21 @@
 
 Formato: SemVer (`MAJOR.MINOR.PATCH`)
 
+## [Unreleased] - 2026-02-19
+Estado: implementado en codigo (pendiente bump explicito de `protocol_version`)
+
+### Added
+- Payload de jugador con `hp` y `max_hp` en `world_player_joined` / `world_player_moved`.
+- `world_player_died` ahora incluye `hp` y `max_hp` para actualizar remotos de forma inmediata.
+
+### Changed
+- El cliente actualiza HP remoto en tiempo real al recibir `world_player_moved`.
+- Nameplates en mundo priorizan `character_name` sobre `username`.
+
+### Compatibility
+- Cambios backward-compatible para clientes antiguos (campos extra en payload).
+- Cliente actualizado aprovecha los campos nuevos para sincronizacion visual de vida.
+
 ## [1.1.0] - 2026-02-17
 Estado: activo
 

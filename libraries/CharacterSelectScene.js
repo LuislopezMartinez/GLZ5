@@ -88,6 +88,16 @@ export class CharacterSelectScene {
         this.cameraFocusXTarget = 0;
         this.cameraOrbit = 0;
         this.confirmAnim = null;
+        this.keyLight = null;
+        this.fillLight = null;
+        this.rimLightA = null;
+        this.rimLightB = null;
+        this.hemiLight = null;
+        this.particleSystem = null;
+        this.particlePositions = null;
+        this.particleBase = [];
+        this.particleMotion = [];
+        this.particleCount = 0;
         this.onResize = this.onResize.bind(this);
         this.onPointerDown = this.onPointerDown.bind(this);
         this.animate = this.animate.bind(this);
@@ -125,31 +135,47 @@ export class CharacterSelectScene {
         this.container.appendChild(this.labelsLayer);
 
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x14263e);
-        this.scene.fog = new THREE.Fog(0x14263e, 18, 42);
+        this.scene.background = new THREE.Color(0x9fcaea);
+        this.scene.fog = new THREE.Fog(0x9fcaea, 24, 56);
 
         this.camera = new THREE.PerspectiveCamera(43, 1.6, 0.1, 200);
         this.camera.position.set(0, this.cameraBase.y, this.cameraBase.z);
         this.camera.lookAt(0, this.cameraBase.lookY, 0);
 
-        const amb = new THREE.AmbientLight(0xffffff, 0.72);
+        const amb = new THREE.AmbientLight(0xffffff, 0.96);
         this.scene.add(amb);
-        const key = new THREE.DirectionalLight(0xf6f0d8, 1.22);
+        const hemi = new THREE.HemisphereLight(0xe5f4ff, 0x436a57, 0.88);
+        this.scene.add(hemi);
+        this.hemiLight = hemi;
+        const key = new THREE.DirectionalLight(0xfff4dd, 1.75);
         key.position.set(8, 14, 6);
         key.castShadow = true;
         key.shadow.mapSize.set(1024, 1024);
+        key.shadow.normalBias = 0.03;
         this.scene.add(key);
-        const fill = new THREE.DirectionalLight(0x8eb8ff, 0.45);
-        fill.position.set(-9, 7, -6);
+        this.keyLight = key;
+        const fill = new THREE.DirectionalLight(0x9fd0ff, 0.92);
+        fill.position.set(-9, 8, -7);
         this.scene.add(fill);
+        this.fillLight = fill;
+        const rimA = new THREE.PointLight(0x7ad9ff, 0.85, 22, 2);
+        rimA.position.set(-6.5, 4.4, 5.0);
+        this.scene.add(rimA);
+        this.rimLightA = rimA;
+        const rimB = new THREE.PointLight(0xffd39f, 0.65, 20, 2);
+        rimB.position.set(6.0, 5.0, 4.8);
+        this.scene.add(rimB);
+        this.rimLightB = rimB;
 
         const ground = new THREE.Mesh(
             new THREE.PlaneGeometry(28, 16, 24, 14),
-            new THREE.MeshStandardMaterial({ color: 0x49684b, roughness: 0.95, metalness: 0.03 })
+            new THREE.MeshStandardMaterial({ color: 0x6f8f6e, roughness: 0.93, metalness: 0.03 })
         );
         ground.rotation.x = -Math.PI * 0.5;
         ground.receiveShadow = true;
         this.scene.add(ground);
+
+        this.createAmbientParticles();
 
         const positions = [-4.3, 0, 4.3];
         this.slots = positions.map((x, idx) => {
@@ -189,8 +215,8 @@ export class CharacterSelectScene {
             nameplateEl.style.padding = '4px 10px';
             nameplateEl.style.borderRadius = '999px';
             nameplateEl.style.border = '1px solid rgba(168, 205, 236, 0.48)';
-            nameplateEl.style.background = 'rgba(8, 22, 39, 0.84)';
-            nameplateEl.style.color = '#e9f6ff';
+            nameplateEl.style.background = 'rgba(9, 28, 42, 0.7)';
+            nameplateEl.style.color = '#f4fbff';
             nameplateEl.style.fontSize = '12px';
             nameplateEl.style.fontWeight = '800';
             nameplateEl.style.letterSpacing = '0.15px';
@@ -223,6 +249,14 @@ export class CharacterSelectScene {
                 spinRate: 0.0008 + (Math.random() * 0.0025),
                 focusBlend: 0,
                 selectKick: 0,
+                animations: [],
+                animationMap: new Map(),
+                idleClipName: '',
+                idleAction: null,
+                activeAction: null,
+                activeActionUntil: 0,
+                nextVariantAt: 0,
+                mixerFinishHandler: null,
             };
         });
 
@@ -263,11 +297,22 @@ export class CharacterSelectScene {
 
             if (slot.modelRoot) {
                 slot.group.remove(slot.modelRoot);
+                if (slot.mixer && slot.mixerFinishHandler) {
+                    slot.mixer.removeEventListener('finished', slot.mixerFinishHandler);
+                }
                 disposeModelRoot(slot.modelRoot);
                 slot.modelRoot = null;
                 slot.mixer = null;
                 slot.animAction = null;
                 slot.headOffsetY = 3.0;
+                slot.animations = [];
+                slot.animationMap = new Map();
+                slot.idleClipName = '';
+                slot.idleAction = null;
+                slot.activeAction = null;
+                slot.activeActionUntil = 0;
+                slot.nextVariantAt = 0;
+                slot.mixerFinishHandler = null;
             }
             slot.modelKey = modelKeyToShow;
 
@@ -307,22 +352,191 @@ export class CharacterSelectScene {
                     slot.headOffsetY = Math.max(2.0, finalHeight + 1.0);
 
                     if (!isPreviewSlot && Array.isArray(animations) && animations.length > 0) {
-                        const mixer = new THREE.AnimationMixer(obj);
-                        const lower = new Map();
-                        animations.forEach((clip) => lower.set((clip?.name || '').toLowerCase(), clip));
-                        const pick = lower.get('idle') || lower.get('static') || animations[0] || null;
-                        if (pick) {
-                            const action = mixer.clipAction(pick);
-                            action.setLoop(THREE.LoopRepeat, Infinity);
-                            action.play();
-                            slot.mixer = mixer;
-                            slot.animAction = action;
-                        }
+                        this.setupSlotAnimation(slot, obj, animations);
                     }
                 },
                 () => { }
             );
         });
+    }
+
+    setupSlotAnimation(slot, modelRoot, animations) {
+        const clips = Array.isArray(animations) ? animations.filter((x) => x && Number(x.duration) > 0.05) : [];
+        if (!slot || !modelRoot || clips.length <= 0) return;
+        const mixer = new THREE.AnimationMixer(modelRoot);
+        const byName = new Map();
+        clips.forEach((clip) => byName.set((clip?.name || '').toLowerCase(), clip));
+
+        const idleClip = byName.get('idle')
+            || byName.get('static')
+            || clips.find((clip) => /(idle|stand|breath)/i.test(clip?.name || ''))
+            || clips[0];
+        if (!idleClip) return;
+
+        const idleAction = mixer.clipAction(idleClip);
+        idleAction.reset();
+        idleAction.enabled = true;
+        idleAction.setLoop(THREE.LoopRepeat, Infinity);
+        idleAction.play();
+
+        const finishHandler = () => {
+            if (!slot.activeAction || slot.activeAction === slot.idleAction) return;
+            const active = slot.activeAction;
+            slot.activeAction = null;
+            slot.activeActionUntil = 0;
+            if (slot.idleAction) {
+                slot.idleAction.enabled = true;
+                slot.idleAction.play();
+                active.crossFadeTo(slot.idleAction, 0.22, false);
+            }
+        };
+        mixer.addEventListener('finished', finishHandler);
+
+        slot.mixer = mixer;
+        slot.animAction = idleAction;
+        slot.animations = clips;
+        slot.animationMap = byName;
+        slot.idleClipName = (idleClip?.name || '').toLowerCase();
+        slot.idleAction = idleAction;
+        slot.activeAction = null;
+        slot.activeActionUntil = 0;
+        slot.nextVariantAt = this.elapsed + 1.4 + (Math.random() * 1.6);
+        slot.mixerFinishHandler = finishHandler;
+    }
+
+    triggerSlotVariantAnimation(slot) {
+        if (!slot?.mixer || !Array.isArray(slot.animations) || slot.animations.length <= 1) return false;
+        const blocked = /(walk|run|strafe|move|jump|fall|hit|hurt|die|death)/i;
+        const idleName = (slot.idleClipName || '').toLowerCase();
+        const options = slot.animations.filter((clip) => {
+            const nm = (clip?.name || '').toLowerCase();
+            if (!nm) return false;
+            if (nm === idleName) return false;
+            if (blocked.test(nm)) return false;
+            return Number(clip.duration) >= 0.35;
+        });
+        if (options.length <= 0) return false;
+        const clip = options[Math.floor(Math.random() * options.length)] || null;
+        if (!clip) return false;
+        const action = slot.mixer.clipAction(clip);
+        if (!action) return false;
+        const speed = 0.95 + (Math.random() * 0.22);
+        action.reset();
+        action.enabled = true;
+        action.clampWhenFinished = false;
+        action.setEffectiveTimeScale(speed);
+        action.setLoop(THREE.LoopOnce, 1);
+        action.play();
+        if (slot.idleAction) slot.idleAction.crossFadeTo(action, 0.2, false);
+        slot.activeAction = action;
+        slot.activeActionUntil = this.elapsed + (Number(clip.duration) / Math.max(0.1, speed)) + 0.08;
+        slot.nextVariantAt = this.elapsed + 2.6 + (Math.random() * 2.4);
+        return true;
+    }
+
+    updateSlotAnimation(slot, dt) {
+        if (!slot?.mixer) return;
+        if (slot.mixer) slot.mixer.update(dt);
+        if (slot.activeAction && this.elapsed >= Number(slot.activeActionUntil || 0)) {
+            const active = slot.activeAction;
+            slot.activeAction = null;
+            slot.activeActionUntil = 0;
+            if (slot.idleAction) {
+                slot.idleAction.enabled = true;
+                slot.idleAction.play();
+                active.crossFadeTo(slot.idleAction, 0.2, false);
+            }
+        }
+        if (!slot.activeAction && this.elapsed >= Number(slot.nextVariantAt || 0)) {
+            this.triggerSlotVariantAnimation(slot);
+        }
+    }
+
+    createAmbientParticles() {
+        if (!this.scene) return;
+        const count = 170;
+        const positions = new Float32Array(count * 3);
+        const colors = new Float32Array(count * 3);
+        this.particleBase = [];
+        this.particleMotion = [];
+
+        for (let i = 0; i < count; i += 1) {
+            const bx = (Math.random() * 14) - 7;
+            const by = 0.45 + (Math.random() * 5.6);
+            const bz = (Math.random() * 10) - 5.4;
+            positions[(i * 3)] = bx;
+            positions[(i * 3) + 1] = by;
+            positions[(i * 3) + 2] = bz;
+
+            const tint = 0.82 + (Math.random() * 0.18);
+            colors[(i * 3)] = 0.65 * tint;
+            colors[(i * 3) + 1] = 0.85 * tint;
+            colors[(i * 3) + 2] = 1.0 * tint;
+
+            this.particleBase.push({ x: bx, y: by, z: bz });
+            this.particleMotion.push({
+                phase: Math.random() * Math.PI * 2,
+                speedY: 0.08 + (Math.random() * 0.12),
+                ampX: 0.06 + (Math.random() * 0.18),
+                ampZ: 0.04 + (Math.random() * 0.16),
+                wobble: 0.65 + (Math.random() * 1.15),
+            });
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        const mat = new THREE.PointsMaterial({
+            size: 0.09,
+            sizeAttenuation: true,
+            transparent: true,
+            opacity: 0.58,
+            depthWrite: false,
+            vertexColors: true,
+            blending: THREE.AdditiveBlending,
+        });
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        this.scene.add(points);
+
+        this.particleSystem = points;
+        this.particlePositions = positions;
+        this.particleCount = count;
+    }
+
+    updateAmbientParticles(dt) {
+        if (!this.particleSystem || !this.particlePositions || this.particleCount <= 0) return;
+        const pos = this.particlePositions;
+        for (let i = 0; i < this.particleCount; i += 1) {
+            const base = this.particleBase[i];
+            const motion = this.particleMotion[i];
+            if (!base || !motion) continue;
+            motion.phase += dt * motion.wobble;
+            base.y += dt * motion.speedY;
+            if (base.y > 6.8) base.y = 0.3 + (Math.random() * 0.5);
+            pos[(i * 3)] = base.x + (Math.sin(motion.phase * 1.2) * motion.ampX);
+            pos[(i * 3) + 1] = base.y;
+            pos[(i * 3) + 2] = base.z + (Math.cos(motion.phase) * motion.ampZ);
+        }
+        this.particleSystem.geometry.attributes.position.needsUpdate = true;
+    }
+
+    updateSceneLighting() {
+        const t = this.elapsed;
+        if (this.keyLight) {
+            this.keyLight.intensity = 1.6 + (Math.sin(t * 0.55) * 0.12);
+            this.keyLight.position.x = 8 + (Math.sin(t * 0.25) * 0.9);
+            this.keyLight.position.z = 6 + (Math.cos(t * 0.3) * 0.75);
+        }
+        if (this.fillLight) {
+            this.fillLight.intensity = 0.86 + (Math.sin((t * 0.85) + 1.1) * 0.08);
+        }
+        if (this.rimLightA) {
+            this.rimLightA.intensity = 0.8 + (Math.sin((t * 1.8) + 0.5) * 0.16);
+        }
+        if (this.rimLightB) {
+            this.rimLightB.intensity = 0.62 + (Math.sin((t * 1.4) + 1.9) * 0.12);
+        }
     }
 
     playEnterConfirm(durationMs = 260) {
@@ -398,6 +612,8 @@ export class CharacterSelectScene {
         }
 
         this.elapsed += dt;
+        this.updateSceneLighting();
+        this.updateAmbientParticles(dt);
         let confirm01 = 0;
         if (this.confirmAnim) {
             const t = (this.elapsed - Number(this.confirmAnim.startAt || 0)) / Math.max(0.001, Number(this.confirmAnim.duration || 0.26));
@@ -444,7 +660,7 @@ export class CharacterSelectScene {
                 const s = 1 + (slot.focusBlend * 0.06);
                 slot.modelRoot.scale.set(s, s, s);
             }
-            if (slot.mixer) slot.mixer.update(dt);
+            this.updateSlotAnimation(slot, dt);
             const showPlaceholder = !slot.row && !slot.modelRoot;
             if (slot.placeholder) slot.placeholder.visible = showPlaceholder;
             if (showPlaceholder && slot.placeholder) {
@@ -494,6 +710,9 @@ export class CharacterSelectScene {
         this.slots.forEach((slot) => {
             if (slot.modelRoot) {
                 slot.group.remove(slot.modelRoot);
+                if (slot.mixer && slot.mixerFinishHandler) {
+                    slot.mixer.removeEventListener('finished', slot.mixerFinishHandler);
+                }
                 disposeModelRoot(slot.modelRoot);
                 slot.modelRoot = null;
             }
@@ -503,6 +722,12 @@ export class CharacterSelectScene {
         });
 
         this.renderer?.dispose?.();
+
+        if (this.particleSystem) {
+            this.scene?.remove?.(this.particleSystem);
+            this.particleSystem.geometry?.dispose?.();
+            this.particleSystem.material?.dispose?.();
+        }
 
         if (this.container && this.renderer?.domElement?.parentElement === this.container) {
             this.container.removeChild(this.renderer.domElement);
@@ -516,5 +741,15 @@ export class CharacterSelectScene {
         this.frameHandle = 0;
         this.lastFrameMs = 0;
         this.confirmAnim = null;
+        this.keyLight = null;
+        this.fillLight = null;
+        this.rimLightA = null;
+        this.rimLightB = null;
+        this.hemiLight = null;
+        this.particleSystem = null;
+        this.particlePositions = null;
+        this.particleBase = [];
+        this.particleMotion = [];
+        this.particleCount = 0;
     }
 }

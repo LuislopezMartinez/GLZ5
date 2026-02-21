@@ -128,6 +128,8 @@ class SimpleWsServer:
 
     def _session_world_player_payload(self, sess: dict) -> dict:
         pos = sess.get("position") or {"x": 0.0, "y": 60.0, "z": 0.0}
+        max_hp = max(1, int(sess.get("max_hp") or 1000))
+        hp = max(0, min(max_hp, int(sess.get("hp") or max_hp)))
         return {
             "id": sess.get("user_id"),
             "username": sess.get("username"),
@@ -138,6 +140,8 @@ class SimpleWsServer:
             "character_class": sess.get("character_class") or "rogue",
             "active_emotion": sess.get("active_emotion") or "neutral",
             "animation_state": sess.get("animation_state") or "idle",
+            "hp": int(hp),
+            "max_hp": int(max_hp),
             "position": {
                 "x": float(pos.get("x", 0.0)),
                 "y": float(pos.get("y", 60.0)),
@@ -201,8 +205,131 @@ class SimpleWsServer:
             "z": float(spawn_hint.get("z") or 0.0),
         }
 
+    def _is_solid_voxel_at(self, world_id: int, world: dict, terrain_config: dict, terrain_cells: dict, x: int, y: int, z: int) -> bool:
+        return self._effective_block_id_at(world_id, world, terrain_config, terrain_cells, int(x), int(y), int(z)) > 0
+
+    def _has_player_headroom_at(self, world_id: int, world: dict, terrain_config: dict, terrain_cells: dict, x: int, z: int, actor_y: float) -> bool:
+        # Actor ocupa aprox. desde pies hasta cabeza en el eje Y.
+        feet_y = float(actor_y) - 0.5
+        for py in (feet_y + 0.10, feet_y + 0.45, feet_y + 0.80, feet_y + 1.15, feet_y + 1.50, feet_y + 1.78):
+            if self._is_solid_voxel_at(world_id, world, terrain_config, terrain_cells, x, int(round(py)), z):
+                return False
+        return True
+
+    def _find_spawn_actor_y_for_column(
+        self,
+        world_id: int,
+        world: dict,
+        terrain_config: dict,
+        terrain_cells: dict,
+        x: int,
+        z: int,
+        ref_actor_y: float,
+    ):
+        world_h = max(8, int(terrain_config.get("voxel_world_height") or self.voxel_world_height or 128))
+        ref_top = int(round(float(ref_actor_y) - 1.0))
+        up = 5
+        down = 16
+        max_off = max(up, down)
+        for off in range(0, max_off + 1):
+            tops = [ref_top] if off == 0 else [ref_top - off, ref_top + off]
+            for top_y in tops:
+                if top_y < 0 or top_y >= (world_h - 2):
+                    continue
+                if not self._is_solid_voxel_at(world_id, world, terrain_config, terrain_cells, x, top_y, z):
+                    continue
+                if self._is_solid_voxel_at(world_id, world, terrain_config, terrain_cells, x, top_y + 1, z):
+                    continue
+                actor_y = float(top_y) + 1.0
+                if not self._has_player_headroom_at(world_id, world, terrain_config, terrain_cells, x, z, actor_y):
+                    continue
+                return actor_y
+        return None
+
+    def _iter_ring_offsets(self, radius: int):
+        r = int(max(0, radius))
+        if r == 0:
+            yield (0, 0)
+            return
+        for dx in range(-r, r + 1):
+            yield (dx, -r)
+            yield (dx, r)
+        for dz in range(-r + 1, r):
+            yield (-r, dz)
+            yield (r, dz)
+
+    def _resolve_safe_spawn_position_from_world(
+        self,
+        world_id: int,
+        world: dict,
+        terrain_config: dict,
+        terrain_cells: dict,
+        preferred_pos: dict,
+        spawn_hint: dict,
+    ) -> dict:
+        pref_x = float(preferred_pos.get("x") or 0.0)
+        pref_y = float(preferred_pos.get("y") or 60.0)
+        pref_z = float(preferred_pos.get("z") or 0.0)
+        hint_x = float(spawn_hint.get("x") or 0.0)
+        hint_y = float(spawn_hint.get("y") or 60.0)
+        hint_z = float(spawn_hint.get("z") or 0.0)
+
+        # 1) Buscar cerca de la posicion preferida.
+        best = None
+        best_score = None
+        for radius in range(0, 10):
+            for ox, oz in self._iter_ring_offsets(radius):
+                cx = int(round(pref_x)) + ox
+                cz = int(round(pref_z)) + oz
+                actor_y = self._find_spawn_actor_y_for_column(
+                    world_id, world, terrain_config, terrain_cells, cx, cz, pref_y
+                )
+                if actor_y is None:
+                    continue
+                score = math.hypot(cx - pref_x, cz - pref_z) + (abs(actor_y - pref_y) * 0.18)
+                if best is None or score < best_score:
+                    best = {"x": float(cx), "y": float(actor_y), "z": float(cz)}
+                    best_score = score
+            if best is not None and radius >= 2:
+                break
+        if best is not None:
+            return best
+
+        # 2) Fallback alrededor de spawn_hint.
+        for radius in range(0, 20):
+            for ox, oz in self._iter_ring_offsets(radius):
+                cx = int(round(hint_x)) + ox
+                cz = int(round(hint_z)) + oz
+                actor_y = self._find_spawn_actor_y_for_column(
+                    world_id, world, terrain_config, terrain_cells, cx, cz, hint_y
+                )
+                if actor_y is not None:
+                    return {"x": float(cx), "y": float(actor_y), "z": float(cz)}
+
+        # 3) Ultimo fallback: spawn_hint tal cual.
+        return {"x": float(hint_x), "y": float(hint_y), "z": float(hint_z)}
+
+    def _resolve_safe_spawn_position(self, session: dict, preferred_pos: dict | None = None) -> dict:
+        spawn_hint = session.get("spawn_hint") or {"x": 0.0, "y": 60.0, "z": 0.0}
+        pref = preferred_pos or (session.get("position") or spawn_hint)
+        world_id, world, terrain_config, terrain_cells = self._resolve_session_world_and_terrain(session)
+        if not world or world_id is None or world_id <= 0:
+            return {
+                "x": float(pref.get("x") or spawn_hint.get("x") or 0.0),
+                "y": float(pref.get("y") or spawn_hint.get("y") or 60.0),
+                "z": float(pref.get("z") or spawn_hint.get("z") or 0.0),
+            }
+        return self._resolve_safe_spawn_position_from_world(
+            int(world_id),
+            world,
+            terrain_config or {},
+            terrain_cells or {},
+            pref,
+            spawn_hint,
+        )
+
     def _respawn_session(self, session: dict, full_heal: bool = True) -> dict:
-        spawn_pos = self._session_spawn_pos(session)
+        spawn_pos = self._resolve_safe_spawn_position(session, preferred_pos=self._session_spawn_pos(session))
         max_hp = max(1, int(session.get("max_hp") or 1000))
         if full_heal:
             session["hp"] = max_hp
@@ -213,6 +340,7 @@ class SimpleWsServer:
         session["fall_peak_y"] = float(spawn_pos["y"])
         session["falling_active"] = False
         session["animation_state"] = "idle"
+        session["spawn_protect_until"] = self._now_epoch() + 1.8
         return {
             "position": dict(spawn_pos),
             "hp": int(session["hp"]),
@@ -272,6 +400,8 @@ class SimpleWsServer:
                 "username": session.get("username"),
                 "reason": reason,
                 "fall_distance": float(max(0.0, fall_distance)),
+                "hp": 0,
+                "max_hp": max(1, int(session.get("max_hp") or 1000)),
                 "position": payload["position"],
             },
             exclude=websocket,
@@ -308,6 +438,8 @@ class SimpleWsServer:
                 "character_class": session.get("character_class") or "rogue",
                 "active_emotion": session.get("active_emotion") or "neutral",
                 "animation_state": "idle",
+                "hp": snap["hp"],
+                "max_hp": snap["max_hp"],
                 "position": snap["position"],
             },
             exclude=websocket,
@@ -416,6 +548,93 @@ class SimpleWsServer:
             "hotbar_slots": self.inventory_hotbar_slots,
             "slots": slots,
             "items": items,
+        }
+
+    def _handle_world_chat_command(self, session: dict, text: str) -> dict | None:
+        raw = (text or "").strip()
+        if not raw.startswith("/"):
+            return None
+        parts = raw.split()
+        cmd = (parts[0] or "").strip().lower()
+
+        if cmd != "/give":
+            return {
+                "ok": False,
+                "command": cmd.lstrip("/"),
+                "error": "Comando no soportado. Usa: /give <item_code> [cantidad]",
+            }
+
+        if len(parts) < 2 or len(parts) > 3:
+            return {
+                "ok": False,
+                "command": "give",
+                "error": "Uso: /give <item_code> [cantidad]",
+            }
+
+        item_code = (parts[1] or "").strip()
+        if not item_code:
+            return {
+                "ok": False,
+                "command": "give",
+                "error": "item_code invalido",
+            }
+
+        qty = 1
+        if len(parts) >= 3:
+            try:
+                qty = int(parts[2])
+            except Exception:
+                return {
+                    "ok": False,
+                    "command": "give",
+                    "error": "cantidad invalida",
+                }
+        qty = max(1, min(5000, int(qty)))
+
+        user_id = int(session.get("user_id") or 0)
+        if user_id <= 0:
+            return {
+                "ok": False,
+                "command": "give",
+                "error": "Sesion invalida",
+            }
+
+        add_res = self.db.inventory_add_item(
+            user_id,
+            item_code,
+            qty,
+            total_slots=self.inventory_total_slots,
+            hotbar_slots=self.inventory_hotbar_slots,
+        )
+        if not bool(add_res.get("ok")):
+            return {
+                "ok": False,
+                "command": "give",
+                "error": add_res.get("error") or "No se pudo agregar item",
+            }
+
+        added = int(add_res.get("added") or 0)
+        left = int(add_res.get("left") or 0)
+        item_row = self.db.get_item_by_code(item_code) or {}
+        item_name = (item_row.get("name") or item_code).strip()
+        msg = (
+            f"/give: +{added} {item_name}"
+            if left <= 0
+            else f"/give: +{added} {item_name} (sin espacio para {left})"
+        )
+
+        return {
+            "ok": True,
+            "command": "give",
+            "inventory": self._inventory_payload(user_id),
+            "given": {
+                "item_code": item_code,
+                "item_name": item_name,
+                "requested": int(qty),
+                "added": int(added),
+                "left": int(left),
+            },
+            "message": msg,
         }
 
     def _decor_state_signature(self, world: dict, assets: list[dict]) -> str:
@@ -1938,19 +2157,28 @@ class SimpleWsServer:
                 spawn_hint = terrain_config.get("spawn_hint") or {"x": 0.0, "y": 60.0, "z": 0.0}
                 if user_row.get("last_pos_y") is None or float(spawn_y) > 200:
                     spawn_y = float(spawn_hint.get("y", 60.0))
-                session_pos = {"x": float(spawn_x), "y": float(spawn_y), "z": float(spawn_z)}
-                session["position"] = session_pos
                 session["spawn_hint"] = {
                     "x": float(spawn_hint.get("x") or 0.0),
                     "y": float(spawn_hint.get("y") or 60.0),
                     "z": float(spawn_hint.get("z") or 0.0),
                 }
+                preferred_enter_pos = {"x": float(spawn_x), "y": float(spawn_y), "z": float(spawn_z)}
+                session_pos = self._resolve_safe_spawn_position_from_world(
+                    int(world["id"]),
+                    world,
+                    terrain_config or {},
+                    terrain_cells or {},
+                    preferred_enter_pos,
+                    session["spawn_hint"],
+                )
+                session["position"] = dict(session_pos)
                 session["void_height"] = float(terrain_config.get("void_height") or -90.0)
                 session["fall_death_enabled"] = self._as_bool_flag(world.get("fall_death_enabled"), True)
                 session["void_death_enabled"] = self._as_bool_flag(world.get("void_death_enabled"), True)
                 session["fall_death_threshold_voxels"] = max(1.0, min(120.0, float(world.get("fall_death_threshold_voxels") or 10.0)))
                 session["fall_peak_y"] = float(session_pos["y"])
                 session["falling_active"] = False
+                session["spawn_protect_until"] = self._now_epoch() + 1.8
 
                 other_players = []
                 for ws, sess in self.sessions.items():
@@ -2052,6 +2280,8 @@ class SimpleWsServer:
                         "character_class": session.get("character_class") or "rogue",
                         "active_emotion": session.get("active_emotion") or "neutral",
                         "animation_state": session.get("animation_state") or "idle",
+                        "hp": int(session.get("hp") or 1000),
+                        "max_hp": max(1, int(session.get("max_hp") or 1000)),
                         "position": session_pos,
                     },
                     exclude=websocket,
@@ -2267,13 +2497,14 @@ class SimpleWsServer:
                 damage_applied = 0
                 damage_pct = 0.0
                 killed_reason = None
+                spawn_protected = self._now_epoch() < float(session.get("spawn_protect_until") or 0.0)
 
                 session["position"] = {"x": x, "y": y, "z": z}
                 session["animation_state"] = anim
                 session["fall_peak_y"] = float(fall_peak)
                 session["falling_active"] = bool(falling_now)
 
-                if resolve_fall_now:
+                if resolve_fall_now and not spawn_protected:
                     max_hp = max(1, int(session.get("max_hp") or 1000))
                     hp_now = max(0, min(max_hp, int(session.get("hp") or max_hp)))
                     if fall_death_enabled:
@@ -2352,6 +2583,8 @@ class SimpleWsServer:
                         "character_class": session.get("character_class") or "rogue",
                         "active_emotion": session.get("active_emotion") or "neutral",
                         "animation_state": anim,
+                        "hp": int(session.get("hp") or 1000),
+                        "max_hp": max(1, int(session.get("max_hp") or 1000)),
                         "position": {"x": x, "y": y, "z": z},
                     },
                     exclude=websocket,
@@ -2750,6 +2983,10 @@ class SimpleWsServer:
                 text = (payload.get("message") or "").strip()
                 if not text:
                     await self._send_error(websocket, req_id, action, "Mensaje vacio")
+                    return
+                cmd_res = self._handle_world_chat_command(session, text)
+                if cmd_res is not None:
+                    await self._send_response(websocket, req_id, action, cmd_res)
                     return
                 if len(text) > 240:
                     text = text[:240]
