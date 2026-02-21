@@ -16,6 +16,7 @@ import { CharacterSelectScene } from './libraries/CharacterSelectScene.js';
 import { InventoryUi } from './libraries/InventoryUi.js';
 
 const CLIENT_PROTOCOL_VERSION = '1.1.0';
+const DEFAULT_HOTBAR_SLOTS = 8;
 
 let ws = null;
 let simple3D = new Simple3D();
@@ -100,6 +101,10 @@ let controlsResetBtn = null;
 let collectBarRoot = null;
 let collectBarFill = null;
 let collectBarLabel = null;
+let pointerLockCrosshairEl = null;
+let pointerLockBreakBarEl = null;
+let pointerLockBreakBarFillEl = null;
+let pointerLockHintEl = null;
 let biomeBannerRoot = null;
 let biomeBannerTitle = null;
 let biomeBannerSub = null;
@@ -115,6 +120,7 @@ const CONTROL_BINDINGS_SCHEMA = [
     { key: 'interact_collect', label: 'Interactuar', runtimeKey: 'interact_collect' },
     { key: 'sprint', label: 'Sprint', runtimeKey: 'sprint' },
     { key: 'use_hotbar', label: 'Usar item hotbar' },
+    { key: 'toggle_camera_perspective', label: '1a/3a persona' },
     { key: 'toggle_inventory', label: 'Abrir inventario' },
     { key: 'toggle_chat', label: 'Abrir chat' },
     { key: 'toggle_emotion', label: 'Panel emociones' },
@@ -129,9 +135,10 @@ const DEFAULT_CONTROL_SETTINGS = Object.freeze({
         interact_collect: Object.freeze({ type: 'key', code: 'KeyE', ctrl: false, alt: false }),
         sprint: Object.freeze({ type: 'key', code: 'ShiftLeft', ctrl: false, alt: false }),
         use_hotbar: Object.freeze({ type: 'mouse', button: 0, ctrl: false, alt: false }),
+        toggle_camera_perspective: Object.freeze({ type: 'key', code: 'KeyV', ctrl: false, alt: false }),
         toggle_inventory: Object.freeze({ type: 'key', code: 'KeyI', ctrl: false, alt: false }),
         toggle_chat: Object.freeze({ type: 'key', code: 'KeyC', ctrl: false, alt: false }),
-        toggle_emotion: Object.freeze({ type: 'key', code: 'KeyV', ctrl: false, alt: false }),
+        toggle_emotion: Object.freeze({ type: 'key', code: 'KeyB', ctrl: false, alt: false }),
         open_controls: Object.freeze({ type: 'key', code: 'KeyK', ctrl: false, alt: false }),
     }),
     camera_sensitivity: 1.0,
@@ -667,7 +674,7 @@ async function useActionSlot(index) {
     if (clientState !== 'IN_WORLD') return;
     if (inventoryUi?.isOpen?.()) return;
     const idx = Number(index);
-    const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || 4);
+    const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || DEFAULT_HOTBAR_SLOTS);
     if (!Number.isFinite(idx) || idx < 0 || idx >= hotbarSlots) return;
     const s = inventoryUi?.getSlotData?.(idx) || null;
     if (!s.item_code || (Number(s.quantity) || 0) <= 0) return;
@@ -705,11 +712,27 @@ async function useActionSlot(index) {
 }
 
 function useSelectedHotbarSlot() {
-    const hotbarSlots = Math.max(1, Number(inventoryUi?.getHotbarSlots?.() || 4));
+    const hotbarSlots = Math.max(1, Number(inventoryUi?.getHotbarSlots?.() || DEFAULT_HOTBAR_SLOTS));
     let idx = Number(inventoryUi?.getSelectedSlotIndex?.());
     if (!Number.isFinite(idx) || idx < 0 || idx >= hotbarSlots) idx = 0;
     inventoryUi?.setSelectedHotbarSlot?.(idx, { wrap: false });
     useActionSlot(idx);
+}
+
+function adjustCameraDistanceByWheel(deltaY) {
+    if (!controlSettings) controlSettings = cloneDefaultControlSettings();
+    const dy = Number(deltaY);
+    if (!Number.isFinite(dy) || Math.abs(dy) < 0.01) return false;
+    const step = dy > 0 ? 0.4 : -0.4;
+    const cur = Number(controlSettings.camera_distance ?? 7.8);
+    const next = Math.max(3.2, Math.min(15.0, (Number.isFinite(cur) ? cur : 7.8) + step));
+    if (Math.abs(next - cur) < 0.0001) return false;
+    controlSettings.camera_distance = next;
+    applyControlSettingsToRuntime();
+    saveControlSettings();
+    if (controlsCameraDistanceInput) controlsCameraDistanceInput.value = next.toFixed(1);
+    if (controlsCameraDistanceValue) controlsCameraDistanceValue.textContent = next.toFixed(1);
+    return true;
 }
 
 function setMoveDirectionState(direction, active) {
@@ -756,18 +779,31 @@ function setMoveDirectionFromVector(dx, dy) {
 }
 
 function isMovePadBlockedTarget(target) {
-    if (!target) return false;
-    if (target.closest('input, textarea, button, select, a, label, [data-uiid]')) return true;
-    if (actionBarRoot?.contains(target)) return true;
-    if (chatRoot?.contains(target)) return true;
-    if (chatToggleBtn?.contains(target)) return true;
-    if (emotionToggleBtn?.contains(target)) return true;
-    if (emotionPanel?.contains(target)) return true;
-    if (controlsToggleBtn?.contains(target)) return true;
-    if (controlsPanel?.contains(target)) return true;
-    if (inventoryUi?.contains?.(target)) return true;
-    if (collectBarRoot?.contains(target)) return true;
-    if (worldPanel?.el?.contains && worldPanel.el.contains(target)) return true;
+    const el = target?.nodeType === 1 ? target : target?.parentElement;
+    if (!el || !el.closest) return false;
+    if (el.closest('input, textarea, button, select, a, label, [contenteditable="true"], [data-uiid], [data-world-ui="1"]')) return true;
+    if (actionBarRoot?.contains(el)) return true;
+    if (chatRoot?.contains(el)) return true;
+    if (chatToggleBtn?.contains(el)) return true;
+    if (emotionToggleBtn?.contains(el)) return true;
+    if (emotionPanel?.contains(el)) return true;
+    if (controlsToggleBtn?.contains(el)) return true;
+    if (controlsPanel?.contains(el)) return true;
+    if (inventoryUi?.contains?.(el)) return true;
+    if (collectBarRoot?.contains(el)) return true;
+    if (worldPanel?.el?.contains && worldPanel.el.contains(el)) return true;
+    return false;
+}
+
+function isMovePadBlockedEvent(ev) {
+    if (!ev) return false;
+    if (isMovePadBlockedTarget(ev.target)) return true;
+    const path = ev.composedPath ? ev.composedPath() : [];
+    if (Array.isArray(path)) {
+        for (const n of path) {
+            if (isMovePadBlockedTarget(n)) return true;
+        }
+    }
     return false;
 }
 
@@ -788,7 +824,7 @@ function tryCollectDecorFromPointer(ev) {
     if (isControlMouseEvent(ev, 'use_hotbar')) return;
     if (ev.altKey) return;
     if (performance.now() < movePadSuppressClickUntil) return;
-    if (isMovePadBlockedTarget(ev.target)) return;
+    if (isMovePadBlockedEvent(ev)) return;
     const x = Number(ev.clientX);
     const y = Number(ev.clientY);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
@@ -1136,7 +1172,7 @@ function applyWorldHudLayout() {
     const mobile = isMobileUi();
     const slotPx = hotbarSlotSizePx();
     mountUtilityButtons();
-    actionBarRoot.style.gridTemplateColumns = `repeat(4, ${slotPx}px)`;
+    actionBarRoot.style.gridTemplateColumns = `repeat(${Math.max(1, DEFAULT_HOTBAR_SLOTS)}, ${slotPx}px)`;
     actionBarRoot.style.width = 'fit-content';
     actionBarRoot.style.bottom = mobile ? '10px' : '14px';
     actionBarRoot.style.padding = mobile ? '5px' : '6px';
@@ -1261,12 +1297,12 @@ function createActionBarUi(host) {
     bar.style.backdropFilter = 'blur(2px)';
     bar.style.display = 'grid';
     const slotPx = hotbarSlotSizePx();
-    bar.style.gridTemplateColumns = `repeat(4, ${slotPx}px)`;
+    bar.style.gridTemplateColumns = `repeat(${Math.max(1, DEFAULT_HOTBAR_SLOTS)}, ${slotPx}px)`;
     bar.style.gap = '4px';
     bar.style.width = 'fit-content';
     actionSlots = [];
     actionSlotLabels = [];
-    for (let idx = 0; idx < 4; idx += 1) {
+    for (let idx = 0; idx < Math.max(1, DEFAULT_HOTBAR_SLOTS); idx += 1) {
         const slot = document.createElement('button');
         slot.type = 'button';
         slot.dataset.slotIndex = `${idx}`;
@@ -1394,6 +1430,141 @@ function createMovePadUi(host) {
     host.appendChild(root);
 }
 
+function createPointerLockCrosshairUi(host) {
+    if (pointerLockCrosshairEl) return;
+    const el = document.createElement('div');
+    pointerLockCrosshairEl = el;
+    el.style.position = 'fixed';
+    el.style.left = '50%';
+    el.style.top = '50%';
+    el.style.transform = 'translate(-50%, -50%)';
+    el.style.zIndex = '41';
+    el.style.pointerEvents = 'none';
+    el.style.userSelect = 'none';
+    el.style.width = '19px';
+    el.style.height = '19px';
+    el.style.opacity = '0.85';
+    el.style.display = 'none';
+
+    const mk = (x, y, w, h) => {
+        const arm = document.createElement('div');
+        arm.style.position = 'absolute';
+        arm.style.left = `${x}px`;
+        arm.style.top = `${y}px`;
+        arm.style.width = `${w}px`;
+        arm.style.height = `${h}px`;
+        arm.style.background = '#ffffff';
+        arm.style.boxShadow = '0 0 0 1px rgba(0,0,0,0.92)';
+        return arm;
+    };
+    // Crosshair estilo voxel: 4 brazos finos con hueco en el centro.
+    el.appendChild(mk(9, 1, 1, 5));   // arriba
+    el.appendChild(mk(9, 13, 1, 5));  // abajo
+    el.appendChild(mk(1, 9, 5, 1));   // izquierda
+    el.appendChild(mk(13, 9, 5, 1));  // derecha
+
+    const bar = document.createElement('div');
+    pointerLockBreakBarEl = bar;
+    bar.style.position = 'absolute';
+    bar.style.left = '50%';
+    bar.style.top = '22px';
+    bar.style.transform = 'translateX(-50%)';
+    bar.style.width = '22px';
+    bar.style.height = '3px';
+    bar.style.border = '1px solid rgba(0,0,0,0.92)';
+    bar.style.background = 'rgba(0,0,0,0.45)';
+    bar.style.borderRadius = '2px';
+    bar.style.overflow = 'hidden';
+    bar.style.display = 'none';
+
+    const fill = document.createElement('div');
+    pointerLockBreakBarFillEl = fill;
+    fill.style.width = '0%';
+    fill.style.height = '100%';
+    fill.style.background = '#f7f7f7';
+    fill.style.boxShadow = '0 0 1px rgba(0,0,0,0.45) inset';
+    bar.appendChild(fill);
+    el.appendChild(bar);
+    host.appendChild(el);
+}
+
+function createPointerLockHintUi(host) {
+    if (pointerLockHintEl) return;
+    const el = document.createElement('div');
+    pointerLockHintEl = el;
+    el.textContent = 'Pulsa mouse derecho para controlar al personaje';
+    el.style.position = 'fixed';
+    el.style.left = '50%';
+    el.style.top = '16px';
+    el.style.transform = 'translateX(-50%)';
+    el.style.zIndex = '47';
+    el.style.pointerEvents = 'none';
+    el.style.userSelect = 'none';
+    el.style.padding = '8px 12px';
+    el.style.borderRadius = '10px';
+    el.style.border = '1px solid rgba(185, 211, 236, 0.45)';
+    el.style.background = 'rgba(8, 18, 31, 0.84)';
+    el.style.boxShadow = '0 6px 18px rgba(0,0,0,0.35)';
+    el.style.backdropFilter = 'blur(2px)';
+    el.style.color = '#e8f3ff';
+    el.style.fontFamily = 'Segoe UI, sans-serif';
+    el.style.fontSize = '13px';
+    el.style.fontWeight = '700';
+    el.style.letterSpacing = '0.1px';
+    el.style.display = 'none';
+    host.appendChild(el);
+}
+
+function updatePointerLockHintPosition() {
+    if (!pointerLockHintEl) return;
+    let topPx = isMobileUi() ? 12 : 16;
+    const biomeVisible = !!(biomeBannerRoot && biomeBannerRoot.style.display !== 'none');
+    if (biomeVisible && biomeBannerRoot) {
+        const rect = biomeBannerRoot.getBoundingClientRect();
+        const nextTop = Math.round((rect.bottom || 0) + 8);
+        if (Number.isFinite(nextTop) && nextTop > topPx) topPx = nextTop;
+    }
+    pointerLockHintEl.style.top = `${topPx}px`;
+}
+
+function updatePointerLockCrosshairVisibility() {
+    if (!pointerLockCrosshairEl) return;
+    const inWorld = (clientState === 'IN_WORLD') && !!worldHudVisible;
+    const lockedOnWorld = !!(
+        simple3D?.worldCanvas &&
+        document.pointerLockElement &&
+        document.pointerLockElement === simple3D.worldCanvas
+    );
+    pointerLockCrosshairEl.style.display = (inWorld && lockedOnWorld) ? '' : 'none';
+    if (pointerLockHintEl) {
+        updatePointerLockHintPosition();
+        pointerLockHintEl.style.display = (inWorld && !lockedOnWorld) ? '' : 'none';
+    }
+    if (!inWorld || !lockedOnWorld) {
+        if (pointerLockBreakBarEl) pointerLockBreakBarEl.style.display = 'none';
+        if (pointerLockBreakBarFillEl) pointerLockBreakBarFillEl.style.width = '0%';
+    }
+}
+
+function updatePointerLockBreakProgressUi() {
+    if (!pointerLockCrosshairEl || !pointerLockBreakBarEl || !pointerLockBreakBarFillEl) return;
+    const crosshairVisible = pointerLockCrosshairEl.style.display !== 'none';
+    if (!crosshairVisible) {
+        pointerLockBreakBarEl.style.display = 'none';
+        pointerLockBreakBarFillEl.style.width = '0%';
+        return;
+    }
+    const st = simple3D?.getBreakProgressState?.() || { active: false, progress: 0 };
+    if (!st.active) {
+        pointerLockBreakBarEl.style.display = 'none';
+        pointerLockBreakBarFillEl.style.width = '0%';
+        return;
+    }
+    const p = Math.max(0, Math.min(1, Number(st.progress) || 0));
+    pointerLockBreakBarEl.style.display = '';
+    pointerLockBreakBarFillEl.style.width = `${Math.round(p * 100)}%`;
+}
+
 function createDeathUi(host) {
     if (deathOverlayRoot) return;
     const panel = document.createElement('div');
@@ -1504,6 +1675,7 @@ function createEmotionUi(host) {
     emotionToggleBtn.style.webkitUserSelect = 'none';
     emotionToggleBtn.style.webkitTouchCallout = 'none';
     emotionToggleBtn.style.touchAction = 'manipulation';
+    emotionToggleBtn.dataset.worldUi = '1';
     emotionToggleBtn.addEventListener('click', (ev) => {
         ev.stopPropagation();
         toggleEmotionPanel();
@@ -2003,6 +2175,7 @@ function showBiomeBanner(biomeKeyRaw) {
         if (!biomeBannerRoot) return;
         biomeBannerRoot.style.opacity = '1';
         biomeBannerRoot.style.transform = 'translate(-50%, 0)';
+        updatePointerLockHintPosition();
     });
 
     if (biomeBannerHideTimer) clearTimeout(biomeBannerHideTimer);
@@ -2013,6 +2186,7 @@ function showBiomeBanner(biomeKeyRaw) {
         setTimeout(() => {
             if (!biomeBannerRoot) return;
             biomeBannerRoot.style.display = 'none';
+            updatePointerLockHintPosition();
         }, 210);
         biomeBannerHideTimer = null;
     }, 5000);
@@ -2176,6 +2350,7 @@ function createChatUi(host) {
     chatToggleBtn.style.webkitTouchCallout = 'none';
     chatToggleBtn.style.touchAction = 'manipulation';
     chatToggleBtn.style.display = 'none';
+    chatToggleBtn.dataset.worldUi = '1';
     chatToggleBtn.addEventListener('click', () => {
         chatOpen = !chatOpen;
         updateChatVisibility();
@@ -2200,6 +2375,8 @@ function ensureWorldHud() {
     createBiomeBannerUi(host);
     createInventoryUi(host);
     createMovePadUi(host);
+    createPointerLockCrosshairUi(host);
+    createPointerLockHintUi(host);
     createDeathUi(host);
 
     window.addEventListener('resize', () => {
@@ -2228,6 +2405,11 @@ function ensureWorldHud() {
             updateChatVisibility();
             return;
         }
+        if (isControlKeyEvent(ev, 'toggle_camera_perspective')) {
+            ev.preventDefault();
+            simple3D.toggleCameraPerspective?.();
+            return;
+        }
         if (isControlKeyEvent(ev, 'toggle_emotion')) {
             ev.preventDefault();
             toggleEmotionPanel();
@@ -2238,9 +2420,9 @@ function ensureWorldHud() {
             useSelectedHotbarSlot();
             return;
         }
-        if (!/^[1-4]$/.test(ev.key)) return;
+        if (!/^[1-8]$/.test(ev.key)) return;
         const idx = Number(ev.key) - 1;
-        const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || 4);
+        const hotbarSlots = Number(inventoryUi?.getHotbarSlots?.() || DEFAULT_HOTBAR_SLOTS);
         if (idx >= 0 && idx < hotbarSlots) {
             inventoryUi?.setSelectedHotbarSlot?.(idx, { wrap: false });
             useActionSlot(idx);
@@ -2253,12 +2435,27 @@ function ensureWorldHud() {
         const dy = Number(ev.deltaY);
         if (!Number.isFinite(dy) || Math.abs(dy) < 0.01) return;
         ev.preventDefault();
+        if (ev.ctrlKey) {
+            adjustCameraDistanceByWheel(dy);
+            return;
+        }
         const step = dy > 0 ? 1 : -1;
         inventoryUi.cycleHotbarSelection?.(step);
     }, { passive: false });
     window.addEventListener('mousedown', (ev) => {
         if (clientState !== 'IN_WORLD') return;
-        if (isMovePadBlockedTarget(ev.target)) return;
+        if (isMovePadBlockedEvent(ev)) return;
+        if (
+            ev.button === 2 &&
+            simple3D?.desktopThirdPersonActive &&
+            simple3D?.worldCanvas &&
+            document.pointerLockElement !== simple3D.worldCanvas
+        ) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            try { simple3D.worldCanvas.requestPointerLock?.(); } catch (_) { }
+            return;
+        }
         if (isControlMouseEvent(ev, 'use_hotbar')) {
             ev.preventDefault();
             ev.stopPropagation();
@@ -2302,6 +2499,7 @@ function ensureWorldHud() {
     window.addEventListener('click', suppressGhostClickFromMovePad, true);
     window.addEventListener('contextmenu', suppressLongPressUiGestures, true);
     window.addEventListener('selectstart', suppressLongPressUiGestures, true);
+    document.addEventListener('pointerlockchange', updatePointerLockCrosshairVisibility);
 
     worldHudReady = true;
 }
@@ -2338,6 +2536,7 @@ function setWorldHudVisible(visible) {
         closeEmotionPanel();
         closeControlsPanel();
     }
+    updatePointerLockCrosshairVisibility();
 }
 
 function setWorldUiMode(inWorld) {
@@ -2414,6 +2613,7 @@ function showWorldPanel(payload) {
     if (rootLayout && rootLayout.refresh) rootLayout.refresh();
     addChatLine(`Entraste a ${payload.world.world_name}.`, 'system');
     setClientState('IN_WORLD', `En mundo: ${payload.world.world_name}`);
+    updatePointerLockCrosshairVisibility();
 }
 
 async function ensureConnected(url) {
@@ -3486,6 +3686,7 @@ export function main(delta) {
     if (clientState !== 'IN_WORLD') return;
     const dt = (Number(delta) || 0) / 60;
     simple3D.update(dt);
+    updatePointerLockBreakProgressUi();
     updateCollectUi();
     const biomeChange = simple3D.pullPendingBiomeChange?.();
     if (biomeChange?.biome) {

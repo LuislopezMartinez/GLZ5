@@ -19,6 +19,7 @@ def build_fixed_world_terrain(config: dict) -> tuple[dict, dict]:
     mountain_amplitude = _clamp_float(config.get("mountain_amplitude"), 20.0, 4.0, 40.0)
     mountain_noise_scale = _clamp_float(config.get("mountain_noise_scale"), 0.02, 0.003, 0.12)
     fall_death_threshold_voxels = _clamp_float(config.get("fall_death_threshold_voxels"), 10.0, 1.0, 120.0)
+    night_min_light = _clamp_float(config.get("night_min_light"), 0.04, 0.0, 0.30)
     terrain_cells: dict[str, str] = {}
 
     terrain_config = {
@@ -47,6 +48,7 @@ def build_fixed_world_terrain(config: dict) -> tuple[dict, dict]:
         "fall_death_enabled": 1 if int(config.get("fall_death_enabled") or 1) == 1 else 0,
         "void_death_enabled": 1 if int(config.get("void_death_enabled") or 1) == 1 else 0,
         "fall_death_threshold_voxels": fall_death_threshold_voxels,
+        "night_min_light": night_min_light,
         "island_count": 4,
         "biome_mode": "Quadrants4",
         "npc_slots": max(0, min(20, int(config.get("npc_slots") or 4))),

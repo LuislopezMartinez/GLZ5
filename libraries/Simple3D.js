@@ -73,6 +73,10 @@ export class Simple3D {
         this.damageFxEntries = [];
         this.localDamageFlash = 0;
         this.localDamageOverlayEl = null;
+        this.voxelBreakFxGroup = null;
+        this.voxelBreakFxEntries = [];
+        this.voxelBreakFxTexture = null;
+        this.voxelBreakFxMax = 320;
         this.vegetationConfig = null;
         this.vegetationSlots = [];
         this.vegetationSlotByKey = new Map();
@@ -127,10 +131,13 @@ export class Simple3D {
         this.voxelPointerClientY = null;
         this.voxelPointerBlockedByUi = false;
         this.voxelPointerMaxDistance = 64.0;
+        this.voxelInteractReach = 4.0;
         this.voxelHoverHit = null;
         this.voxelHoverBlock = null;
         this.voxelPlaceBlock = null;
         this.voxelHighlightMesh = null;
+        this.voxelHighlightFaceKey = '';
+        this.voxelHighlightFaceGeometries = null;
         this.voxelPlacePreviewMesh = null;
         this.voxelPlaceBlockId = 2;
         this.voxelSkylightEnabled = true;
@@ -141,6 +148,10 @@ export class Simple3D {
         this.voxelAoMin = 0.52;
         this.voxelAoStrength = 0.78;
         this.pendingVoxelActions = [];
+        this.breakActionHeld = false;
+        this.breakBaseDurationSec = 1.0;
+        this.breakProgressSec = 0;
+        this.breakTargetKey = '';
         this.worldVoxelOverrides = new Map();
         this.worldVoxelOverridesByChunk = new Map();
 
@@ -226,6 +237,8 @@ export class Simple3D {
         this.cameraCollisionMinDistance = 1.05;
         this.cameraCollisionGroundClearance = 0.34;
         this.cameraCollisionRaycaster = null;
+        this.cameraViewMode = 'third_person';
+        this.cameraFirstPersonEyeOffset = 0.02;
         this.mouseLookActive = false;
         this.pointerLocked = false;
         this.controlKeybinds = {
@@ -403,6 +416,10 @@ export class Simple3D {
         this.voxelPlaceBlock = null;
         this.voxelPointerBlockedByUi = false;
         this.pendingVoxelActions = [];
+        this.breakActionHeld = false;
+        this.breakProgressSec = 0;
+        this.breakTargetKey = '';
+        this.voxelBreakFxEntries = [];
         this.worldVoxelOverrides.clear();
         this.worldVoxelOverridesByChunk.clear();
         const incomingVoxelOverrides = Array.isArray(voxelOverrides) ? voxelOverrides : [];
@@ -454,8 +471,10 @@ export class Simple3D {
         this.updateWorldLootPickup();
         this.updateVegetationInteraction();
         this.updateVoxelPointerSelection();
+        this.updateContinuousBreakAction(safeDt);
         this.updateRemotePlayers(safeDt);
         this.updateDamageEffects(safeDt);
+        this.updateVoxelBreakEffects(safeDt);
         this.updateLights();
         this.renderer.render(this.scene, this.camera);
     }
@@ -575,6 +594,10 @@ export class Simple3D {
         this.damageFxGroup = null;
         this.damageFxEntries = [];
         this.localDamageFlash = 0;
+        this.voxelBreakFxGroup = null;
+        this.voxelBreakFxEntries = [];
+        try { this.voxelBreakFxTexture?.dispose?.(); } catch (_) { }
+        this.voxelBreakFxTexture = null;
         this._removeLocalDamageOverlay();
         this.vegetationConfig = null;
         this.vegetationSlots = [];
@@ -623,6 +646,8 @@ export class Simple3D {
         this.voxelHoverBlock = null;
         this.voxelPlaceBlock = null;
         this.voxelHighlightMesh = null;
+        this.voxelHighlightFaceKey = '';
+        this.voxelHighlightFaceGeometries = null;
         this.voxelPlacePreviewMesh = null;
         this.pendingVoxelActions = [];
         this.worldVoxelOverrides.clear();
@@ -796,6 +821,9 @@ export class Simple3D {
         this.damageFxGroup = new THREE.Group();
         this.damageFxGroup.userData.tag = 'damage_fx';
         this.scene.add(this.damageFxGroup);
+        this.voxelBreakFxGroup = new THREE.Group();
+        this.voxelBreakFxGroup.userData.tag = 'voxel_break_fx';
+        this.scene.add(this.voxelBreakFxGroup);
         this._ensureLocalDamageOverlay();
         this.vegetationInteractHint = null;
         this._ensureVoxelCursorVisuals(THREE);
@@ -2705,17 +2733,79 @@ export class Simple3D {
         return this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
     }
 
+    _getBreakActionBinding() {
+        return this._normalizeControlBinding(
+            this.controlKeybinds?.break_block,
+            { type: 'key', code: 'KeyQ', ctrl: false, alt: false }
+        );
+    }
+
+    _setBreakActionHeld(active) {
+        const next = !!active;
+        if (next === this.breakActionHeld) return;
+        this.breakActionHeld = next;
+        if (!next) {
+            this.breakProgressSec = 0;
+            this.breakTargetKey = '';
+        }
+    }
+
+    updateContinuousBreakAction(dt = 0.016) {
+        if (!this.useVoxelTerrainMeshing || !this.breakActionHeld) {
+            this.breakProgressSec = 0;
+            this.breakTargetKey = '';
+            return;
+        }
+        const b = this.voxelHoverBlock;
+        if (!b) {
+            this.breakProgressSec = 0;
+            this.breakTargetKey = '';
+            return;
+        }
+        const targetKey = `${Number(b.x) | 0},${Number(b.y) | 0},${Number(b.z) | 0}`;
+        if (this.breakTargetKey !== targetKey) {
+            this.breakTargetKey = targetKey;
+            this.breakProgressSec = 0;
+        }
+        const dur = this.getCurrentBreakDurationSec();
+        const step = Math.max(0, Math.min(0.2, Number(dt) || 0));
+        this.breakProgressSec = Math.min(dur, this.breakProgressSec + step);
+        if (this.breakProgressSec < dur) return;
+        const broke = this.requestBreakHoveredVoxel();
+        this.breakProgressSec = 0;
+        this.breakTargetKey = '';
+        if (!broke) return;
+    }
+
+    getCurrentBreakDurationSec() {
+        // Base global; luego se reducira por herramienta/item equipado.
+        return Math.max(0.05, Number(this.breakBaseDurationSec) || 1.0);
+    }
+
+    getBreakProgressState() {
+        const dur = this.getCurrentBreakDurationSec();
+        const hasTarget = !!this.voxelHoverBlock;
+        const active = !!(this.breakActionHeld && hasTarget && dur > 0);
+        if (!active) return { active: false, progress: 0 };
+        const p = Math.max(0, Math.min(1, (Number(this.breakProgressSec) || 0) / dur));
+        return { active: true, progress: p };
+    }
+
     onKeyDown(ev) {
-        if (ev.code === 'Tab') {
-            ev.preventDefault();
-            this.toggleMouseLookLock();
+        if (ev.code === 'Escape') {
+            if (document.pointerLockElement === this.worldCanvas) {
+                ev.preventDefault();
+                if (document.exitPointerLock) {
+                    try { document.exitPointerLock(); } catch (_) { }
+                }
+            }
             return;
         }
         const tag = (ev?.target?.tagName || '').toLowerCase();
         if (tag === 'input' || tag === 'textarea') return;
         if (ev.code.startsWith('Arrow') || this._isActionKey(ev, 'jump')) ev.preventDefault();
-        if (this._isActionKey(ev, 'break_block') && !ev.repeat) {
-            this.requestBreakHoveredVoxel();
+        if (this._isActionKey(ev, 'break_block')) {
+            this._setBreakActionHeld(true);
             return;
         }
         if (this._isActionKey(ev, 'place_block') && !ev.repeat) {
@@ -2728,6 +2818,7 @@ export class Simple3D {
     }
 
     onKeyUp(ev) {
+        if (this._isActionKey(ev, 'break_block')) this._setBreakActionHeld(false);
         this.keys.delete(ev.code);
         if (this._isActionKey(ev, 'jump')) this.jumpQueued = false;
     }
@@ -2746,14 +2837,31 @@ export class Simple3D {
     onMouseDown(ev) {
         if (!this.initialized) return;
         if (ev.button !== 0 && ev.button !== 1 && ev.button !== 2 && ev.button !== 3 && ev.button !== 4) return;
-        this.voxelPointerClientX = Number(ev.clientX) || 0;
-        this.voxelPointerClientY = Number(ev.clientY) || 0;
-        this.voxelPointerBlockedByUi = this.isUiInteractiveTarget(ev.target);
-        if (this.isUiInteractiveTarget(ev.target)) return;
+        if (
+            ev.button === 2 &&
+            this.desktopThirdPersonActive &&
+            this.worldCanvas &&
+            document.pointerLockElement !== this.worldCanvas
+        ) {
+            ev.preventDefault();
+            if (this.worldCanvas.requestPointerLock) {
+                try { this.worldCanvas.requestPointerLock(); } catch (_) { }
+            }
+            return;
+        }
+        const pointerLockedOnWorld = this.pointerLocked && (document.pointerLockElement === this.worldCanvas);
+        if (pointerLockedOnWorld) {
+            this._setVoxelPointerToViewportCenter();
+        } else {
+            this.voxelPointerClientX = Number(ev.clientX) || 0;
+            this.voxelPointerClientY = Number(ev.clientY) || 0;
+            this.voxelPointerBlockedByUi = this.isUiInteractiveTarget(ev.target);
+            if (this.isUiInteractiveTarget(ev.target)) return;
+        }
         this.updateVoxelPointerSelection();
         let consumedByBinding = false;
         if (this.useVoxelTerrainMeshing && this._isActionMouse(ev, 'break_block')) {
-            this.requestBreakHoveredVoxel();
+            this._setBreakActionHeld(true);
             consumedByBinding = true;
         }
         if (this.useVoxelTerrainMeshing && this._isActionMouse(ev, 'place_block')) {
@@ -2782,14 +2890,18 @@ export class Simple3D {
         const hitCollectable = this._pickCollectableDecorKeyFromScreenPoint(Number(ev.clientX) || 0, Number(ev.clientY) || 0);
         if (hitCollectable) return;
         // Rotacion de camara por mouse desactivada aqui.
-        // Solo se activa con TAB (pointer lock toggle).
+        // Entra con click en canvas, sale con ESCAPE.
     }
 
     onMouseMove(ev) {
         if (!this.initialized) return;
-        this.voxelPointerClientX = Number(ev.clientX) || 0;
-        this.voxelPointerClientY = Number(ev.clientY) || 0;
-        this.voxelPointerBlockedByUi = this.isUiInteractiveTarget(ev.target);
+        if (this.pointerLocked && (document.pointerLockElement === this.worldCanvas)) {
+            this._setVoxelPointerToViewportCenter();
+        } else {
+            this.voxelPointerClientX = Number(ev.clientX) || 0;
+            this.voxelPointerClientY = Number(ev.clientY) || 0;
+            this.voxelPointerBlockedByUi = this.isUiInteractiveTarget(ev.target);
+        }
         if (!this.desktopThirdPersonActive) return;
         if (!this.mouseLookActive) return;
         if (!(this.pointerLocked && (document.pointerLockElement === this.worldCanvas))) return;
@@ -2806,6 +2918,7 @@ export class Simple3D {
 
     onMouseUp(ev) {
         if (!this.desktopThirdPersonActive) return;
+        if (this._isActionMouse(ev, 'break_block')) this._setBreakActionHeld(false);
     }
 
     onWheel(ev) {
@@ -2826,6 +2939,14 @@ export class Simple3D {
         this.pointerLocked = (document.pointerLockElement === this.worldCanvas);
         this.mouseLookActive = this.pointerLocked;
         if (this.worldCanvas) this.worldCanvas.style.cursor = this.pointerLocked ? 'none' : '';
+        if (!this.pointerLocked) {
+            const breakBinding = this._getBreakActionBinding();
+            if (breakBinding.type === 'mouse') this._setBreakActionHeld(false);
+        }
+        if (this.pointerLocked) {
+            this._setVoxelPointerToViewportCenter();
+            this.updateVoxelPointerSelection();
+        }
     }
 
     onPointerLockError() {
@@ -2834,22 +2955,12 @@ export class Simple3D {
         if (this.worldCanvas) this.worldCanvas.style.cursor = '';
     }
 
-    toggleMouseLookLock() {
-        if (!this.initialized || !this.desktopThirdPersonActive || !this.worldCanvas) return;
-        const lockEl = this.worldCanvas;
-        if (document.pointerLockElement === lockEl) {
-            if (document.exitPointerLock) {
-                try {
-                    document.exitPointerLock();
-                } catch (_) { }
-            }
-            return;
-        }
-        if (lockEl.requestPointerLock) {
-            try {
-                lockEl.requestPointerLock();
-            } catch (_) { }
-        }
+    _setVoxelPointerToViewportCenter() {
+        const w = Math.max(0, Number(window.innerWidth) || 0);
+        const h = Math.max(0, Number(window.innerHeight) || 0);
+        this.voxelPointerClientX = Math.round(w * 0.5);
+        this.voxelPointerClientY = Math.round(h * 0.5);
+        this.voxelPointerBlockedByUi = false;
     }
 
     _isSolidVoxelAtPoint(x, y, z) {
@@ -3126,6 +3237,21 @@ export class Simple3D {
         const targetX = actor.x;
         const targetY = actor.y + this.cameraTargetHeight;
         const targetZ = actor.z;
+        if (this.cameraViewMode === 'first_person') {
+            const eyeY = targetY + this.cameraFirstPersonEyeOffset;
+            const fpTargetX = targetX + (Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch));
+            // Igualar sentido vertical con 3a persona (pitch positivo = mirar hacia abajo).
+            const fpTargetY = eyeY - Math.sin(this.cameraPitch);
+            const fpTargetZ = targetZ + (Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch));
+            const followLerpFp = Math.min(1, Math.max(22, this.cameraFollowLerp * 2.2) * safeDt);
+            this.camera.position.x += (targetX - this.camera.position.x) * followLerpFp;
+            this.camera.position.y += (eyeY - this.camera.position.y) * followLerpFp;
+            this.camera.position.z += (targetZ - this.camera.position.z) * followLerpFp;
+            this.camera.lookAt(fpTargetX, fpTargetY, fpTargetZ);
+            this._setLocalCharacterRenderVisible(false);
+            return;
+        }
+        this._setLocalCharacterRenderVisible(true);
         const horizDist = this.cameraDistance * Math.cos(this.cameraPitch);
         const camX = targetX - (Math.sin(this.cameraYaw) * horizDist);
         const camZ = targetZ - (Math.cos(this.cameraYaw) * horizDist);
@@ -3136,6 +3262,19 @@ export class Simple3D {
         this.camera.position.y += (safeCam.y - this.camera.position.y) * followLerp;
         this.camera.position.z += (safeCam.z - this.camera.position.z) * followLerp;
         this.camera.lookAt(targetX, targetY, targetZ);
+    }
+
+    _setLocalCharacterRenderVisible(visible) {
+        const v = !!visible;
+        if (this.spawnMarker) this.spawnMarker.visible = v;
+        if (this.localNameTag?.sprite) this.localNameTag.sprite.visible = v;
+    }
+
+    toggleCameraPerspective() {
+        if (!this.initialized || !this.desktopThirdPersonActive) return this.cameraViewMode;
+        this.cameraViewMode = (this.cameraViewMode === 'first_person') ? 'third_person' : 'first_person';
+        this._setLocalCharacterRenderVisible(this.cameraViewMode !== 'first_person');
+        return this.cameraViewMode;
     }
 
     _resolveDesktopCameraCollision(targetX, targetY, targetZ, desiredX, desiredY, desiredZ) {
@@ -3981,6 +4120,132 @@ export class Simple3D {
         }
     }
 
+    _ensureVoxelBreakFxTexture(THREE) {
+        if (this.voxelBreakFxTexture) return this.voxelBreakFxTexture;
+        const canvas = document.createElement('canvas');
+        canvas.width = 32;
+        canvas.height = 32;
+        const ctx = canvas.getContext('2d', { alpha: true });
+        if (!ctx) return null;
+        const g = ctx.createRadialGradient(16, 16, 1, 16, 16, 15);
+        g.addColorStop(0.00, 'rgba(255,255,255,1)');
+        g.addColorStop(0.72, 'rgba(255,255,255,0.85)');
+        g.addColorStop(1.00, 'rgba(255,255,255,0)');
+        ctx.clearRect(0, 0, 32, 32);
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(16, 16, 15, 0, Math.PI * 2);
+        ctx.fill();
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.magFilter = THREE.LinearFilter;
+        tex.minFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        this.voxelBreakFxTexture = tex;
+        return tex;
+    }
+
+    _removeVoxelBreakFxEntryByIndex(idx) {
+        const fx = this.voxelBreakFxEntries[idx];
+        if (fx?.sprite && this.voxelBreakFxGroup) this.voxelBreakFxGroup.remove(fx.sprite);
+        try { fx?.material?.dispose?.(); } catch (_) { }
+        this.voxelBreakFxEntries.splice(idx, 1);
+    }
+
+    spawnVoxelBreakPopAt(x, y, z, blockId = 1) {
+        const THREE = THREE_MODULE;
+        if (!THREE || !this.voxelBreakFxGroup || !this.scene) return;
+        const tex = this._ensureVoxelBreakFxTexture(THREE);
+        if (!tex) return;
+        const bx = Number(x) || 0;
+        const by = Number(y) || 0;
+        const bz = Number(z) || 0;
+        const baseColor = this._voxelTintedColorForBlock(
+            THREE,
+            blockId,
+            bx,
+            by,
+            bz,
+            null,
+            this.sampleBiomeAt?.(bx, bz) || 'grass'
+        );
+        const count = 12;
+        for (let i = 0; i < count; i += 1) {
+            while (this.voxelBreakFxEntries.length >= this.voxelBreakFxMax) {
+                this._removeVoxelBreakFxEntryByIndex(0);
+            }
+            const jitter = ((Math.random() * 2) - 1) * 0.18;
+            const jz = ((Math.random() * 2) - 1) * 0.18;
+            const jy = ((Math.random() * 2) - 1) * 0.14;
+            const dir = new THREE.Vector3(
+                ((Math.random() * 2) - 1),
+                (Math.random() * 1.0) + 0.25,
+                ((Math.random() * 2) - 1)
+            ).normalize();
+            const speed = 1.4 + (Math.random() * 1.9);
+            const mat = new THREE.SpriteMaterial({
+                map: tex,
+                color: baseColor.clone().multiplyScalar(0.85 + (Math.random() * 0.35)),
+                transparent: true,
+                depthWrite: false,
+                depthTest: true,
+                opacity: 0.95,
+            });
+            const sprite = new THREE.Sprite(mat);
+            const s = 0.08 + (Math.random() * 0.08);
+            sprite.position.set(bx + jitter, by + jy, bz + jz);
+            sprite.scale.set(s, s, 1);
+            sprite.renderOrder = 50;
+            this.voxelBreakFxGroup.add(sprite);
+            this.voxelBreakFxEntries.push({
+                sprite,
+                material: mat,
+                age: 0,
+                life: 0.22 + (Math.random() * 0.12),
+                velX: dir.x * speed,
+                velY: dir.y * speed,
+                velZ: dir.z * speed,
+                gravity: 5.8 + (Math.random() * 1.8),
+                drag: 2.8,
+                baseScale: s,
+            });
+        }
+    }
+
+    updateVoxelBreakEffects(dt = 0.016) {
+        const safeDt = Math.max(0, Math.min(0.08, Number(dt) || 0));
+        if (!Array.isArray(this.voxelBreakFxEntries) || this.voxelBreakFxEntries.length <= 0) return;
+        const remove = [];
+        for (let i = 0; i < this.voxelBreakFxEntries.length; i += 1) {
+            const fx = this.voxelBreakFxEntries[i];
+            const sp = fx?.sprite;
+            const mat = fx?.material;
+            if (!sp || !mat) {
+                remove.push(i);
+                continue;
+            }
+            fx.age += safeDt;
+            const life = Math.max(0.05, Number(fx.life) || 0.26);
+            const t = Math.max(0, Math.min(1, fx.age / life));
+            fx.velY -= (Number(fx.gravity) || 6.0) * safeDt;
+            const dragMul = Math.max(0, 1 - ((Number(fx.drag) || 2.8) * safeDt));
+            fx.velX *= dragMul;
+            fx.velY *= dragMul;
+            fx.velZ *= dragMul;
+            sp.position.x += (Number(fx.velX) || 0) * safeDt;
+            sp.position.y += (Number(fx.velY) || 0) * safeDt;
+            sp.position.z += (Number(fx.velZ) || 0) * safeDt;
+            const pulse = 1 + ((1 - t) * 0.2);
+            const s = Math.max(0.01, (Number(fx.baseScale) || 0.1) * pulse);
+            sp.scale.set(s, s, 1);
+            mat.opacity = Math.max(0, 1 - t);
+            if (t >= 1) remove.push(i);
+        }
+        for (let i = remove.length - 1; i >= 0; i -= 1) {
+            this._removeVoxelBreakFxEntryByIndex(remove[i]);
+        }
+    }
+
     setLocalHealth(hp, maxHp = 1000) {
         const prevHp = Math.max(0, Number(this.localHealth?.hp) || 0);
         this.localHealth.maxHp = Math.max(1, Number(maxHp) || 1000);
@@ -4702,6 +4967,7 @@ export class Simple3D {
         const sunY = center.y + this.sunOrbitHeightBase + (orbitSin * this.sunOrbitHeightAmplitude);
         const daylightRaw = Math.max(0, Math.min(1, (orbitSin + 0.12) / 1.12));
         const daylight = Math.pow(daylightRaw, 1.35);
+        const nightMinLight = Math.max(0.0, Math.min(0.30, Number(this.params?.nightMinLight ?? 0.04)));
 
         this.sunMesh.position.set(sunX, sunY, sunZ);
         if (this.sunMesh.material) {
@@ -4709,10 +4975,10 @@ export class Simple3D {
             this.sunMesh.material.needsUpdate = true;
         }
         this.dirLight.position.set(sunX, sunY, sunZ);
-        this.dirLight.intensity = 0.01 + (1.28 * daylight);
-        if (this.ambientLight) this.ambientLight.intensity = 0.04 + (0.58 * daylight);
-        if (this.fillLight) this.fillLight.intensity = 0.02 + (0.34 * daylight);
-        if (this.hemiLight) this.hemiLight.intensity = 0.03 + (0.49 * daylight);
+        this.dirLight.intensity = (nightMinLight * 0.25) + (1.28 * daylight);
+        if (this.ambientLight) this.ambientLight.intensity = nightMinLight + (0.58 * daylight);
+        if (this.fillLight) this.fillLight.intensity = (nightMinLight * 0.50) + (0.34 * daylight);
+        if (this.hemiLight) this.hemiLight.intensity = (nightMinLight * 0.75) + (0.49 * daylight);
         if (this.dirLightTarget) {
             this.dirLightTarget.position.set(center.x, center.y, center.z);
             this.dirLightTarget.updateMatrixWorld();
@@ -4793,6 +5059,7 @@ export class Simple3D {
                 physicsJumpVelocity: Number(terrainConfig.physics_jump_velocity ?? 8.8),
                 physicsGravity: Number(terrainConfig.physics_gravity ?? 26.0),
                 physicsAirControl: Number(terrainConfig.physics_air_control ?? 0.45),
+                nightMinLight: Number(terrainConfig.night_min_light ?? 0.04),
                 terrainCells: terrainConfig.terrain_cells || null
             };
         }
@@ -4844,6 +5111,7 @@ export class Simple3D {
             physicsJumpVelocity: 8.8,
             physicsGravity: 26.0,
             physicsAirControl: 0.45,
+            nightMinLight: 0.04,
             terrainCells: null
         };
     }
@@ -5931,11 +6199,14 @@ export class Simple3D {
     _ensureVoxelCursorVisuals(THREE) {
         if (!this.scene) return;
         if (!this.voxelHighlightMesh) {
-            const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.02, 1.02, 1.02));
+            if (!this.voxelHighlightFaceGeometries) {
+                this.voxelHighlightFaceGeometries = this._buildVoxelFaceWireGeometries(THREE);
+            }
+            const edgeGeo = this.voxelHighlightFaceGeometries?.pz || this._buildVoxelFaceWireGeometries(THREE).pz;
             const edgeMat = new THREE.LineBasicMaterial({
                 color: 0xfff27a,
                 transparent: true,
-                opacity: 0.95,
+                opacity: 0.98,
                 depthTest: true,
             });
             this.voxelHighlightMesh = new THREE.LineSegments(edgeGeo, edgeMat);
@@ -5943,6 +6214,7 @@ export class Simple3D {
             this.voxelHighlightMesh.renderOrder = 5;
             this.voxelHighlightMesh.userData.tag = 'voxel_highlight';
             this.scene.add(this.voxelHighlightMesh);
+            this.voxelHighlightFaceKey = 'pz';
         }
         // Preview semitransparente deshabilitado por UX:
         // dejamos solo el wireframe del bloque objetivo.
@@ -5966,16 +6238,47 @@ export class Simple3D {
         if (!this.scene) return;
         if (this.voxelHighlightMesh) {
             this.scene.remove(this.voxelHighlightMesh);
-            this.voxelHighlightMesh.geometry?.dispose?.();
+            if (!this.voxelHighlightFaceGeometries) {
+                this.voxelHighlightMesh.geometry?.dispose?.();
+            }
             this.voxelHighlightMesh.material?.dispose?.();
             this.voxelHighlightMesh = null;
         }
+        if (this.voxelHighlightFaceGeometries) {
+            for (const g of Object.values(this.voxelHighlightFaceGeometries)) g?.dispose?.();
+            this.voxelHighlightFaceGeometries = null;
+        }
+        this.voxelHighlightFaceKey = '';
         if (this.voxelPlacePreviewMesh) {
             this.scene.remove(this.voxelPlacePreviewMesh);
             this.voxelPlacePreviewMesh.geometry?.dispose?.();
             this.voxelPlacePreviewMesh.material?.dispose?.();
             this.voxelPlacePreviewMesh = null;
         }
+    }
+
+    _buildVoxelFaceWireGeometries(THREE) {
+        const eps = 0.002;
+        const h = 0.5;
+        const make = (v0, v1, v2, v3) => {
+            const arr = [
+                ...v0, ...v1,
+                ...v1, ...v2,
+                ...v2, ...v3,
+                ...v3, ...v0,
+            ];
+            const g = new THREE.BufferGeometry();
+            g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+            return g;
+        };
+        return {
+            px: make([h + eps, -h, -h], [h + eps, h, -h], [h + eps, h, h], [h + eps, -h, h]),
+            nx: make([-h - eps, -h, h], [-h - eps, h, h], [-h - eps, h, -h], [-h - eps, -h, -h]),
+            py: make([-h, h + eps, -h], [-h, h + eps, h], [h, h + eps, h], [h, h + eps, -h]),
+            ny: make([-h, -h - eps, h], [-h, -h - eps, -h], [h, -h - eps, -h], [h, -h - eps, h]),
+            pz: make([-h, -h, h + eps], [-h, h, h + eps], [h, h, h + eps], [h, -h, h + eps]),
+            nz: make([h, -h, -h - eps], [h, h, -h - eps], [-h, h, -h - eps], [-h, -h, -h - eps]),
+        };
     }
 
     _raycastVoxelDda(origin, dir, maxDistance = 14.0) {
@@ -6102,6 +6405,10 @@ export class Simple3D {
         }
         const b = hit.block;
         const n = hit.normal || { x: 0, y: 0, z: 0 };
+        if (!this._isVoxelBlockWithinReach(b)) {
+            this._hideVoxelCursorVisuals();
+            return;
+        }
         const place = { x: b.x + n.x, y: b.y + n.y, z: b.z + n.z };
         const placeOk = place.y >= 0 && place.y < this.voxelChunkHeight;
 
@@ -6109,8 +6416,26 @@ export class Simple3D {
         this.voxelHoverBlock = { x: b.x, y: b.y, z: b.z };
         this.voxelPlaceBlock = placeOk ? place : null;
         if (this.voxelHighlightMesh) {
+            let faceKey = 'pz';
+            if (Math.abs(n.x) >= 0.5) faceKey = n.x > 0 ? 'px' : 'nx';
+            else if (Math.abs(n.y) >= 0.5) faceKey = n.y > 0 ? 'py' : 'ny';
+            else if (Math.abs(n.z) >= 0.5) faceKey = n.z > 0 ? 'pz' : 'nz';
+            if (faceKey !== this.voxelHighlightFaceKey && this.voxelHighlightFaceGeometries?.[faceKey]) {
+                this.voxelHighlightMesh.geometry = this.voxelHighlightFaceGeometries[faceKey];
+                this.voxelHighlightFaceKey = faceKey;
+            }
             this.voxelHighlightMesh.visible = true;
             this.voxelHighlightMesh.position.set(b.x, b.y, b.z);
+            const mat = this.voxelHighlightMesh.material;
+            if (mat && mat.color) {
+                const pulse = 0.5 + (0.5 * Math.sin(this.elapsed * 8.0));
+                const r = 0.08 + (0.92 * pulse);
+                const g = 0.08 + (0.78 * pulse);
+                const b = 0.02 + (0.06 * pulse);
+                mat.color.setRGB(r, g, b);
+                mat.opacity = 0.74 + (0.24 * pulse);
+                mat.needsUpdate = true;
+            }
         }
     }
 
@@ -6127,6 +6452,18 @@ export class Simple3D {
         );
     }
 
+    _isVoxelBlockWithinReach(block) {
+        if (!block) return false;
+        const reach = Math.max(0.5, Number(this.voxelInteractReach) || 4.0);
+        const bx = Number(block.x) || 0;
+        const by = Number(block.y) || 0;
+        const bz = Number(block.z) || 0;
+        const ax = Number(this.actor?.x || 0);
+        const ay = Number(this.actor?.y || 0);
+        const az = Number(this.actor?.z || 0);
+        return Math.hypot(bx - ax, by - ay, bz - az) <= reach;
+    }
+
     _applyLocalVoxelEdit(wx, wy, wz, newBlockId = 0) {
         const chunk = this.getChunkByWorldXZ(wx, wz);
         if (!chunk || !chunk.blocks) return false;
@@ -6140,6 +6477,7 @@ export class Simple3D {
         if (this._isSolidBlockId(prev) && !this._isSolidBlockId(next)) {
             chunk.solidCount = Math.max(0, Number(chunk.solidCount || 0) - 1);
             this.generatedVoxelBlocks = Math.max(0, Number(this.generatedVoxelBlocks || 0) - 1);
+            this.spawnVoxelBreakPopAt(wx, wy, wz, prev);
         } else if (!this._isSolidBlockId(prev) && this._isSolidBlockId(next)) {
             chunk.solidCount = Math.max(0, Number(chunk.solidCount || 0) + 1);
             this.generatedVoxelBlocks = Math.max(0, Number(this.generatedVoxelBlocks || 0) + 1);
@@ -6175,6 +6513,7 @@ export class Simple3D {
     requestBreakHoveredVoxel() {
         const b = this.voxelHoverBlock;
         if (!b) return false;
+        if (!this._isVoxelBlockWithinReach(b)) return false;
         if (this.pendingVoxelActions.length >= 24) return false;
         const prev = Math.max(0, Number(this.getVoxelAtWorld(b.x, b.y, b.z)) | 0);
         if (!this._isSolidBlockId(prev)) return false;
@@ -6195,6 +6534,7 @@ export class Simple3D {
     requestPlaceHoveredVoxel(blockId = null) {
         const p = this.voxelPlaceBlock;
         if (!p) return false;
+        if (!this._isVoxelBlockWithinReach(p)) return false;
         if (p.y < 0 || p.y >= this.voxelChunkHeight) return false;
         const placeId = Math.max(1, Number(blockId ?? this.voxelPlaceBlockId) | 0);
         const prev = Math.max(0, Number(this.getVoxelAtWorld(p.x, p.y, p.z)) | 0);

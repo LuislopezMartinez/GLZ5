@@ -76,6 +76,7 @@ class ServerGui:
         self.fog_near = tk.DoubleVar(value=66.0)
         self.fog_far = tk.DoubleVar(value=300.0)
         self.fog_density = tk.DoubleVar(value=0.0025)
+        self.night_min_light = tk.DoubleVar(value=0.04)
         self.physics_move_speed = tk.DoubleVar(value=4.6)
         self.physics_sprint_mult = tk.DoubleVar(value=1.45)
         self.physics_accel = tk.DoubleVar(value=16.0)
@@ -444,6 +445,20 @@ class ServerGui:
         far_row.grid(row=17, column=1, sticky="w", pady=4)
         tk.Scale(far_row, from_=20, to=1000, resolution=1, orient=tk.HORIZONTAL, length=220, variable=self.fog_far).pack(side=tk.LEFT)
         tk.Label(far_row, textvariable=self.fog_far, width=8, anchor="w").pack(side=tk.LEFT, padx=(6, 0))
+
+        tk.Label(world_tab, text="Luminosidad minima noche:").grid(row=18, column=0, sticky="e", padx=(0, 6), pady=4)
+        night_light_row = tk.Frame(world_tab)
+        night_light_row.grid(row=18, column=1, sticky="w", pady=4)
+        tk.Scale(
+            night_light_row,
+            from_=0.00,
+            to=0.30,
+            resolution=0.005,
+            orient=tk.HORIZONTAL,
+            length=220,
+            variable=self.night_min_light,
+        ).pack(side=tk.LEFT)
+        tk.Label(night_light_row, textvariable=self.night_min_light, width=8, anchor="w").pack(side=tk.LEFT, padx=(6, 0))
 
         tk.Label(world_tab, text="Densidad niebla (exp2):").grid(row=22, column=0, sticky="e", padx=(0, 6), pady=4)
         dens_row = tk.Frame(world_tab)
@@ -820,6 +835,19 @@ class ServerGui:
         self.fog_near.set(fog_near)
         self.fog_far.set(fog_far)
         self.fog_density.set(float(row.get("fog_density") or 0.0025))
+        self.night_min_light.set(
+            max(
+                0.0,
+                min(
+                    0.30,
+                    float(
+                        terrain_cfg.get("night_min_light")
+                        if terrain_cfg.get("night_min_light") is not None
+                        else 0.04
+                    ),
+                ),
+            )
+        )
         self._refresh_fog_color_preview()
         self.npc_slots.set(str(row.get("npc_slots") or 4))
         self.physics_move_speed.set(float(terrain_cfg.get("physics_move_speed") or 4.6))
@@ -871,6 +899,7 @@ class ServerGui:
             fog_near = max(1.0, min(300.0, float(self.fog_near.get())))
             fog_far = max(fog_near + 1.0, min(1000.0, float(self.fog_far.get())))
             fog_density = max(0.00001, min(0.2, float(self.fog_density.get())))
+            night_min_light = max(0.0, min(0.30, float(self.night_min_light.get())))
             organic_noise_scale = max(0.01, min(0.35, float(self.organic_noise_scale.get())))
             organic_noise_strength = max(0.0, min(0.95, float(self.organic_noise_strength.get())))
             organic_edge_falloff = max(0.05, min(0.55, float(self.organic_edge_falloff.get())))
@@ -918,6 +947,7 @@ class ServerGui:
             "fog_near": fog_near,
             "fog_far": fog_far,
             "fog_density": fog_density,
+            "night_min_light": night_min_light,
             "physics_move_speed": max(1.0, min(12.0, float(self.physics_move_speed.get()))),
             "physics_sprint_mult": max(1.0, min(3.0, float(self.physics_sprint_mult.get()))),
             "physics_accel": max(2.0, min(40.0, float(self.physics_accel.get()))),

@@ -48,8 +48,8 @@ class SimpleWsServer:
         self.loot_spawn_radius_min = 0.45
         self.loot_spawn_radius_max = 1.35
         self.loot_spawn_min_separation = 0.34
-        self.inventory_total_slots = 16
-        self.inventory_hotbar_slots = 4
+        self.inventory_total_slots = 32
+        self.inventory_hotbar_slots = 8
         self.character_max_slots = 3
 
     def _network_config_payload(self) -> dict:

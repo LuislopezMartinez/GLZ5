@@ -1,6 +1,6 @@
 function normalizeInventoryPayload(inv) {
-    const total = Math.max(4, Math.min(128, Number(inv?.total_slots) || 16));
-    const hotbar = Math.max(1, Math.min(total, Number(inv?.hotbar_slots) || 4));
+    const total = Math.max(4, Math.min(128, Number(inv?.total_slots) || 32));
+    const hotbar = Math.max(1, Math.min(total, Number(inv?.hotbar_slots) || 8));
     const srcSlots = Array.isArray(inv?.slots) ? inv.slots : [];
     const byIdx = new Map();
     srcSlots.forEach((s) => {
@@ -42,10 +42,10 @@ export class InventoryUi {
 
         this.open = false;
         this.visible = true;
-        this.slots = Array.from({ length: 16 }, (_, i) => ({ slot_index: i, item_code: null, quantity: 0 }));
+        this.slots = Array.from({ length: 32 }, (_, i) => ({ slot_index: i, item_code: null, quantity: 0 }));
         this.items = {};
-        this.totalSlots = 16;
-        this.hotbarSlots = 4;
+        this.totalSlots = 32;
+        this.hotbarSlots = 8;
         this.selectedSlotIndex = null;
     }
 
@@ -218,7 +218,7 @@ export class InventoryUi {
 
     setSelectedHotbarSlot(index, opts = {}) {
         const wrap = opts?.wrap !== false;
-        const hotbar = Math.max(1, Number(this.hotbarSlots) || 4);
+        const hotbar = Math.max(1, Number(this.hotbarSlots) || 8);
         let idx = Number(index);
         if (!Number.isFinite(idx)) return null;
         if (wrap) {
@@ -233,7 +233,7 @@ export class InventoryUi {
     }
 
     cycleHotbarSelection(stepRaw = 1) {
-        const hotbar = Math.max(1, Number(this.hotbarSlots) || 4);
+        const hotbar = Math.max(1, Number(this.hotbarSlots) || 8);
         const step = Number(stepRaw) >= 0 ? 1 : -1;
         const cur = this.getSelectedSlotIndex();
         const start = Number.isFinite(cur) ? cur : (step > 0 ? -1 : hotbar);

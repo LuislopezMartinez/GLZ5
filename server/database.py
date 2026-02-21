@@ -577,7 +577,7 @@ class DatabaseManager:
                 out[code] = 1
         return out
 
-    def ensure_player_inventory_slots(self, user_id: int, total_slots: int = 16):
+    def ensure_player_inventory_slots(self, user_id: int, total_slots: int = 32):
         total = max(1, min(256, int(total_slots)))
         conn = self._connect(include_database=True)
         try:
@@ -596,7 +596,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def get_player_inventory(self, user_id: int, total_slots: int = 16):
+    def get_player_inventory(self, user_id: int, total_slots: int = 32):
         total = max(1, min(256, int(total_slots)))
         self.ensure_player_inventory_slots(user_id, total)
         conn = self._connect(include_database=True)
@@ -634,7 +634,7 @@ class DatabaseManager:
             return {"item_code": None, "quantity": 0}
         return {"item_code": code, "quantity": qty}
 
-    def inventory_move(self, user_id: int, from_slot: int, to_slot: int, total_slots: int = 16):
+    def inventory_move(self, user_id: int, from_slot: int, to_slot: int, total_slots: int = 32):
         total = max(1, min(256, int(total_slots)))
         src = int(from_slot)
         dst = int(to_slot)
@@ -696,7 +696,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def inventory_split(self, user_id: int, from_slot: int, to_slot: int, total_slots: int = 16):
+    def inventory_split(self, user_id: int, from_slot: int, to_slot: int, total_slots: int = 32):
         total = max(1, min(256, int(total_slots)))
         src = int(from_slot)
         dst = int(to_slot)
@@ -762,7 +762,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def inventory_shift_click(self, user_id: int, from_slot: int, total_slots: int = 16, hotbar_slots: int = 4):
+    def inventory_shift_click(self, user_id: int, from_slot: int, total_slots: int = 32, hotbar_slots: int = 8):
         total = max(1, min(256, int(total_slots)))
         hotbar = max(1, min(total, int(hotbar_slots)))
         src = int(from_slot)
@@ -788,7 +788,7 @@ class DatabaseManager:
                 return res
         return {"ok": False, "error": "No hay espacio de destino"}
 
-    def inventory_add_item(self, user_id: int, item_code: str, quantity: int, total_slots: int = 16, hotbar_slots: int = 4):
+    def inventory_add_item(self, user_id: int, item_code: str, quantity: int, total_slots: int = 32, hotbar_slots: int = 8):
         total = max(1, min(256, int(total_slots)))
         qty = max(0, int(quantity))
         code = (item_code or "").strip()
@@ -875,7 +875,7 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def inventory_use_slot(self, user_id: int, slot_index: int, total_slots: int = 16):
+    def inventory_use_slot(self, user_id: int, slot_index: int, total_slots: int = 32):
         total = max(1, min(256, int(total_slots)))
         idx = int(slot_index)
         if idx < 0 or idx >= total:
