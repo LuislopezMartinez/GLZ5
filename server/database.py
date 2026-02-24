@@ -1495,7 +1495,7 @@ class DatabaseManager:
             if active_only:
                 cursor.execute(
                     """
-                    SELECT item_code, name, item_type, rarity, max_stack, value_coins, model_key, is_active
+                    SELECT item_code, name, item_type, rarity, max_stack, value_coins, icon_key, model_key, properties_json, is_active
                     FROM items_catalog
                     WHERE is_active = 1
                     ORDER BY CAST(item_code AS UNSIGNED) ASC, item_code ASC
@@ -1506,7 +1506,7 @@ class DatabaseManager:
             else:
                 cursor.execute(
                     """
-                    SELECT item_code, name, item_type, rarity, max_stack, value_coins, model_key, is_active
+                    SELECT item_code, name, item_type, rarity, max_stack, value_coins, icon_key, model_key, properties_json, is_active
                     FROM items_catalog
                     ORDER BY CAST(item_code AS UNSIGNED) ASC, item_code ASC
                     LIMIT %s

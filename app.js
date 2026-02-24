@@ -112,6 +112,8 @@ let biomeBannerHideTimer = null;
 let biomeBannerLastBiome = '';
 let biomeBannerLastAt = 0;
 let serverProtocolInfo = { protocol_version: null, server_build: null };
+let currentHeldItemModelKey = '';
+let currentHeldItemTransform = null;
 
 const CONTROL_BINDINGS_SCHEMA = [
     { key: 'jump', label: 'Saltar', runtimeKey: 'jump' },
@@ -597,6 +599,49 @@ function applyInventoryPayload(invRaw) {
     }
     inventoryUi.applyPayload(invRaw || null);
     pendingInventoryPayload = null;
+}
+
+function syncHeldItemFromHotbar() {
+    if (!simple3D || !inventoryUi) return;
+    const prevModel = currentHeldItemModelKey;
+    const prevTransformSig = JSON.stringify(currentHeldItemTransform || null);
+    const hotbarSlots = Math.max(1, Number(inventoryUi.getHotbarSlots?.() || DEFAULT_HOTBAR_SLOTS));
+    let idx = Number(inventoryUi.getSelectedSlotIndex?.());
+    if (!Number.isFinite(idx) || idx < 0 || idx >= hotbarSlots) idx = 0;
+    const slot = inventoryUi.getSlotData?.(idx) || null;
+    const has = !!slot?.item_code && (Number(slot?.quantity) || 0) > 0;
+    if (!has) {
+        currentHeldItemModelKey = '';
+        currentHeldItemTransform = null;
+        simple3D.setLocalHeldItemModel?.('', null);
+        const nextTransformSig = JSON.stringify(currentHeldItemTransform || null);
+        if (prevModel !== currentHeldItemModelKey || prevTransformSig !== nextTransformSig) {
+            if (clientState === 'IN_WORLD' && ws && ws.socket && ws.socket.readyState === WebSocket.OPEN) {
+                new NetMessage('world_move')
+                    .set('held_item_model_key', '')
+                    .set('held_item_transform', null)
+                    .send()
+                    .catch(() => { });
+            }
+        }
+        return;
+    }
+    const item = inventoryUi.getItemData?.(slot.item_code) || null;
+    const modelKey = (item?.model_key || '').toString().trim();
+    const equipRight = item?.properties?.equip_right_hand || null;
+    currentHeldItemModelKey = modelKey;
+    currentHeldItemTransform = (equipRight && typeof equipRight === 'object') ? equipRight : null;
+    simple3D.setLocalHeldItemModel?.(modelKey, equipRight);
+    const nextTransformSig = JSON.stringify(currentHeldItemTransform || null);
+    if (prevModel !== currentHeldItemModelKey || prevTransformSig !== nextTransformSig) {
+        if (clientState === 'IN_WORLD' && ws && ws.socket && ws.socket.readyState === WebSocket.OPEN) {
+            new NetMessage('world_move')
+                .set('held_item_model_key', currentHeldItemModelKey || '')
+                .set('held_item_transform', currentHeldItemTransform && typeof currentHeldItemTransform === 'object' ? currentHeldItemTransform : null)
+                .send()
+                .catch(() => { });
+        }
+    }
 }
 
 async function refreshInventory() {
@@ -1378,6 +1423,8 @@ function createInventoryUi(host) {
         onShiftClick: inventoryShiftClick,
         onNoSplitTarget: () => UIToast.show('No hay destino para dividir stack', 'warning', 1100),
         onOpenChanged: () => requestAnimationFrame(() => applyWorldHudLayout()),
+        onHotbarSelectionChanged: () => syncHeldItemFromHotbar(),
+        onInventoryPayloadApplied: () => syncHeldItemFromHotbar(),
     });
     inventoryUi.createUi(host);
     inventoryUi.bindActionBar(actionSlots, actionSlotLabels);
@@ -1535,6 +1582,9 @@ function updatePointerLockCrosshairVisibility() {
         document.pointerLockElement &&
         document.pointerLockElement === simple3D.worldCanvas
     );
+    if (utilityBarRoot) {
+        utilityBarRoot.style.display = (inWorld && lockedOnWorld) ? 'none' : (inWorld ? 'grid' : 'none');
+    }
     pointerLockCrosshairEl.style.display = (inWorld && lockedOnWorld) ? '' : 'none';
     if (pointerLockHintEl) {
         updatePointerLockHintPosition();
@@ -2570,7 +2620,8 @@ function showWorldPanel(payload) {
         terrainConfig: payload.terrain_config,
         decor: payload.decor,
         worldLoot: payload.world_loot,
-        voxelOverrides: payload.voxel_overrides
+        voxelOverrides: payload.voxel_overrides,
+        voxelBlockDefs: payload.voxel_block_defs
     });
     simple3D.setEmoticon(payload?.player?.active_emotion || 'neutral', 0);
     applyControlSettingsToRuntime();
@@ -2653,6 +2704,8 @@ async function ensureConnected(url) {
                 character_name: p.character_name || '',
                 rol: p.rol || 'user',
                 model_key: p.model_key || '',
+                held_item_model_key: p.held_item_model_key || '',
+                held_item_transform: p.held_item_transform || null,
                 character_class: p.character_class || 'rogue',
                 active_emotion: p.active_emotion || 'neutral',
                 animation_state: p.animation_state || 'idle',
@@ -2678,6 +2731,8 @@ async function ensureConnected(url) {
                     character_name: p.character_name || '',
                     rol: p.rol || 'user',
                     model_key: p.model_key || '',
+                    held_item_model_key: p.held_item_model_key || '',
+                    held_item_transform: p.held_item_transform || null,
                     character_class: p.character_class || 'rogue',
                     active_emotion: p.active_emotion || 'neutral',
                     animation_state: p.animation_state || 'idle',
@@ -2688,6 +2743,9 @@ async function ensureConnected(url) {
             }
             if (p?.id != null && (p?.hp != null || p?.max_hp != null)) {
                 simple3D.setRemotePlayerHealth?.(p.id, Number(p?.hp ?? 1000), Number(p?.max_hp ?? 1000));
+            }
+            if (p?.id != null) {
+                simple3D.setRemotePlayerHeldItem?.(p.id, p.held_item_model_key || '', p.held_item_transform || null);
             }
             if (p.position) simple3D.setRemotePlayerTarget(p.id, p.position);
             if (p.animation_state) simple3D.setRemotePlayerAnimationState?.(p.id, p.animation_state);
@@ -3698,6 +3756,8 @@ export function main(delta) {
         const msg = new NetMessage('world_move');
         if (moved) msg.set('position', moved);
         if (animState) msg.set('animation_state', animState);
+        msg.set('held_item_model_key', currentHeldItemModelKey || '');
+        msg.set('held_item_transform', currentHeldItemTransform && typeof currentHeldItemTransform === 'object' ? currentHeldItemTransform : null);
         msg.send().catch(() => { });
     }
     const classChange = simple3D.pullPendingClassChange();

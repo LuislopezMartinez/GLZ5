@@ -6,9 +6,10 @@ import os
 import queue
 import shutil
 import socket
+import struct
 import threading
 import tkinter as tk
-from tkinter import colorchooser, filedialog, messagebox, scrolledtext, ttk
+from tkinter import colorchooser, filedialog, messagebox, scrolledtext, simpledialog, ttk
 from urllib.parse import parse_qs, quote, urlparse
 import webbrowser
 
@@ -33,6 +34,7 @@ class ServerGui:
         self.root.minsize(1180, 760)
 
         self.log_queue: queue.Queue[str] = queue.Queue()
+        self.preview_input_queue: queue.Queue[dict] = queue.Queue()
         self.server: SimpleWsServer | None = None
         self.db_manager: DatabaseManager | None = None
 
@@ -87,6 +89,25 @@ class ServerGui:
         self.physics_jump_velocity = tk.DoubleVar(value=8.8)
         self.physics_gravity = tk.DoubleVar(value=26.0)
         self.physics_air_control = tk.DoubleVar(value=0.45)
+        self.cave_enabled = tk.StringVar(value="Si")
+        self.cave_noise_scale = tk.DoubleVar(value=0.045)
+        self.cave_density_threshold = tk.DoubleVar(value=0.62)
+        self.cave_noise_octaves = tk.IntVar(value=3)
+        self.cave_min_y = tk.IntVar(value=8)
+        self.cave_surface_buffer = tk.IntVar(value=4)
+        self.cave_spawn_safe_radius = tk.IntVar(value=24)
+        self.worm_enabled = tk.StringVar(value="Si")
+        self.worm_count = tk.IntVar(value=3)
+        self.worm_length_min = tk.IntVar(value=48)
+        self.worm_length_max = tk.IntVar(value=120)
+        self.worm_radius_min = tk.DoubleVar(value=2.2)
+        self.worm_radius_max = tk.DoubleVar(value=4.8)
+        self.cave_emissive_enabled = tk.StringVar(value="Si")
+        self.cave_emissive_density = tk.DoubleVar(value=0.018)
+        self.cave_emissive_intensity = tk.DoubleVar(value=1.6)
+        self.cave_emissive_radius = tk.DoubleVar(value=6.0)
+        self.cave_emissive_max_active = tk.IntVar(value=24)
+        self.cave_min_light = tk.DoubleVar(value=0.03)
         self.fog_color_preview = None
         self.item_code = tk.StringVar(value="")
         self.item_name = tk.StringVar(value="")
@@ -103,8 +124,62 @@ class ServerGui:
         self.item_model_type_combo = None
         self.item_scale = tk.DoubleVar(value=1.0)
         self.item_scale_text = tk.StringVar(value="1.00x")
+        self.item_equip_pos_x = tk.DoubleVar(value=0.0)
+        self.item_equip_pos_y = tk.DoubleVar(value=0.0)
+        self.item_equip_pos_z = tk.DoubleVar(value=0.0)
+        self.item_equip_rot_x = tk.DoubleVar(value=0.0)
+        self.item_equip_rot_y = tk.DoubleVar(value=0.0)
+        self.item_equip_rot_z = tk.DoubleVar(value=0.0)
+        self.item_equip_scale = tk.DoubleVar(value=1.0)
+        self.item_equip_bone = tk.StringVar(value="auto")
+        self.item_equip_bone_values = ["auto"]
+        self.item_equip_light_enabled = tk.BooleanVar(value=False)
+        self.item_equip_light_color = tk.StringVar(value="#ffd37a")
+        self.item_equip_light_intensity = tk.DoubleVar(value=1.2)
+        self.item_equip_light_color_preview = None
         self.items_only_active = tk.StringVar(value="No")
         self.items_table = None
+        self.boxels_table = None
+        self.boxel_selected_item_code = ""
+        self.boxels_cards_canvas = None
+        self.boxels_cards_frame = None
+        self.boxels_cards_window_id = None
+        self.boxels_cards_rows = {}
+        self.boxel_thumb_cache = {}
+        self.boxel_atlas_cache = {}
+        self.boxel_thumb_image_refs = []
+        self.boxel_static_preview_canvas = None
+        self.boxel_static_preview_refs = []
+        self.boxel_editor_window = None
+        self.boxel_popup_edit_item_code = None
+        self.boxel_code = tk.StringVar(value="")
+        self.boxel_name = tk.StringVar(value="")
+        self.boxel_description = tk.StringVar(value="")
+        self.boxel_texture_atlas = tk.StringVar(value="")
+        self.boxel_tile_col = tk.IntVar(value=0)
+        self.boxel_tile_row = tk.IntVar(value=0)
+        self.boxel_tile_cols = tk.IntVar(value=6)
+        self.boxel_tile_rows = tk.IntVar(value=4)
+        self.boxel_tile_w_px = tk.IntVar(value=256)
+        self.boxel_tile_h_px = tk.IntVar(value=256)
+        self.boxel_offset_x_px = tk.IntVar(value=0)
+        self.boxel_offset_y_px = tk.IntVar(value=0)
+        self.boxel_gap_x_px = tk.IntVar(value=0)
+        self.boxel_gap_y_px = tk.IntVar(value=0)
+        self.boxel_uv_inset_px = tk.DoubleVar(value=0.5)
+        self.boxel_emission_enabled = tk.BooleanVar(value=False)
+        self.boxel_emission_color = tk.StringVar(value="#ffd37a")
+        self.boxel_emission_intensity = tk.DoubleVar(value=1.2)
+        self.boxel_light_color_preview = None
+        self.boxel_biome_listbox = None
+        self.boxel_biome_values = ["grass", "earth", "stone", "fire", "wind", "bridge"]
+        self.boxel_cell_status = tk.StringVar(value="Celda: [0,0] | idx=0")
+        self.boxel_atlas_canvas = None
+        self.boxel_atlas_image_src = None
+        self.boxel_atlas_image_view = None
+        self.boxel_atlas_status = tk.StringVar(value="Atlas: sin cargar")
+        self.boxel_tile_col_scale = None
+        self.boxel_tile_row_scale = None
         self.item_editor_window = None
         self.item_popup_edit_item_code = None
         self.item_obj_preview_canvas = None
@@ -278,12 +353,14 @@ class ServerGui:
         server_tab = tk.Frame(notebook, padx=10, pady=10)
         world_tab_outer, world_tab = self._make_scrollable_tab(notebook, padx=10, pady=10)
         items_tab = tk.Frame(notebook, padx=10, pady=10)
+        boxels_tab = tk.Frame(notebook, padx=10, pady=10)
         decor_tab = tk.Frame(notebook, padx=10, pady=10)
         admin_tab = tk.Frame(notebook, padx=10, pady=10)
         network_tab = tk.Frame(notebook, padx=10, pady=10)
         notebook.add(server_tab, text="Servidor")
         notebook.add(world_tab_outer, text="Mundo")
         notebook.add(items_tab, text="Items")
+        notebook.add(boxels_tab, text="Boxels")
         notebook.add(decor_tab, text="Decor")
         notebook.add(admin_tab, text="Admin")
         notebook.add(network_tab, text="Network")
@@ -434,13 +511,13 @@ class ServerGui:
         self.fog_color_preview = tk.Label(fog_color_row, text="    ", relief=tk.SOLID, borderwidth=1)
         self.fog_color_preview.pack(side=tk.LEFT, padx=(8, 0))
 
-        tk.Label(world_tab, text="Niebla near:").grid(row=16, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Niebla cerca (bloques):").grid(row=16, column=0, sticky="e", padx=(0, 6), pady=4)
         near_row = tk.Frame(world_tab)
         near_row.grid(row=16, column=1, sticky="w", pady=4)
         tk.Scale(near_row, from_=1, to=300, resolution=1, orient=tk.HORIZONTAL, length=220, variable=self.fog_near).pack(side=tk.LEFT)
         tk.Label(near_row, textvariable=self.fog_near, width=8, anchor="w").pack(side=tk.LEFT, padx=(6, 0))
 
-        tk.Label(world_tab, text="Niebla far:").grid(row=17, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(world_tab, text="Niebla lejos (bloques):").grid(row=17, column=0, sticky="e", padx=(0, 6), pady=4)
         far_row = tk.Frame(world_tab)
         far_row.grid(row=17, column=1, sticky="w", pady=4)
         tk.Scale(far_row, from_=20, to=1000, resolution=1, orient=tk.HORIZONTAL, length=220, variable=self.fog_far).pack(side=tk.LEFT)
@@ -515,8 +592,104 @@ class ServerGui:
         tk.Button(preset_row, text="Equilibrado", width=10, command=lambda: self._apply_physics_preset("balanced")).pack(side=tk.LEFT, padx=(0, 4))
         tk.Button(preset_row, text="Realista", width=10, command=lambda: self._apply_physics_preset("realistic")).pack(side=tk.LEFT)
 
+        caves_frame = tk.LabelFrame(world_tab, text="Cavernas / Cuevas", padx=10, pady=8)
+        caves_frame.grid(row=24, column=3, sticky="n", padx=(24, 0), pady=(8, 2))
+        tk.Label(caves_frame, text="Cuevas activas:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
+        ttk.Combobox(caves_frame, textvariable=self.cave_enabled, values=["Si", "No"], width=10, state="readonly").grid(
+            row=0, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, text="Escala ruido 3D:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=0.010, to=0.120, resolution=0.001, orient=tk.HORIZONTAL, length=180, variable=self.cave_noise_scale).grid(
+            row=1, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_noise_scale, width=6, anchor="w").grid(row=1, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Densidad (umbral):").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=0.45, to=0.90, resolution=0.01, orient=tk.HORIZONTAL, length=180, variable=self.cave_density_threshold).grid(
+            row=2, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_density_threshold, width=6, anchor="w").grid(row=2, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Octavas ruido:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=3)
+        ttk.Combobox(caves_frame, textvariable=self.cave_noise_octaves, values=["1", "2", "3", "4"], width=10, state="readonly").grid(
+            row=3, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, text="Altura minima Y:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=1, to=64, resolution=1, orient=tk.HORIZONTAL, length=180, variable=self.cave_min_y).grid(
+            row=4, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_min_y, width=6, anchor="w").grid(row=4, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Buffer superficie:").grid(row=5, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=2, to=12, resolution=1, orient=tk.HORIZONTAL, length=180, variable=self.cave_surface_buffer).grid(
+            row=5, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_surface_buffer, width=6, anchor="w").grid(row=5, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Radio seguro spawn:").grid(row=6, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=0, to=64, resolution=1, orient=tk.HORIZONTAL, length=180, variable=self.cave_spawn_safe_radius).grid(
+            row=6, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_spawn_safe_radius, width=6, anchor="w").grid(row=6, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(caves_frame, text="Worms activos:").grid(row=7, column=0, sticky="e", padx=(0, 6), pady=(10, 3))
+        ttk.Combobox(caves_frame, textvariable=self.worm_enabled, values=["Si", "No"], width=10, state="readonly").grid(
+            row=7, column=1, sticky="w", pady=(10, 3)
+        )
+        tk.Label(caves_frame, text="Worms por region:").grid(row=8, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=0, to=8, resolution=1, orient=tk.HORIZONTAL, length=180, variable=self.worm_count).grid(
+            row=8, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.worm_count, width=6, anchor="w").grid(row=8, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Longitud min:").grid(row=9, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=12, to=160, resolution=1, orient=tk.HORIZONTAL, length=180, variable=self.worm_length_min).grid(
+            row=9, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.worm_length_min, width=6, anchor="w").grid(row=9, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Longitud max:").grid(row=10, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=24, to=220, resolution=1, orient=tk.HORIZONTAL, length=180, variable=self.worm_length_max).grid(
+            row=10, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.worm_length_max, width=6, anchor="w").grid(row=10, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Radio min:").grid(row=11, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=0.8, to=6.0, resolution=0.1, orient=tk.HORIZONTAL, length=180, variable=self.worm_radius_min).grid(
+            row=11, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.worm_radius_min, width=6, anchor="w").grid(row=11, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Radio max:").grid(row=12, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=1.2, to=9.0, resolution=0.1, orient=tk.HORIZONTAL, length=180, variable=self.worm_radius_max).grid(
+            row=12, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.worm_radius_max, width=6, anchor="w").grid(row=12, column=2, sticky="w", padx=(6, 0))
+
+        tk.Label(caves_frame, text="Luz cueva activa:").grid(row=13, column=0, sticky="e", padx=(0, 6), pady=(10, 3))
+        ttk.Combobox(caves_frame, textvariable=self.cave_emissive_enabled, values=["Si", "No"], width=10, state="readonly").grid(
+            row=13, column=1, sticky="w", pady=(10, 3)
+        )
+        tk.Label(caves_frame, text="Densidad emisiva:").grid(row=14, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=0.000, to=0.080, resolution=0.001, orient=tk.HORIZONTAL, length=180, variable=self.cave_emissive_density).grid(
+            row=14, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_emissive_density, width=6, anchor="w").grid(row=14, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Intensidad luz:").grid(row=15, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=0.2, to=8.0, resolution=0.1, orient=tk.HORIZONTAL, length=180, variable=self.cave_emissive_intensity).grid(
+            row=15, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_emissive_intensity, width=6, anchor="w").grid(row=15, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Radio luz:").grid(row=16, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=1.0, to=20.0, resolution=0.5, orient=tk.HORIZONTAL, length=180, variable=self.cave_emissive_radius).grid(
+            row=16, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_emissive_radius, width=6, anchor="w").grid(row=16, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Luces activas max:").grid(row=17, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=4, to=96, resolution=1, orient=tk.HORIZONTAL, length=180, variable=self.cave_emissive_max_active).grid(
+            row=17, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_emissive_max_active, width=6, anchor="w").grid(row=17, column=2, sticky="w", padx=(6, 0))
+        tk.Label(caves_frame, text="Luz minima cueva:").grid(row=18, column=0, sticky="e", padx=(0, 6), pady=3)
+        tk.Scale(caves_frame, from_=0.000, to=0.300, resolution=0.005, orient=tk.HORIZONTAL, length=180, variable=self.cave_min_light).grid(
+            row=18, column=1, sticky="w", pady=3
+        )
+        tk.Label(caves_frame, textvariable=self.cave_min_light, width=6, anchor="w").grid(row=18, column=2, sticky="w", padx=(6, 0))
+
         world_btns = tk.Frame(world_tab, pady=12)
-        world_btns.grid(row=23, column=0, columnspan=4, sticky="w")
+        world_btns.grid(row=25, column=0, columnspan=4, sticky="w")
         tk.Button(world_btns, text="Crear Mundo", command=self.create_world, width=16).pack(side=tk.LEFT, padx=(0, 8))
         tk.Button(world_btns, text="Actualizar Configuracion Mundo", command=self.update_world_config, width=28).pack(side=tk.LEFT)
         self._refresh_fog_color_preview()
@@ -569,6 +742,50 @@ class ServerGui:
         yscroll_items.grid(row=0, column=1, sticky="ns")
         item_tree.bind("<Double-Button-1>", lambda _e: self.item_edit_selected())
         self.items_table = item_tree
+
+        boxels_tab.grid_columnconfigure(0, weight=1)
+        boxels_tab.grid_rowconfigure(2, weight=1)
+        tk.Label(boxels_tab, text="Editor de Boxels", font=("Segoe UI", 11, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        boxel_btns = tk.Frame(boxels_tab)
+        boxel_btns.grid(row=1, column=0, sticky="w", pady=(0, 8))
+        tk.Button(boxel_btns, text="Nuevo", width=14, command=self.boxel_new_popup).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(boxel_btns, text="Editar", width=14, command=self.boxel_edit_selected).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(boxel_btns, text="Borrar", width=14, command=self.boxel_delete_selected).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(boxel_btns, text="Refrescar", width=14, command=self.refresh_boxels_list).pack(side=tk.LEFT, padx=(0, 8))
+
+        boxels_table_wrap = tk.Frame(boxels_tab, bd=1, relief=tk.GROOVE)
+        boxels_table_wrap.grid(row=2, column=0, sticky="nsew")
+        boxels_table_wrap.grid_columnconfigure(0, weight=1)
+        boxels_table_wrap.grid_rowconfigure(0, weight=1)
+        cards_canvas = tk.Canvas(boxels_table_wrap, highlightthickness=0, borderwidth=0, bg="#0f1724")
+        cards_scroll = ttk.Scrollbar(boxels_table_wrap, orient="vertical", command=cards_canvas.yview)
+        cards_canvas.configure(yscrollcommand=cards_scroll.set)
+        cards_canvas.grid(row=0, column=0, sticky="nsew")
+        cards_scroll.grid(row=0, column=1, sticky="ns")
+        cards_frame = tk.Frame(cards_canvas, bg="#0f1724")
+        cards_window = cards_canvas.create_window((0, 0), window=cards_frame, anchor="nw")
+
+        def _cards_sync_region(_event=None):
+            cards_canvas.configure(scrollregion=cards_canvas.bbox("all"))
+
+        def _cards_sync_width(event):
+            cards_canvas.itemconfigure(cards_window, width=event.width)
+
+        def _cards_on_wheel(event):
+            delta = int(-1 * (event.delta / 120)) if getattr(event, "delta", 0) else 0
+            if delta != 0:
+                cards_canvas.yview_scroll(delta, "units")
+
+        cards_frame.bind("<Configure>", _cards_sync_region)
+        cards_canvas.bind("<Configure>", _cards_sync_width)
+        cards_canvas.bind("<Enter>", lambda _e: cards_canvas.bind_all("<MouseWheel>", _cards_on_wheel))
+        cards_canvas.bind("<Leave>", lambda _e: cards_canvas.unbind_all("<MouseWheel>"))
+        self.boxels_cards_canvas = cards_canvas
+        self.boxels_cards_frame = cards_frame
+        self.boxels_cards_window_id = cards_window
+        self.boxels_table = None
 
         self.decor_tab = decor_tab
         decor_tab.grid_columnconfigure(0, weight=1)
@@ -776,6 +993,9 @@ class ServerGui:
         if tab_text == "items":
             self.refresh_items_list()
             return
+        if tab_text == "boxels":
+            self.refresh_boxels_list()
+            return
         if tab_text == "decor":
             self.refresh_decor_assets_list()
             # Si el popup de decor esta abierto, tambien actualiza su tabla de drops.
@@ -860,6 +1080,40 @@ class ServerGui:
         self.physics_jump_velocity.set(float(terrain_cfg.get("physics_jump_velocity") or 8.8))
         self.physics_gravity.set(float(terrain_cfg.get("physics_gravity") or 26.0))
         self.physics_air_control.set(float(terrain_cfg.get("physics_air_control") or 0.45))
+        cave_enabled_raw = terrain_cfg.get("cave_enabled")
+        if cave_enabled_raw is None:
+            cave_enabled_raw = terrain_cfg.get("caves_enabled")
+        self.cave_enabled.set("Si" if int(cave_enabled_raw if cave_enabled_raw is not None else 1) == 1 else "No")
+        self.cave_noise_scale.set(max(0.010, min(0.120, float(terrain_cfg.get("cave_noise_scale") or 0.045))))
+        self.cave_density_threshold.set(max(0.45, min(0.90, float(terrain_cfg.get("cave_density_threshold") or 0.62))))
+        self.cave_noise_octaves.set(max(1, min(4, int(terrain_cfg.get("cave_noise_octaves") or 3))))
+        self.cave_min_y.set(max(1, min(64, int(terrain_cfg.get("cave_min_y") or 8))))
+        self.cave_surface_buffer.set(max(2, min(12, int(terrain_cfg.get("cave_surface_buffer") or 4))))
+        self.cave_spawn_safe_radius.set(max(0, min(64, int(terrain_cfg.get("cave_spawn_safe_radius") or 24))))
+        self.worm_enabled.set("Si" if int(terrain_cfg.get("worm_enabled") if terrain_cfg.get("worm_enabled") is not None else 1) == 1 else "No")
+        self.worm_count.set(max(0, min(8, int(terrain_cfg.get("worm_count") or 3))))
+        self.worm_length_min.set(max(12, min(160, int(terrain_cfg.get("worm_length_min") or 48))))
+        self.worm_length_max.set(max(24, min(220, int(terrain_cfg.get("worm_length_max") or 120))))
+        self.worm_radius_min.set(max(0.8, min(6.0, float(terrain_cfg.get("worm_radius_min") or 2.2))))
+        self.worm_radius_max.set(max(1.2, min(9.0, float(terrain_cfg.get("worm_radius_max") or 4.8))))
+        self.cave_emissive_enabled.set("Si" if int(terrain_cfg.get("cave_emissive_enabled") if terrain_cfg.get("cave_emissive_enabled") is not None else 1) == 1 else "No")
+        self.cave_emissive_density.set(max(0.0, min(0.08, float(terrain_cfg.get("cave_emissive_density") or 0.018))))
+        self.cave_emissive_intensity.set(max(0.2, min(8.0, float(terrain_cfg.get("cave_emissive_intensity") or 1.6))))
+        self.cave_emissive_radius.set(max(1.0, min(20.0, float(terrain_cfg.get("cave_emissive_radius") or 6.0))))
+        self.cave_emissive_max_active.set(max(4, min(96, int(terrain_cfg.get("cave_emissive_max_active") or 24))))
+        self.cave_min_light.set(
+            max(
+                0.0,
+                min(
+                    0.30,
+                    float(
+                        terrain_cfg.get("cave_min_light")
+                        if terrain_cfg.get("cave_min_light") is not None
+                        else 0.03
+                    ),
+                ),
+            )
+        )
 
     def _autoload_world_config_on_startup(self):
         if not self.db_manager:
@@ -909,16 +1163,36 @@ class ServerGui:
             mountain_amplitude = max(4.0, min(40.0, float(self.mountain_amplitude.get())))
             mountain_noise_scale = max(0.003, min(0.12, float(self.mountain_noise_scale.get())))
             fall_death_threshold_voxels = max(1.0, min(120.0, float(self.fall_death_threshold_voxels.get())))
+            cave_noise_scale = max(0.010, min(0.120, float(self.cave_noise_scale.get())))
+            cave_density_threshold = max(0.45, min(0.90, float(self.cave_density_threshold.get())))
+            cave_noise_octaves = max(1, min(4, int(self.cave_noise_octaves.get())))
+            cave_min_y = max(1, min(64, int(self.cave_min_y.get())))
+            cave_surface_buffer = max(2, min(12, int(self.cave_surface_buffer.get())))
+            cave_spawn_safe_radius = max(0, min(64, int(self.cave_spawn_safe_radius.get())))
+            worm_count = max(0, min(8, int(self.worm_count.get())))
+            worm_length_min = max(12, min(160, int(self.worm_length_min.get())))
+            worm_length_max = max(24, min(220, int(self.worm_length_max.get())))
+            worm_radius_min = max(0.8, min(6.0, float(self.worm_radius_min.get())))
+            worm_radius_max = max(1.2, min(9.0, float(self.worm_radius_max.get())))
+            cave_emissive_density = max(0.0, min(0.08, float(self.cave_emissive_density.get())))
+            cave_emissive_intensity = max(0.2, min(8.0, float(self.cave_emissive_intensity.get())))
+            cave_emissive_radius = max(1.0, min(20.0, float(self.cave_emissive_radius.get())))
+            cave_emissive_max_active = max(4, min(96, int(self.cave_emissive_max_active.get())))
+            cave_min_light = max(0.0, min(0.30, float(self.cave_min_light.get())))
         except ValueError:
             messagebox.showerror("Error", "Valores numericos invalidos")
             return None
+        if worm_length_max < worm_length_min:
+            worm_length_max = worm_length_min
+        if worm_radius_max < worm_radius_min:
+            worm_radius_max = worm_radius_min
         return {
             "world_name": name,
             "seed": seed,
             "world_size": hub_size,
             "terrain_type": platform_gap,
             "water_enabled": 0,
-            "caves_enabled": 0,
+            "caves_enabled": 1 if self.cave_enabled.get() == "Si" else 0,
             "main_biome": "Stone",
             "view_distance": self.view_distance.get(),
             "island_count": 4,
@@ -948,6 +1222,25 @@ class ServerGui:
             "fog_far": fog_far,
             "fog_density": fog_density,
             "night_min_light": night_min_light,
+            "cave_enabled": 1 if self.cave_enabled.get() == "Si" else 0,
+            "cave_noise_scale": cave_noise_scale,
+            "cave_density_threshold": cave_density_threshold,
+            "cave_noise_octaves": cave_noise_octaves,
+            "cave_min_y": cave_min_y,
+            "cave_surface_buffer": cave_surface_buffer,
+            "cave_spawn_safe_radius": cave_spawn_safe_radius,
+            "worm_enabled": 1 if self.worm_enabled.get() == "Si" else 0,
+            "worm_count": worm_count,
+            "worm_length_min": worm_length_min,
+            "worm_length_max": worm_length_max,
+            "worm_radius_min": worm_radius_min,
+            "worm_radius_max": worm_radius_max,
+            "cave_emissive_enabled": 1 if self.cave_emissive_enabled.get() == "Si" else 0,
+            "cave_emissive_density": cave_emissive_density,
+            "cave_emissive_intensity": cave_emissive_intensity,
+            "cave_emissive_radius": cave_emissive_radius,
+            "cave_emissive_max_active": cave_emissive_max_active,
+            "cave_min_light": cave_min_light,
             "physics_move_speed": max(1.0, min(12.0, float(self.physics_move_speed.get()))),
             "physics_sprint_mult": max(1.0, min(3.0, float(self.physics_sprint_mult.get()))),
             "physics_accel": max(2.0, min(40.0, float(self.physics_accel.get()))),
@@ -1204,6 +1497,7 @@ class ServerGui:
             if not isinstance(parsed, dict):
                 parsed = {}
             parsed["scale"] = self._item_clamp_scale(self.item_scale.get())
+            parsed["equip_right_hand"] = self._item_collect_right_hand_transform_from_form()
             properties_json = json.dumps(parsed, ensure_ascii=False)
         except json.JSONDecodeError as exc:
             messagebox.showerror("Items", f"properties_json invalido: {exc}")
@@ -1249,6 +1543,7 @@ class ServerGui:
             if not isinstance(parsed, dict):
                 parsed = {}
             self._set_item_scale(parsed.get("scale", 1.0))
+            self._apply_item_right_hand_transform_to_form(parsed.get("equip_right_hand"))
             self.item_properties_text.delete("1.0", tk.END)
             self.item_properties_text.insert("1.0", properties_value)
 
@@ -1436,6 +1731,17 @@ class ServerGui:
         self.item_properties_text.delete("1.0", tk.END)
         self.item_properties_text.insert("1.0", "{}")
 
+        tk.Label(form, text="Equip mano der.:").grid(row=9, column=0, sticky="ne", padx=(0, 6), pady=4)
+        self.item_equip_light_color_preview = None
+        info_lbl = tk.Label(
+            form,
+            text="Ajuste de posicion/rotacion/scale solo en Visor WebGL (helper). Los cambios se sincronizan automatico.",
+            anchor="w",
+            justify="left",
+            fg="#24456b",
+        )
+        info_lbl.grid(row=9, column=1, columnspan=3, sticky="ew", pady=4)
+
         self.item_obj_preview_canvas = tk.Canvas(win, width=900, height=430, bg="#0e1622", highlightthickness=1)
         self.item_obj_preview_canvas.configure(highlightbackground="#4f5f73")
         self.item_obj_preview_canvas.grid(row=3, column=0, sticky="nsew", padx=10, pady=(8, 0))
@@ -1481,12 +1787,14 @@ class ServerGui:
                 self.item_model_type.set((self.item_model_type_values or ["varios"])[0])
             self.item_model_key.set("")
             self.item_icon_key.set("")
+            self._apply_item_right_hand_transform_to_form(None)
             self._item_autoselect_model_for_selected_type(force=True)
         if item_code:
             self._refresh_item_model_type_values()
         self.item_obj_preview_vertices = []
         self.item_obj_preview_edges = []
         self.item_preview_icon()
+        self._refresh_item_equip_light_color_preview()
         self.item_refresh_obj_preview()
         win.protocol("WM_DELETE_WINDOW", self.item_close_popup)
 
@@ -1533,6 +1841,7 @@ class ServerGui:
             self.item_obj_preview_after_id = None
         self.item_obj_preview_canvas = None
         self.item_model_type_combo = None
+        self.item_equip_light_color_preview = None
         self.item_icon_preview_src = None
         self.item_icon_preview_img = None
         if win and win.winfo_exists():
@@ -1605,6 +1914,1131 @@ class ServerGui:
                 )
         except Error as exc:
             messagebox.showerror("Error MySQL", f"No se pudo listar items:\n{exc}")
+
+    def boxel_new_popup(self):
+        self._open_boxel_popup(None)
+
+    def boxel_edit_selected(self):
+        item_code = self._boxels_get_selected_item_code()
+        if not item_code:
+            messagebox.showwarning("Boxels", "Selecciona un boxel en la tabla.")
+            return
+        self._open_boxel_popup(item_code)
+
+    def boxel_delete_selected(self):
+        db = self.db_manager or self._build_db_manager()
+        if not db:
+            return
+        item_code = self._boxels_get_selected_item_code()
+        if not item_code:
+            messagebox.showwarning("Boxels", "Selecciona un boxel en la tabla.")
+            return
+        if not messagebox.askyesno("Boxels", f"Eliminar boxel '{item_code}' de forma permanente?"):
+            return
+        try:
+            result = db.delete_item_catalog(item_code, purge_references=False)
+            if result.get("ok"):
+                self.log(f"[BOXELS] Boxel eliminado: {item_code}")
+                self.refresh_boxels_list()
+                return
+            usage = result.get("usage") or {}
+            drops = int(usage.get("drops") or 0)
+            inv = int(usage.get("inventory_slots") or 0)
+            if result.get("error") == "item en uso":
+                force_msg = (
+                    f"El boxel '{item_code}' esta en uso.\n\n"
+                    f"- Referencias en drops de decor: {drops}\n"
+                    f"- Slots de inventario con este boxel: {inv}\n\n"
+                    "Quieres eliminarlo igualmente y limpiar esas referencias?"
+                )
+                if messagebox.askyesno("Boxels", force_msg):
+                    forced = db.delete_item_catalog(item_code, purge_references=True)
+                    if forced.get("ok"):
+                        self.log(
+                            "[BOXELS] Boxel eliminado con limpieza de referencias: "
+                            f"{item_code} (drops={drops}, inventario={inv})"
+                        )
+                        self.refresh_boxels_list()
+                        return
+            messagebox.showwarning("Boxels", f"No se pudo eliminar '{item_code}': {result.get('error') or 'error desconocido'}")
+        except Error as exc:
+            messagebox.showerror("Error MySQL", f"No se pudo eliminar boxel:\n{exc}")
+
+    def refresh_boxels_list(self):
+        cards_frame = self.boxels_cards_frame
+        if not cards_frame:
+            return
+        db = self.db_manager or self._build_db_manager()
+        if not db:
+            return
+        try:
+            rows = db.list_items(limit=1200, active_only=False)
+            boxels = []
+            for row in rows or []:
+                t = str(row.get("item_type") or "").strip().lower()
+                if t not in {"boxel", "voxel", "bloque"}:
+                    continue
+                code = str(row.get("item_code") or "").strip()
+                full_row = db.get_item_by_code(code) if code else None
+                if isinstance(full_row, dict):
+                    boxels.append(full_row)
+                else:
+                    boxels.append(row)
+            selected = (self.boxel_selected_item_code or "").strip()
+            self.boxel_thumb_image_refs = []
+            for child in cards_frame.winfo_children():
+                child.destroy()
+            self.boxels_cards_rows = {}
+            for row in boxels:
+                props = row.get("properties_json")
+                voxel_cfg = self._boxel_extract_voxel_cfg(props)
+                atlas_rel = self._boxel_extract_atlas_rel(voxel_cfg)
+                atlas = f"assets/sprites/texturas/{atlas_rel}" if atlas_rel else ""
+                tile_col, tile_row = self._boxel_extract_cell(voxel_cfg)
+                texture_txt = atlas
+                tile_txt = f"[{tile_col},{tile_row}]"
+                emission = voxel_cfg.get("emission") if isinstance(voxel_cfg.get("emission"), dict) else {}
+                light_txt = "Si" if bool(emission.get("enabled")) else "No"
+                code = str(row.get("item_code") or "").strip()
+                name = str(row.get("name") or "").strip()
+                active_txt = "Si" if int(row.get("is_active") or 0) else "No"
+                card = tk.Frame(cards_frame, bg="#122034", bd=1, relief=tk.SOLID, padx=8, pady=6, cursor="hand2")
+                card.pack(fill=tk.X, padx=8, pady=4)
+                thumb = self._boxel_build_thumbnail(voxel_cfg)
+                if thumb:
+                    img_lbl = tk.Label(card, image=thumb, bg="#122034")
+                    img_lbl.image = thumb
+                    self.boxel_thumb_image_refs.append(thumb)
+                    img_lbl.pack(side=tk.LEFT, padx=(0, 10))
+                else:
+                    tk.Label(card, text="N/A", width=6, bg="#122034", fg="#8aa6c7").pack(side=tk.LEFT, padx=(0, 10))
+                text_box = tk.Frame(card, bg="#122034")
+                text_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                tk.Label(text_box, text=f"ID {code} | {name}", anchor="w", bg="#122034", fg="#e4eefc", font=("Segoe UI", 10, "bold")).pack(fill=tk.X)
+                tk.Label(
+                    text_box,
+                    text=f"Textura: {texture_txt} | Celda: {tile_txt} | Luz: {light_txt} | Activo: {active_txt}",
+                    anchor="w",
+                    bg="#122034",
+                    fg="#a9bfdc",
+                    font=("Segoe UI", 9),
+                ).pack(fill=tk.X, pady=(2, 0))
+                self.boxels_cards_rows[code] = card
+                self._boxel_bind_card_select(card, code)
+            if not self.boxels_cards_rows:
+                tk.Label(cards_frame, text="Sin boxels", bg="#0f1724", fg="#8aa6c7", pady=12).pack(fill=tk.X, padx=8, pady=6)
+                self.boxel_selected_item_code = ""
+                return
+            if selected and selected in self.boxels_cards_rows:
+                self.boxel_selected_item_code = selected
+            else:
+                self.boxel_selected_item_code = next(iter(self.boxels_cards_rows.keys()))
+            self._boxel_refresh_cards_style()
+        except Error as exc:
+            messagebox.showerror("Error MySQL", f"No se pudo listar boxels:\n{exc}")
+
+    def _boxel_bind_card_select(self, widget, code: str):
+        widget.bind("<Button-1>", lambda _e: self._boxel_select_item_code(code))
+        widget.bind("<Double-Button-1>", lambda _e: self.boxel_edit_selected())
+        for child in widget.winfo_children():
+            self._boxel_bind_card_select(child, code)
+
+    def _boxel_select_item_code(self, code: str):
+        self.boxel_selected_item_code = str(code or "").strip()
+        self._boxel_refresh_cards_style()
+
+    def _boxel_refresh_cards_style(self):
+        selected = (self.boxel_selected_item_code or "").strip()
+        for code, card in (self.boxels_cards_rows or {}).items():
+            is_sel = (code == selected)
+            bg = "#1f3a5f" if is_sel else "#122034"
+            fg_main = "#ffffff" if is_sel else "#e4eefc"
+            fg_sub = "#d3e4ff" if is_sel else "#a9bfdc"
+            self._boxel_apply_card_colors(card, bg, fg_main, fg_sub)
+
+    def _boxel_apply_card_colors(self, widget, bg: str, fg_main: str, fg_sub: str):
+        if isinstance(widget, (tk.Frame, tk.Label)):
+            try:
+                widget.configure(bg=bg)
+            except Exception:
+                pass
+            if isinstance(widget, tk.Label):
+                try:
+                    current_font = str(widget.cget("font"))
+                except Exception:
+                    current_font = ""
+                try:
+                    text_val = str(widget.cget("text") or "")
+                except Exception:
+                    text_val = ""
+                try:
+                    widget.configure(fg=fg_main if ("bold" in current_font or text_val.startswith("ID ")) else fg_sub)
+                except Exception:
+                    pass
+        for child in widget.winfo_children():
+            self._boxel_apply_card_colors(child, bg, fg_main, fg_sub)
+
+    def _boxel_build_thumbnail(self, voxel_cfg: dict):
+        if not isinstance(voxel_cfg, dict):
+            return None
+        atlas_rel = self._boxel_extract_atlas_rel(voxel_cfg)
+        if not atlas_rel:
+            return None
+        tile_col, tile_row = self._boxel_extract_cell(voxel_cfg)
+        abs_atlas = os.path.join(self._boxel_texture_root(), atlas_rel)
+        if not os.path.exists(abs_atlas):
+            return None
+        cache_key = f"{abs_atlas}|{tile_col}|{tile_row}"
+        cached = self.boxel_thumb_cache.get(cache_key)
+        if cached:
+            if isinstance(cached, dict):
+                return cached.get("thumb")
+            return cached
+        src = self.boxel_atlas_cache.get(abs_atlas)
+        if not src:
+            try:
+                src = tk.PhotoImage(file=abs_atlas)
+                self.boxel_atlas_cache[abs_atlas] = src
+            except Exception:
+                return None
+        # Layout fijo definitivo: 6x4, borde=1px, interior=256px.
+        border, inner = self._boxel_layout_from_source(src, cols=6, rows=4, default_inner=256, default_border=1)
+        sw = max(1, int(src.width()))
+        sh = max(1, int(src.height()))
+        grid_w = (6 * inner) + (7 * border)
+        grid_h = (4 * inner) + (5 * border)
+        off_x = max(0, (sw - grid_w) // 2)
+        off_y = max(0, (sh - grid_h) // 2)
+        x1 = off_x + border + (tile_col * (inner + border))
+        y1 = off_y + border + (tile_row * (inner + border))
+        x2 = x1 + inner
+        y2 = y1 + inner
+        if x2 > sw or y2 > sh:
+            return None
+        tile = tk.PhotoImage(width=inner, height=inner)
+        try:
+            if hasattr(tile, "copy_replace"):
+                tile.copy_replace(src, from_coords=(x1, y1, x2, y2), to=(0, 0))
+            else:
+                tile.tk.call(tile, "copy", src, "-from", x1, y1, x2, y2, "-to", 0, 0)
+        except Exception:
+            return None
+        thumb = tile.subsample(2, 2)  # 32x32
+        self.boxel_thumb_cache[cache_key] = {"thumb": thumb, "tile": tile}
+        if len(self.boxel_thumb_cache) > 400:
+            self.boxel_thumb_cache.clear()
+        return thumb
+
+    def _boxel_current_preview_cfg(self) -> dict:
+        atlas_rel = (self.boxel_texture_atlas.get() or "").strip().replace("\\", "/")
+        if not atlas_rel:
+            atlas_rel = self._boxel_default_atlas_rel()
+        col = max(0, min(5, int(self.boxel_tile_col.get() or 0)))
+        row = max(0, min(3, int(self.boxel_tile_row.get() or 0)))
+        return {
+            "atlas": f"assets/sprites/texturas/{atlas_rel}" if atlas_rel else "",
+            "tile_col": col,
+            "tile_row": row,
+            "tile_cols": 6,
+            "tile_rows": 4,
+        }
+
+    def _boxel_extract_tile_image(self, voxel_cfg: dict):
+        if not isinstance(voxel_cfg, dict):
+            return None
+        atlas_rel = self._boxel_extract_atlas_rel(voxel_cfg)
+        if not atlas_rel:
+            return None
+        tile_col, tile_row = self._boxel_extract_cell(voxel_cfg)
+        abs_atlas = os.path.join(self._boxel_texture_root(), atlas_rel)
+        if not os.path.exists(abs_atlas):
+            return None
+        src = self.boxel_atlas_cache.get(abs_atlas)
+        if not src:
+            try:
+                src = tk.PhotoImage(file=abs_atlas)
+                self.boxel_atlas_cache[abs_atlas] = src
+            except Exception:
+                return None
+        border, inner = self._boxel_layout_from_source(src, cols=6, rows=4, default_inner=256, default_border=1)
+        sw = max(1, int(src.width()))
+        sh = max(1, int(src.height()))
+        grid_w = (6 * inner) + (7 * border)
+        grid_h = (4 * inner) + (5 * border)
+        off_x = max(0, (sw - grid_w) // 2)
+        off_y = max(0, (sh - grid_h) // 2)
+        x1 = off_x + border + (tile_col * (inner + border))
+        y1 = off_y + border + (tile_row * (inner + border))
+        x2 = x1 + inner
+        y2 = y1 + inner
+        if x2 > sw or y2 > sh:
+            return None
+        tile = tk.PhotoImage(width=inner, height=inner)
+        try:
+            if hasattr(tile, "copy_replace"):
+                tile.copy_replace(src, from_coords=(x1, y1, x2, y2), to=(0, 0))
+            else:
+                tile.tk.call(tile, "copy", src, "-from", x1, y1, x2, y2, "-to", 0, 0)
+        except Exception:
+            return None
+        return tile
+
+    def _boxel_layout_from_source(self, src_img, cols: int = 6, rows: int = 4, default_inner: int = 256, default_border: int = 1):
+        border = max(1, int(default_border or 1))
+        inner = max(1, int(default_inner or 256))
+        # Formato cerrado por diseño: 6x4 con interior=256 y borde=1.
+        _ = src_img
+        _ = cols
+        _ = rows
+        return border, inner
+
+    def _draw_boxel_static_preview(self):
+        canvas = self.boxel_static_preview_canvas
+        if not canvas:
+            return
+        self.boxel_static_preview_refs = []
+        canvas.delete("all")
+        w = max(1, int(canvas.winfo_width() or 1))
+        h = max(1, int(canvas.winfo_height() or 1))
+        canvas.create_rectangle(0, 0, w, h, fill="#0c1522", outline="")
+        cfg = self._boxel_current_preview_cfg()
+        tile = self._boxel_extract_tile_image(cfg)
+        if not tile:
+            canvas.create_text(w // 2, h // 2, text="Sin preview de boxel", fill="#9bb2cf")
+            return
+
+        # Tile ampliado.
+        tile_big = tile.zoom(2, 2)  # 128x128
+        self.boxel_static_preview_refs.extend([tile, tile_big])
+        canvas.create_text(90, 16, text="Tile", fill="#d8e6fa", anchor="w")
+        canvas.create_image(22, 24, image=tile_big, anchor="nw")
+        canvas.create_rectangle(22, 24, 150, 152, outline="#6f88a8")
+
+        # Vista cubo estatica simple (3 caras) con la misma textura.
+        face = tile_big
+        fx = 220
+        fy = 54
+        canvas.create_text(fx, 16, text="Voxel (estatico)", fill="#d8e6fa", anchor="w")
+        # Cara superior
+        canvas.create_image(fx + 36, fy, image=face, anchor="nw")
+        canvas.create_rectangle(fx + 36, fy, fx + 164, fy + 128, outline="#000000")
+        # Cara frontal
+        canvas.create_image(fx, fy + 70, image=face, anchor="nw")
+        canvas.create_rectangle(fx, fy + 70, fx + 128, fy + 198, outline="#000000")
+        # Cara lateral
+        canvas.create_image(fx + 128, fy + 70, image=face, anchor="nw")
+        canvas.create_rectangle(fx + 128, fy + 70, fx + 256, fy + 198, outline="#000000")
+        canvas.create_rectangle(fx + 128, fy + 70, fx + 256, fy + 198, fill="#000000", stipple="gray75", outline="")
+
+    def _boxels_get_selected_item_code(self):
+        if self.boxel_selected_item_code:
+            return self.boxel_selected_item_code
+        table = self.boxels_table
+        if not table:
+            return None
+        sel = table.selection()
+        if not sel:
+            return None
+        vals = table.item(sel[0], "values") or []
+        return str(vals[0]).strip() if vals else None
+
+    def _boxel_texture_root(self):
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base, "assets", "sprites", "texturas")
+
+    def _list_boxel_texture_files(self) -> list[str]:
+        root = self._boxel_texture_root()
+        if not os.path.isdir(root):
+            return []
+        out = []
+        for base_dir, _dirs, files in os.walk(root):
+            for name in files:
+                if not name.lower().endswith(".png"):
+                    continue
+                abs_path = os.path.join(base_dir, name)
+                rel = os.path.relpath(abs_path, root).replace("\\", "/")
+                out.append(rel)
+        out.sort(key=lambda s: s.lower())
+        return out
+
+    def _boxel_default_atlas_rel(self) -> str:
+        values = self._list_boxel_texture_files()
+        if not values:
+            return ""
+        for rel in values:
+            if str(rel).strip().lower() == "atlas_base_boxel.png":
+                return rel
+        for rel in values:
+            if str(rel).strip().lower() == "atlas_000.png":
+                return rel
+        return values[0]
+
+    def _boxel_extract_atlas_rel(self, voxel_cfg: dict | None) -> str:
+        cfg = voxel_cfg if isinstance(voxel_cfg, dict) else {}
+        raw = (
+            cfg.get("atlas")
+            or cfg.get("atlas_path")
+            or cfg.get("texture")
+            or cfg.get("texture_atlas")
+            or ""
+        )
+        text = str(raw or "").strip().replace("\\", "/")
+        prefix = "assets/sprites/texturas/"
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):]
+        if text:
+            abs_path = os.path.join(self._boxel_texture_root(), text)
+            if os.path.exists(abs_path):
+                return text
+        return self._boxel_default_atlas_rel()
+
+    def _boxel_extract_voxel_cfg(self, props) -> dict:
+        data = props
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+
+        voxel = data.get("voxel")
+        if isinstance(voxel, str):
+            try:
+                voxel = json.loads(voxel)
+            except Exception:
+                voxel = {}
+        if not isinstance(voxel, dict):
+            voxel = {}
+
+        # Compatibilidad: algunos registros guardan claves voxel en raiz.
+        root_has_voxel_keys = any(k in data for k in ("atlas", "atlas_path", "texture", "texture_atlas", "tile_col", "tile_row", "cell_col", "cell_row", "tile_index"))
+        if (not voxel) and root_has_voxel_keys:
+            voxel = dict(data)
+        return voxel
+
+    def _boxel_extract_cell(self, voxel_cfg: dict) -> tuple[int, int]:
+        cfg = voxel_cfg if isinstance(voxel_cfg, dict) else {}
+        col_raw = cfg.get("tile_col", cfg.get("cell_col", cfg.get("col", 0)))
+        row_raw = cfg.get("tile_row", cfg.get("cell_row", cfg.get("row", 0)))
+        try:
+            col = int(col_raw)
+        except Exception:
+            col = 0
+        try:
+            row = int(row_raw)
+        except Exception:
+            row = 0
+        # Compatibilidad: si viene index lineal.
+        if ("tile_index" in cfg or "cell_index" in cfg) and (("tile_col" not in cfg and "cell_col" not in cfg) or ("tile_row" not in cfg and "cell_row" not in cfg)):
+            idx_raw = cfg.get("tile_index", cfg.get("cell_index", 0))
+            try:
+                idx = int(idx_raw)
+            except Exception:
+                idx = 0
+            col = idx % 6
+            row = idx // 6
+        col = max(0, min(5, col))
+        row = max(0, min(3, row))
+        return col, row
+
+    def _boxel_abs_atlas_path(self):
+        rel = (self.boxel_texture_atlas.get() or "").strip().replace("\\", "/")
+        if not rel:
+            return None
+        return os.path.join(self._boxel_texture_root(), rel)
+
+    def _refresh_boxel_atlas_combo_values(self, combo):
+        values = self._list_boxel_texture_files()
+        try:
+            combo.configure(values=values)
+        except Exception:
+            pass
+        current = (self.boxel_texture_atlas.get() or "").strip()
+        if (not current) and values:
+            self.boxel_texture_atlas.set(self._boxel_default_atlas_rel())
+        elif current and current not in values and values:
+            self.boxel_texture_atlas.set(self._boxel_default_atlas_rel())
+        self._on_boxel_atlas_changed()
+
+    def _next_numeric_item_code_seed(self, db: DatabaseManager) -> int:
+        max_code = 0
+        try:
+            rows = db.list_items(limit=200000, active_only=False)
+        except Exception:
+            rows = []
+        for row in rows or []:
+            raw = str(row.get("item_code") or "").strip()
+            if not raw.isdigit():
+                continue
+            try:
+                n = int(raw)
+            except Exception:
+                continue
+            if n > max_code:
+                max_code = n
+        return max_code + 1
+
+    def boxel_generate_from_entire_atlas(self):
+        db = self.db_manager or self._build_db_manager()
+        if not db:
+            return
+        atlas_rel = (self.boxel_texture_atlas.get() or "").strip().replace("\\", "/")
+        if not atlas_rel:
+            atlas_rel = self._boxel_default_atlas_rel()
+            if atlas_rel:
+                self.boxel_texture_atlas.set(atlas_rel)
+        if not atlas_rel:
+            messagebox.showerror("Boxels", "Selecciona una textura atlas antes de generar.")
+            return
+        abs_atlas = os.path.join(self._boxel_texture_root(), atlas_rel)
+        if not os.path.exists(abs_atlas):
+            messagebox.showerror("Boxels", "El atlas seleccionado no existe.")
+            return
+        total = 6 * 4
+        ok = messagebox.askyesno(
+            "Boxels",
+            (
+                f"Se van a generar {total} boxels nuevos usando el atlas:\n"
+                f"{atlas_rel}\n\n"
+                "Se creara 1 boxel por cada celda (6x4).\n"
+                "Quieres continuar?"
+            ),
+        )
+        if not ok:
+            return
+        prefix = simpledialog.askstring(
+            "Boxels",
+            "Indica prefijo para nombres (ej: STONE):",
+            parent=self.boxel_editor_window if (self.boxel_editor_window and self.boxel_editor_window.winfo_exists()) else self.root,
+        )
+        prefix = (prefix or "").strip()
+        if not prefix:
+            messagebox.showwarning("Boxels", "Generacion cancelada: prefijo vacio.")
+            return
+        safe_prefix = "".join(ch for ch in prefix if ch.isalnum() or ch in {"_", "-"}).strip("_-")
+        if not safe_prefix:
+            messagebox.showwarning("Boxels", "Prefijo invalido. Usa letras/numeros/_/-.")
+            return
+
+        atlas_stem = os.path.splitext(os.path.basename(atlas_rel))[0]
+        next_code = self._next_numeric_item_code_seed(db)
+        created = 0
+        failed = 0
+        seq = 1
+        for row in range(4):
+            for col in range(6):
+                code = str(next_code)
+                next_code += 1
+                gen_name = f"{safe_prefix}_{seq:03d}"
+                seq += 1
+                payload = {
+                    "item_code": code,
+                    "name": gen_name,
+                    "description": f"Auto generado desde atlas {atlas_rel} celda [{col},{row}]",
+                    "item_type": "boxel",
+                    "rarity": "common",
+                    "max_stack": 256,
+                    "tradeable": 1,
+                    "value_coins": 0,
+                    "icon_key": None,
+                    "model_key": None,
+                    "properties_json": json.dumps(
+                        {
+                            "voxel": {
+                                "atlas": f"assets/sprites/texturas/{atlas_rel}",
+                                "tile_col": col,
+                                "tile_row": row,
+                                "tile_cols": 6,
+                                "tile_rows": 4,
+                                "atlas_layout": "grid6x4_border1_inner256",
+                                "cell_inner_px": 256,
+                                "cell_border_px": 1,
+                                "biomes": [],
+                                "emission": {
+                                    "enabled": False,
+                                    "color": "#ffd37a",
+                                    "intensity": 1.2,
+                                },
+                            }
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "is_active": 1,
+                }
+                try:
+                    db.save_item_catalog(payload)
+                    created += 1
+                except Exception:
+                    failed += 1
+        self.refresh_boxels_list()
+        self.log(f"[BOXELS] Generacion masiva atlas='{atlas_rel}' creados={created} fallidos={failed}")
+        messagebox.showinfo(
+            "Boxels",
+            f"Generacion completada.\nCreados: {created}\nFallidos: {failed}",
+        )
+
+    def _on_boxel_atlas_changed(self, publish: bool = True, auto_defaults: bool = True):
+        _ = auto_defaults
+        # Plantilla fija: siempre 6x4 celdas.
+        self.boxel_tile_cols.set(6)
+        self.boxel_tile_rows.set(4)
+        self._on_boxel_tile_params_changed(publish=publish)
+
+    def _on_boxel_tile_params_changed(self, publish: bool = True):
+        cols = 6
+        rows = 4
+        self.boxel_tile_cols.set(cols)
+        self.boxel_tile_rows.set(rows)
+        if self.boxel_tile_col_scale:
+            self.boxel_tile_col_scale.configure(to=max(0, cols - 1))
+        if self.boxel_tile_row_scale:
+            self.boxel_tile_row_scale.configure(to=max(0, rows - 1))
+        self.boxel_tile_col.set(max(0, min(cols - 1, int(self.boxel_tile_col.get() or 0))))
+        self.boxel_tile_row.set(max(0, min(rows - 1, int(self.boxel_tile_row.get() or 0))))
+        col = int(self.boxel_tile_col.get() or 0)
+        row = int(self.boxel_tile_row.get() or 0)
+        idx = (row * cols) + col
+        self.boxel_cell_status.set(f"Celda: [{col},{row}] | idx={idx}")
+        self._draw_boxel_static_preview()
+        if publish:
+            self._boxel_publish_live_preview()
+
+    def _boxel_step_cell(self, delta: int):
+        cols = 6
+        rows = 4
+        col = int(self.boxel_tile_col.get() or 0)
+        row = int(self.boxel_tile_row.get() or 0)
+        idx = (row * cols) + col
+        idx = (idx + int(delta)) % (cols * rows)
+        self.boxel_tile_col.set(idx % cols)
+        self.boxel_tile_row.set(idx // cols)
+        self._on_boxel_tile_params_changed()
+
+    def _boxel_step_row(self, delta: int):
+        cols = 6
+        rows = 4
+        col = int(self.boxel_tile_col.get() or 0)
+        row = int(self.boxel_tile_row.get() or 0)
+        row = (row + int(delta)) % rows
+        self.boxel_tile_col.set(col)
+        self.boxel_tile_row.set(row)
+        self._on_boxel_tile_params_changed()
+
+    def _boxel_tile_rect_px(self, col: int, row: int):
+        tile_w = max(1, int(self.boxel_tile_w_px.get() or 1))
+        tile_h = max(1, int(self.boxel_tile_h_px.get() or 1))
+        off_x = max(0, int(self.boxel_offset_x_px.get() or 0))
+        off_y = max(0, int(self.boxel_offset_y_px.get() or 0))
+        gap_x = max(0, int(self.boxel_gap_x_px.get() or 0))
+        gap_y = max(0, int(self.boxel_gap_y_px.get() or 0))
+        x1 = off_x + (col * (tile_w + gap_x))
+        y1 = off_y + (row * (tile_h + gap_y))
+        x2 = x1 + tile_w
+        y2 = y1 + tile_h
+        return x1, y1, x2, y2
+
+    def _draw_boxel_atlas_canvas(self):
+        canvas = self.boxel_atlas_canvas
+        if not canvas:
+            return
+        canvas.delete("all")
+        w = max(1, int(canvas.winfo_width() or 1))
+        h = max(1, int(canvas.winfo_height() or 1))
+        src = self.boxel_atlas_image_src
+        if not src:
+            canvas.create_text(w // 2, h // 2, text="Atlas no cargado", fill="#cdd9ea")
+            self.boxel_atlas_status.set("Atlas: sin cargar")
+            return
+
+        sw = max(1, int(src.width()))
+        sh = max(1, int(src.height()))
+        fit = min(w / sw, h / sh)
+        fit = max(0.05, min(1.0, fit))
+        subs = max(1, int(math.ceil(1.0 / fit)))
+        view = src.subsample(subs, subs)
+        self.boxel_atlas_image_view = view
+        vw = max(1, int(view.width()))
+        vh = max(1, int(view.height()))
+        ox = (w - vw) // 2
+        oy = (h - vh) // 2
+        canvas.create_image(ox, oy, image=view, anchor="nw")
+
+        cols = max(1, int(self.boxel_tile_cols.get() or 1))
+        rows = max(1, int(self.boxel_tile_rows.get() or 1))
+        scale_x = vw / max(1.0, float(sw))
+        scale_y = vh / max(1.0, float(sh))
+        for r in range(rows):
+            for c in range(cols):
+                rx1, ry1, rx2, ry2 = self._boxel_tile_rect_px(c, r)
+                vx1 = ox + (rx1 * scale_x)
+                vy1 = oy + (ry1 * scale_y)
+                vx2 = ox + (rx2 * scale_x)
+                vy2 = oy + (ry2 * scale_y)
+                if vx2 <= ox or vy2 <= oy or vx1 >= (ox + vw) or vy1 >= (oy + vh):
+                    continue
+                canvas.create_rectangle(vx1, vy1, vx2, vy2, outline="#ffe16b")
+        canvas.create_rectangle(ox, oy, ox + vw, oy + vh, outline="#ffe16b", width=2)
+
+        col = max(0, min(cols - 1, int(self.boxel_tile_col.get() or 0)))
+        row = max(0, min(rows - 1, int(self.boxel_tile_row.get() or 0)))
+        rx1, ry1, rx2, ry2 = self._boxel_tile_rect_px(col, row)
+        x1 = ox + (rx1 * scale_x)
+        y1 = oy + (ry1 * scale_y)
+        x2 = ox + (rx2 * scale_x)
+        y2 = oy + (ry2 * scale_y)
+        canvas.create_rectangle(x1, y1, x2, y2, outline="#00f0ff", width=3)
+        canvas.create_rectangle(x1 + 1, y1 + 1, x2 - 1, y2 - 1, outline="#000000", width=1)
+        self.boxel_atlas_status.set(
+            f"Atlas: {sw}x{sh} | Grid: {cols}x{rows} | Tile: [{col},{row}] | TilePx: {self.boxel_tile_w_px.get()}x{self.boxel_tile_h_px.get()} | Off: {self.boxel_offset_x_px.get()},{self.boxel_offset_y_px.get()} | Gap: {self.boxel_gap_x_px.get()},{self.boxel_gap_y_px.get()}"
+        )
+
+    def _on_boxel_atlas_click(self, event):
+        canvas = self.boxel_atlas_canvas
+        src = self.boxel_atlas_image_src
+        view = self.boxel_atlas_image_view
+        if not canvas or not src or not view:
+            return
+        w = max(1, int(canvas.winfo_width() or 1))
+        h = max(1, int(canvas.winfo_height() or 1))
+        vw = max(1, int(view.width()))
+        vh = max(1, int(view.height()))
+        ox = (w - vw) // 2
+        oy = (h - vh) // 2
+        x = int(getattr(event, "x", 0) or 0)
+        y = int(getattr(event, "y", 0) or 0)
+        if x < ox or y < oy or x >= (ox + vw) or y >= (oy + vh):
+            return
+        sw = max(1, int(src.width()))
+        sh = max(1, int(src.height()))
+        cols = max(1, int(self.boxel_tile_cols.get() or 1))
+        rows = max(1, int(self.boxel_tile_rows.get() or 1))
+        atlas_x = ((x - ox) / max(1.0, float(vw))) * sw
+        atlas_y = ((y - oy) / max(1.0, float(vh))) * sh
+        hit_col = None
+        hit_row = None
+        for r in range(rows):
+            for c in range(cols):
+                rx1, ry1, rx2, ry2 = self._boxel_tile_rect_px(c, r)
+                if atlas_x >= rx1 and atlas_x < rx2 and atlas_y >= ry1 and atlas_y < ry2:
+                    hit_col = c
+                    hit_row = r
+                    break
+            if hit_col is not None:
+                break
+        if hit_col is None or hit_row is None:
+            return
+        self.boxel_tile_col.set(hit_col)
+        self.boxel_tile_row.set(hit_row)
+        self._on_boxel_tile_params_changed()
+
+    def _boxel_collect_voxel_properties_from_form(self, silent: bool = False):
+        atlas_rel = (self.boxel_texture_atlas.get() or "").strip().replace("\\", "/")
+        if not atlas_rel:
+            atlas_rel = self._boxel_default_atlas_rel()
+        if not atlas_rel:
+            if not silent:
+                messagebox.showerror("Boxels", "Selecciona una textura atlas (.png).")
+            return None
+        abs_atlas = os.path.join(self._boxel_texture_root(), atlas_rel)
+        if not os.path.exists(abs_atlas):
+            if not silent:
+                messagebox.showerror("Boxels", "La textura atlas no existe.")
+            return None
+        tile_cols = 6
+        tile_rows = 4
+        tile_col = max(0, min(tile_cols - 1, int(self.boxel_tile_col.get() or 0)))
+        tile_row = max(0, min(tile_rows - 1, int(self.boxel_tile_row.get() or 0)))
+        self.boxel_tile_cols.set(tile_cols)
+        self.boxel_tile_rows.set(tile_rows)
+        self.boxel_tile_col.set(tile_col)
+        self.boxel_tile_row.set(tile_row)
+        biomes = []
+        if self.boxel_biome_listbox and self.boxel_biome_listbox.winfo_exists():
+            selected = self.boxel_biome_listbox.curselection()
+            for idx in selected:
+                try:
+                    b = self.boxel_biome_values[int(idx)]
+                except Exception:
+                    continue
+                if b and b not in biomes:
+                    biomes.append(b)
+        color = str(self.boxel_emission_color.get() or "#ffd37a").strip().lower()
+        if not (len(color) == 7 and color.startswith("#")):
+            color = "#ffd37a"
+        intensity = float(self.boxel_emission_intensity.get() or 0.0)
+        intensity = max(0.0, min(20.0, intensity))
+        return {
+            "atlas": f"assets/sprites/texturas/{atlas_rel}",
+            "tile_col": tile_col,
+            "tile_row": tile_row,
+            "tile_cols": tile_cols,
+            "tile_rows": tile_rows,
+            "atlas_layout": "grid6x4_border1_inner256",
+            "cell_inner_px": 256,
+            "cell_border_px": 1,
+            "biomes": biomes,
+            "emission": {
+                "enabled": bool(self.boxel_emission_enabled.get()),
+                "color": color,
+                "intensity": intensity,
+            },
+        }
+
+    def _boxel_default_name(self, code: str | None = None) -> str:
+        text = str(code or self.boxel_code.get() or "").strip()
+        if text:
+            return f"Boxel {text}"
+        return "Boxel"
+
+    def _open_boxel_popup(self, item_code: str | None):
+        if self.boxel_editor_window and self.boxel_editor_window.winfo_exists():
+            try:
+                self.boxel_editor_window.lift()
+                self.boxel_editor_window.focus_force()
+            except Exception:
+                pass
+            return
+        db = self.db_manager or self._build_db_manager()
+        if not db:
+            return
+        self.boxel_editor_window = tk.Toplevel(self.root)
+        win = self.boxel_editor_window
+        win.title("Nuevo Boxel" if not item_code else f"Editar Boxel: {item_code}")
+        win.geometry("980x680")
+        win.minsize(860, 620)
+        win.transient(self.root)
+        win.grab_set()
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(0, weight=1)
+
+        popup_wrap = tk.Frame(win)
+        popup_wrap.grid(row=0, column=0, sticky="nsew")
+        popup_wrap.grid_columnconfigure(0, weight=1)
+        popup_wrap.grid_rowconfigure(0, weight=1)
+        popup_canvas = tk.Canvas(popup_wrap, highlightthickness=0, borderwidth=0)
+        popup_scroll = ttk.Scrollbar(popup_wrap, orient="vertical", command=popup_canvas.yview)
+        popup_canvas.configure(yscrollcommand=popup_scroll.set)
+        popup_canvas.grid(row=0, column=0, sticky="nsew")
+        popup_scroll.grid(row=0, column=1, sticky="ns")
+        popup_content = tk.Frame(popup_canvas)
+        popup_window_id = popup_canvas.create_window((0, 0), window=popup_content, anchor="nw")
+
+        def _popup_sync_scroll_region(_event=None):
+            popup_canvas.configure(scrollregion=popup_canvas.bbox("all"))
+            _popup_toggle_scrollbar()
+
+        def _popup_sync_width(event):
+            popup_canvas.itemconfigure(popup_window_id, width=event.width)
+            _popup_toggle_scrollbar()
+
+        def _popup_on_wheel(event):
+            delta = int(-1 * (event.delta / 120)) if getattr(event, "delta", 0) else 0
+            if delta != 0:
+                popup_canvas.yview_scroll(delta, "units")
+
+        def _popup_toggle_scrollbar():
+            try:
+                content_h = int(popup_content.winfo_reqheight() or 0)
+                viewport_h = int(popup_canvas.winfo_height() or 0)
+                need = content_h > (viewport_h + 2)
+                if need:
+                    popup_scroll.grid()
+                else:
+                    popup_scroll.grid_remove()
+            except Exception:
+                pass
+
+        popup_content.bind("<Configure>", _popup_sync_scroll_region)
+        popup_canvas.bind("<Configure>", _popup_sync_width)
+        popup_canvas.bind("<Enter>", lambda _e: popup_canvas.bind_all("<MouseWheel>", _popup_on_wheel))
+        popup_canvas.bind("<Leave>", lambda _e: popup_canvas.unbind_all("<MouseWheel>"))
+
+        form = tk.Frame(popup_content, padx=10, pady=10)
+        form.grid(row=0, column=0, sticky="ew")
+        for col in (1, 3):
+            form.grid_columnconfigure(col, weight=1)
+
+        tk.Label(form, text="Boxel ID:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Entry(form, textvariable=self.boxel_code, width=24, state="readonly").grid(row=0, column=1, sticky="w", pady=4)
+        tk.Label(form, text="Nombre:").grid(row=0, column=2, sticky="e", padx=(12, 6), pady=4)
+        tk.Entry(form, textvariable=self.boxel_name, width=34).grid(row=0, column=3, sticky="ew", pady=4)
+
+        tk.Label(form, text="Textura atlas:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        atlas_values = self._list_boxel_texture_files()
+        atlas_combo = ttk.Combobox(form, textvariable=self.boxel_texture_atlas, values=atlas_values, width=34, state="readonly")
+        atlas_combo.grid(row=1, column=1, sticky="w", pady=4)
+        atlas_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_boxel_atlas_changed())
+        atlas_btns = tk.Frame(form)
+        atlas_btns.grid(row=1, column=2, columnspan=2, sticky="w", padx=(12, 0), pady=4)
+        tk.Button(atlas_btns, text="Refrescar lista", width=14, command=lambda: self._refresh_boxel_atlas_combo_values(atlas_combo)).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(
+            atlas_btns,
+            text="GEN_BOXELS BY ENTIRE ATLAS",
+            width=28,
+            bg="#34c759",
+            fg="#000000",
+            activebackground="#4de073",
+            activeforeground="#000000",
+            command=self.boxel_generate_from_entire_atlas,
+        ).pack(side=tk.LEFT)
+
+        tk.Label(form, text="Tile col:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.boxel_tile_col_scale = tk.Scale(
+            form,
+            from_=0,
+            to=5,
+            resolution=1,
+            orient=tk.HORIZONTAL,
+            length=220,
+            variable=self.boxel_tile_col,
+            command=lambda _v: self._on_boxel_tile_params_changed(),
+        )
+        self.boxel_tile_col_scale.grid(row=2, column=1, sticky="w", pady=4)
+        tk.Label(form, text="Tile row:").grid(row=2, column=2, sticky="e", padx=(12, 6), pady=4)
+        self.boxel_tile_row_scale = tk.Scale(
+            form,
+            from_=0,
+            to=3,
+            resolution=1,
+            orient=tk.HORIZONTAL,
+            length=220,
+            variable=self.boxel_tile_row,
+            command=lambda _v: self._on_boxel_tile_params_changed(),
+        )
+        self.boxel_tile_row_scale.grid(row=2, column=3, sticky="w", pady=4)
+
+        tk.Label(form, text="Atlas cols:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(form, text="6 (fijo)").grid(row=3, column=1, sticky="w", pady=4)
+        tk.Label(form, text="Atlas rows:").grid(row=3, column=2, sticky="e", padx=(12, 6), pady=4)
+        tk.Label(form, text="4 (fijo)").grid(row=3, column=3, sticky="w", pady=4)
+
+        cell_frame = tk.LabelFrame(form, text="Selector de celda (6x4 fijo)", padx=8, pady=8)
+        cell_frame.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 4))
+        tk.Button(cell_frame, text="<< Celda", width=12, command=lambda: self._boxel_step_cell(-1)).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(cell_frame, text="Celda >>", width=12, command=lambda: self._boxel_step_cell(1)).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Button(cell_frame, text="Fila -", width=10, command=lambda: self._boxel_step_row(-1)).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(cell_frame, text="Fila +", width=10, command=lambda: self._boxel_step_row(1)).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(cell_frame, textvariable=self.boxel_cell_status).pack(side=tk.LEFT)
+
+        preview_frame = tk.LabelFrame(form, text="Preview Boxel", padx=8, pady=8)
+        preview_frame.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(4, 4))
+        preview_frame.grid_columnconfigure(0, weight=1)
+        self.boxel_static_preview_canvas = tk.Canvas(preview_frame, width=520, height=210, bg="#0c1522", highlightthickness=1)
+        self.boxel_static_preview_canvas.configure(highlightbackground="#4f5f73")
+        self.boxel_static_preview_canvas.grid(row=0, column=0, sticky="ew")
+        self.boxel_static_preview_canvas.bind("<Configure>", lambda _e: self._draw_boxel_static_preview())
+
+        tk.Label(form, text="Biomas:").grid(row=6, column=0, sticky="ne", padx=(0, 6), pady=4)
+        biome_frame = tk.Frame(form)
+        biome_frame.grid(row=6, column=1, sticky="w", pady=4)
+        self.boxel_biome_listbox = tk.Listbox(biome_frame, selectmode=tk.MULTIPLE, width=26, height=6, exportselection=False)
+        for biome in self.boxel_biome_values:
+            self.boxel_biome_listbox.insert(tk.END, biome)
+        self.boxel_biome_listbox.pack(side=tk.LEFT)
+        self.boxel_biome_listbox.bind("<<ListboxSelect>>", lambda _e: self._boxel_publish_live_preview())
+        tk.Label(form, text="(sin seleccion = no asignado)").grid(row=6, column=2, columnspan=2, sticky="w", pady=4)
+
+        tk.Label(form, text="Luz emitida:").grid(row=7, column=0, sticky="e", padx=(0, 6), pady=4)
+        light_row = tk.Frame(form)
+        light_row.grid(row=7, column=1, columnspan=3, sticky="w", pady=4)
+        tk.Checkbutton(light_row, text="Activada", variable=self.boxel_emission_enabled, command=self._boxel_publish_live_preview).pack(side=tk.LEFT)
+        tk.Button(light_row, text="Color", width=10, command=self.choose_boxel_emission_color).pack(side=tk.LEFT, padx=(12, 6))
+        self.boxel_light_color_preview = tk.Label(light_row, text="    ", relief=tk.SOLID, borderwidth=1)
+        self.boxel_light_color_preview.pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(light_row, text="Intensidad").pack(side=tk.LEFT, padx=(0, 6))
+        tk.Scale(light_row, from_=0.0, to=20.0, resolution=0.1, orient=tk.HORIZONTAL, length=180, variable=self.boxel_emission_intensity, command=lambda _v: self._boxel_publish_live_preview()).pack(side=tk.LEFT)
+
+        tk.Label(form, text="Descripcion:").grid(row=8, column=0, sticky="ne", padx=(0, 6), pady=4)
+        tk.Entry(form, textvariable=self.boxel_description, width=72).grid(row=8, column=1, columnspan=3, sticky="ew", pady=4)
+
+        tools = tk.Frame(popup_content, padx=10, pady=8)
+        tools.grid(row=1, column=0, sticky="w")
+        tk.Button(tools, text="Visor WebGL", width=14, command=self.boxel_open_webgl_preview).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(tools, text="Actualizar visor", width=14, command=self._boxel_publish_live_preview).pack(side=tk.LEFT, padx=(0, 6))
+
+        footer = tk.Frame(popup_content, padx=10, pady=10)
+        footer.grid(row=2, column=0, sticky="w")
+        tk.Button(footer, text="Guardar", width=14, command=self.boxel_save_from_popup).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(footer, text="Cancelar", width=14, command=self.boxel_close_popup).pack(side=tk.LEFT)
+
+        if item_code:
+            self.boxel_popup_edit_item_code = item_code.strip()
+            row = db.get_item_by_code(item_code)
+            if row:
+                self._apply_boxel_row_to_form(row)
+        else:
+            self.boxel_popup_edit_item_code = None
+            self.boxel_code.set(self._next_item_code(db))
+            self.boxel_name.set(self._boxel_default_name())
+            self.boxel_description.set("")
+            values = self._list_boxel_texture_files()
+            self.boxel_texture_atlas.set(self._boxel_default_atlas_rel() if values else "")
+            self.boxel_tile_col.set(0)
+            self.boxel_tile_row.set(0)
+            self.boxel_tile_cols.set(6)
+            self.boxel_tile_rows.set(4)
+            self.boxel_tile_w_px.set(256)
+            self.boxel_tile_h_px.set(256)
+            self.boxel_offset_x_px.set(0)
+            self.boxel_offset_y_px.set(0)
+            self.boxel_gap_x_px.set(0)
+            self.boxel_gap_y_px.set(0)
+            self.boxel_uv_inset_px.set(0.5)
+            self.boxel_emission_enabled.set(False)
+            self.boxel_emission_color.set("#ffd37a")
+            self.boxel_emission_intensity.set(1.2)
+            if self.boxel_biome_listbox:
+                self.boxel_biome_listbox.selection_clear(0, tk.END)
+        self._on_boxel_atlas_changed(publish=False, auto_defaults=not bool(item_code))
+        self._on_boxel_tile_params_changed(publish=False)
+        self._refresh_boxel_light_color_preview()
+        self._boxel_publish_live_preview()
+        win.after(40, _popup_toggle_scrollbar)
+        win.protocol("WM_DELETE_WINDOW", self.boxel_close_popup)
+
+    def _apply_boxel_row_to_form(self, row: dict):
+        self.boxel_code.set(str(row.get("item_code") or "").strip())
+        self.boxel_name.set(str(row.get("name") or "").strip())
+        self.boxel_description.set(str(row.get("description") or "").strip())
+        props = row.get("properties_json")
+        voxel = self._boxel_extract_voxel_cfg(props)
+        atlas = str(voxel.get("atlas") or "").strip()
+        atlas_prefix = "assets/sprites/texturas/"
+        if atlas.lower().startswith(atlas_prefix):
+            atlas = atlas[len(atlas_prefix):]
+        self.boxel_texture_atlas.set(atlas)
+        col, row_idx = self._boxel_extract_cell(voxel)
+        self.boxel_tile_col.set(col)
+        self.boxel_tile_row.set(row_idx)
+        self.boxel_tile_cols.set(max(1, int(voxel.get("tile_cols") or 6)))
+        self.boxel_tile_rows.set(max(1, int(voxel.get("tile_rows") or 4)))
+        self.boxel_tile_w_px.set(max(1, int(voxel.get("tile_w_px") or 256)))
+        self.boxel_tile_h_px.set(max(1, int(voxel.get("tile_h_px") or 256)))
+        self.boxel_offset_x_px.set(max(0, int(voxel.get("offset_x_px") or 0)))
+        self.boxel_offset_y_px.set(max(0, int(voxel.get("offset_y_px") or 0)))
+        self.boxel_gap_x_px.set(max(0, int(voxel.get("gap_x_px") or 0)))
+        self.boxel_gap_y_px.set(max(0, int(voxel.get("gap_y_px") or 0)))
+        self.boxel_uv_inset_px.set(max(0.0, float(voxel.get("uv_inset_px") or 0.5)))
+        emission = voxel.get("emission") if isinstance(voxel.get("emission"), dict) else {}
+        self.boxel_emission_enabled.set(bool(emission.get("enabled")))
+        self.boxel_emission_color.set(str(emission.get("color") or "#ffd37a").strip().lower())
+        self.boxel_emission_intensity.set(float(emission.get("intensity") or 1.2))
+        if self.boxel_biome_listbox and self.boxel_biome_listbox.winfo_exists():
+            self.boxel_biome_listbox.selection_clear(0, tk.END)
+            biomes = voxel.get("biomes") if isinstance(voxel.get("biomes"), list) else []
+            normalized = {str(b).strip().lower() for b in biomes}
+            for i, b in enumerate(self.boxel_biome_values):
+                if b.lower() in normalized:
+                    self.boxel_biome_listbox.selection_set(i)
+
+    def boxel_save_from_popup(self):
+        db = self.db_manager or self._build_db_manager()
+        if not db:
+            return
+        code = (self.boxel_code.get() or "").strip()
+        name = (self.boxel_name.get() or "").strip()
+        if not code:
+            messagebox.showerror("Boxels", "boxel_id es obligatorio.")
+            return
+        if not name:
+            name = self._boxel_default_name(code)
+            self.boxel_name.set(name)
+        voxel_cfg = self._boxel_collect_voxel_properties_from_form()
+        if not voxel_cfg:
+            return
+        props = {
+            "voxel": voxel_cfg,
+        }
+        payload = {
+            "item_code": code,
+            "name": name,
+            "description": (self.boxel_description.get() or "").strip() or None,
+            "item_type": "boxel",
+            "rarity": "common",
+            "max_stack": 256,
+            "tradeable": 1,
+            "value_coins": 0,
+            "icon_key": None,
+            "model_key": None,
+            "properties_json": json.dumps(props, ensure_ascii=False),
+            "is_active": 1,
+        }
+        try:
+            edit_code = (self.boxel_popup_edit_item_code or "").strip()
+            if not edit_code:
+                payload["item_code"] = self._next_item_code(db)
+                self.boxel_code.set(payload["item_code"])
+                existing = db.get_item_by_code(payload["item_code"])
+                while existing:
+                    payload["item_code"] = self._next_item_code(db)
+                    self.boxel_code.set(payload["item_code"])
+                    existing = db.get_item_by_code(payload["item_code"])
+            else:
+                payload["item_code"] = edit_code
+                existing = db.get_item_by_code(payload["item_code"])
+                if not existing:
+                    messagebox.showerror("Boxels", f"No existe boxel_id '{payload['item_code']}'.")
+                    return
+                payload["is_active"] = int(existing.get("is_active", 1))
+            db.save_item_catalog(payload)
+            self.log(f"[BOXELS] Boxel guardado: {payload['item_code']}")
+            self.refresh_boxels_list()
+            self.boxel_close_popup()
+        except Error as exc:
+            messagebox.showerror("Error MySQL", f"No se pudo guardar boxel:\n{exc}")
+
+    def boxel_close_popup(self):
+        win = self.boxel_editor_window
+        self.boxel_editor_window = None
+        self.boxel_popup_edit_item_code = None
+        self.boxel_biome_listbox = None
+        self.boxel_light_color_preview = None
+        self.boxel_atlas_canvas = None
+        self.boxel_atlas_image_src = None
+        self.boxel_atlas_image_view = None
+        self.boxel_tile_col_scale = None
+        self.boxel_tile_row_scale = None
+        self.boxel_static_preview_canvas = None
+        self.boxel_static_preview_refs = []
+        if win and win.winfo_exists():
+            win.destroy()
+
+    def choose_boxel_emission_color(self):
+        initial = (self.boxel_emission_color.get() or "#ffd37a").strip()
+        _rgb, hex_color = colorchooser.askcolor(color=initial, title="Color de emision del boxel")
+        if not hex_color:
+            return
+        self.boxel_emission_color.set(hex_color.lower())
+        self._refresh_boxel_light_color_preview()
+        self._boxel_publish_live_preview()
+
+    def _refresh_boxel_light_color_preview(self):
+        if not self.boxel_light_color_preview:
+            return
+        color = (self.boxel_emission_color.get() or "#ffd37a").strip().lower()
+        if not (len(color) == 7 and color.startswith("#")):
+            color = "#ffd37a"
+            self.boxel_emission_color.set(color)
+        self.boxel_light_color_preview.configure(bg=color)
+
+    def _boxel_preview_state_from_form(self):
+        voxel_cfg = self._boxel_collect_voxel_properties_from_form(silent=True)
+        if not voxel_cfg:
+            return None
+        return {"boxel_preview": voxel_cfg}
+
+    def _boxel_publish_live_preview(self):
+        state = self._boxel_preview_state_from_form()
+        if not state:
+            return
+        self._preview_publish("boxel", "", None, state)
+
+    def boxel_open_webgl_preview(self):
+        state = self._boxel_preview_state_from_form()
+        if not state:
+            return
+        self._open_live_web_preview("boxel", "", None, state)
 
     def _list_item_obj_files(self):
         model_root, _ = self._item_assets_roots()
@@ -1704,7 +3138,17 @@ class ServerGui:
         icon_path = None
         if icon_rel:
             icon_path = f"assets/sprites/iconos/{icon_rel.replace(os.sep, '/').replace('\\', '/')}"
-        self._open_live_web_preview("item", obj_rel, icon_path)
+        char_rel = self._preview_character_model_rel()
+        equip_cfg = self._item_collect_right_hand_transform_from_form()
+        self._open_live_web_preview(
+            "item",
+            obj_rel,
+            icon_path,
+            {
+                "character_obj": char_rel or "",
+                "equip_right_hand": equip_cfg,
+            },
+        )
 
     def _item_publish_live_preview(self):
         model_root, icon_root = self._item_assets_roots()
@@ -1716,7 +3160,15 @@ class ServerGui:
         icon_path = None
         if icon_rel:
             icon_path = f"assets/sprites/iconos/{icon_rel.replace(os.sep, '/').replace('\\', '/')}"
-        self._preview_publish("item", obj_rel, icon_path)
+        self._preview_publish(
+            "item",
+            obj_rel,
+            icon_path,
+            {
+                "character_obj": self._preview_character_model_rel() or "",
+                "equip_right_hand": self._item_collect_right_hand_transform_from_form(),
+            },
+        )
 
     def _item_abs_model_path(self):
         model_root, _ = self._item_assets_roots()
@@ -1943,12 +3395,187 @@ class ServerGui:
         icon_root = os.path.join(base, "assets", "sprites", "iconos")
         return model_root, icon_root
 
+    def _preview_character_model_rel(self) -> str | None:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        char_root = os.path.join(base, "assets", "modelos", "personajes")
+        if not os.path.isdir(char_root):
+            return None
+        rels = []
+        for root, _dirs, files in os.walk(char_root):
+            for name in files:
+                if not name.lower().endswith(SUPPORTED_MODEL_EXTS):
+                    continue
+                abs_path = os.path.join(root, name)
+                rel = os.path.relpath(abs_path, char_root).replace("\\", "/")
+                rels.append(rel)
+        if not rels:
+            return None
+        rels.sort()
+        return f"assets/modelos/personajes/{rels[0]}"
+
     def _item_clamp_scale(self, value) -> float:
         try:
             v = float(value)
         except Exception:
             v = 1.0
         return max(0.2, min(10.0, v))
+
+    def _item_default_right_hand_transform(self) -> dict:
+        return {
+            "pos": [0.0, 0.0, 0.0],
+            "rot": [0.0, 0.0, 0.0],
+            "scale": 1.0,
+            "bone": "auto",
+            "light": {
+                "enabled": False,
+                "color": "#ffd37a",
+                "intensity": 1.2,
+            },
+        }
+
+    def _item_to_float_or_default(self, raw, default: float) -> float:
+        try:
+            v = float(raw)
+        except Exception:
+            v = float(default)
+        if not math.isfinite(v):
+            v = float(default)
+        return v
+
+    def _item_collect_right_hand_transform_from_form(self) -> dict:
+        d = self._item_default_right_hand_transform()
+        pos = [
+            self._item_to_float_or_default(self.item_equip_pos_x.get(), d["pos"][0]),
+            self._item_to_float_or_default(self.item_equip_pos_y.get(), d["pos"][1]),
+            self._item_to_float_or_default(self.item_equip_pos_z.get(), d["pos"][2]),
+        ]
+        rot = [
+            self._item_to_float_or_default(self.item_equip_rot_x.get(), d["rot"][0]),
+            self._item_to_float_or_default(self.item_equip_rot_y.get(), d["rot"][1]),
+            self._item_to_float_or_default(self.item_equip_rot_z.get(), d["rot"][2]),
+        ]
+        scale = self._item_to_float_or_default(self.item_equip_scale.get(), d["scale"])
+        scale = max(0.05, min(8.0, scale))
+        bone = (self.item_equip_bone.get() or "auto").strip()
+        if not bone:
+            bone = "auto"
+        light_enabled = bool(self.item_equip_light_enabled.get())
+        light_color = str(self.item_equip_light_color.get() or "#ffd37a").strip().lower()
+        if not (len(light_color) == 7 and light_color.startswith("#")):
+            light_color = "#ffd37a"
+        light_intensity = self._item_to_float_or_default(self.item_equip_light_intensity.get(), 1.2)
+        light_intensity = max(0.0, min(20.0, light_intensity))
+        return {
+            "pos": pos,
+            "rot": rot,
+            "scale": scale,
+            "bone": bone,
+            "light": {
+                "enabled": light_enabled,
+                "color": light_color,
+                "intensity": light_intensity,
+            },
+        }
+
+    def _apply_item_right_hand_transform_to_form(self, raw):
+        d = self._item_default_right_hand_transform()
+        cfg = raw if isinstance(raw, dict) else {}
+        pos_raw = cfg.get("pos") if isinstance(cfg.get("pos"), (list, tuple)) else d["pos"]
+        rot_raw = cfg.get("rot") if isinstance(cfg.get("rot"), (list, tuple)) else d["rot"]
+        pos = [
+            self._item_to_float_or_default(pos_raw[0] if len(pos_raw) > 0 else d["pos"][0], d["pos"][0]),
+            self._item_to_float_or_default(pos_raw[1] if len(pos_raw) > 1 else d["pos"][1], d["pos"][1]),
+            self._item_to_float_or_default(pos_raw[2] if len(pos_raw) > 2 else d["pos"][2], d["pos"][2]),
+        ]
+        rot = [
+            self._item_to_float_or_default(rot_raw[0] if len(rot_raw) > 0 else d["rot"][0], d["rot"][0]),
+            self._item_to_float_or_default(rot_raw[1] if len(rot_raw) > 1 else d["rot"][1], d["rot"][1]),
+            self._item_to_float_or_default(rot_raw[2] if len(rot_raw) > 2 else d["rot"][2], d["rot"][2]),
+        ]
+        scale = self._item_to_float_or_default(cfg.get("scale", d["scale"]), d["scale"])
+        scale = max(0.05, min(8.0, scale))
+        bone = str(cfg.get("bone") or d.get("bone") or "auto").strip() or "auto"
+        light_cfg = cfg.get("light") if isinstance(cfg.get("light"), dict) else {}
+        light_enabled = bool(light_cfg.get("enabled", d["light"]["enabled"]))
+        light_color = str(light_cfg.get("color") or d["light"]["color"]).strip().lower()
+        if not (len(light_color) == 7 and light_color.startswith("#")):
+            light_color = d["light"]["color"]
+        light_intensity = self._item_to_float_or_default(light_cfg.get("intensity", d["light"]["intensity"]), d["light"]["intensity"])
+        light_intensity = max(0.0, min(20.0, light_intensity))
+        self.item_equip_pos_x.set(pos[0])
+        self.item_equip_pos_y.set(pos[1])
+        self.item_equip_pos_z.set(pos[2])
+        self.item_equip_rot_x.set(rot[0])
+        self.item_equip_rot_y.set(rot[1])
+        self.item_equip_rot_z.set(rot[2])
+        self.item_equip_scale.set(scale)
+        if bone not in self.item_equip_bone_values:
+            self.item_equip_bone_values = list(self.item_equip_bone_values) + [bone]
+        self.item_equip_bone.set(bone)
+        self.item_equip_light_enabled.set(light_enabled)
+        self.item_equip_light_color.set(light_color)
+        self.item_equip_light_intensity.set(light_intensity)
+        self._refresh_item_equip_light_color_preview()
+
+    def _extract_glb_node_names(self, abs_glb: str) -> list[str]:
+        out = []
+        try:
+            with open(abs_glb, "rb") as f:
+                data = f.read()
+            if data[:4] != b"glTF":
+                return out
+            _version, _total = struct.unpack_from("<II", data, 4)
+            off = 12
+            json_chunk = None
+            while off + 8 <= len(data):
+                chunk_len, chunk_type = struct.unpack_from("<II", data, off)
+                off += 8
+                chunk = data[off:off + chunk_len]
+                off += chunk_len
+                if chunk_type == 0x4E4F534A:  # JSON
+                    json_chunk = chunk
+                    break
+            if not json_chunk:
+                return out
+            doc = json.loads(json_chunk.decode("utf-8", errors="ignore"))
+            nodes = doc.get("nodes") if isinstance(doc, dict) else []
+            if not isinstance(nodes, list):
+                return out
+            seen = set()
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                nm = str(n.get("name") or "").strip()
+                if not nm:
+                    continue
+                key = nm.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(nm)
+        except Exception:
+            return []
+        return out
+
+    def _list_item_anchor_bones(self) -> list[str]:
+        vals = ["auto"]
+        char_rel = self._preview_character_model_rel()
+        if not char_rel:
+            return vals
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        abs_path = os.path.join(base, char_rel.replace("/", os.sep))
+        if not os.path.exists(abs_path):
+            return vals
+        names = []
+        lower = abs_path.lower()
+        if lower.endswith(".glb"):
+            names = self._extract_glb_node_names(abs_path)
+        # fallback util para esqueletos tipicos
+        fallback = ["arm-right", "RightHand", "hand_r", "mixamorig:RightHand"]
+        for nm in names + fallback:
+            if nm and nm not in vals:
+                vals.append(nm)
+        return vals
 
     def _set_item_scale(self, value):
         v = self._item_clamp_scale(value)
@@ -1958,6 +3585,31 @@ class ServerGui:
     def _on_item_scale_changed(self, value):
         self._set_item_scale(value)
         self._draw_item_obj_preview_frame()
+
+    def _on_item_equip_transform_changed(self, _value=None):
+        self._item_publish_live_preview()
+
+    def item_reset_right_hand_transform(self):
+        self._apply_item_right_hand_transform_to_form(None)
+        self._item_publish_live_preview()
+
+    def _refresh_item_equip_light_color_preview(self):
+        if not self.item_equip_light_color_preview:
+            return
+        color = (self.item_equip_light_color.get() or "#ffd37a").strip().lower()
+        if not (len(color) == 7 and color.startswith("#")):
+            color = "#ffd37a"
+        self.item_equip_light_color_preview.configure(bg=color)
+
+    def choose_item_equip_light_color(self):
+        initial = (self.item_equip_light_color.get() or "#ffd37a").strip()
+        chosen = colorchooser.askcolor(color=initial, title="Seleccionar color de luz del item")
+        hex_color = (chosen[1] or "").strip()
+        if not hex_color:
+            return
+        self.item_equip_light_color.set(hex_color.lower())
+        self._refresh_item_equip_light_color_preview()
+        self._item_publish_live_preview()
 
     def _infer_item_model_type_from_rel(self, model_rel: str) -> str:
         rel = (model_rel or "").strip().replace("\\", "/")
@@ -2673,9 +4325,26 @@ class ServerGui:
             state = self.preview_ws_state.get(channel) or {}
             if state:
                 await websocket.send(json.dumps({"type": "preview_state", "channel": channel, **state}))
-            async for _msg in websocket:
-                # Canal unidireccional (servidor->cliente)
-                pass
+            async for raw_msg in websocket:
+                try:
+                    payload = json.loads(raw_msg or "{}")
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if str(payload.get("type") or "").strip().lower() != "preview_input":
+                    continue
+                evt_channel = str(payload.get("channel") or channel or "decor").strip().lower()
+                event_name = str(payload.get("event") or "").strip().lower()
+                if not event_name:
+                    continue
+                self.preview_input_queue.put(
+                    {
+                        "channel": evt_channel,
+                        "event": event_name,
+                        "payload": payload,
+                    }
+                )
         except Exception:
             pass
         finally:
@@ -2763,12 +4432,14 @@ class ServerGui:
         messagebox.showerror("Preview", f"No se pudo iniciar WebSocket live preview:\n{holder['err']}")
         return False
 
-    def _preview_publish(self, channel: str, obj_rel: str, icon_rel: str | None = None):
+    def _preview_publish(self, channel: str, obj_rel: str, icon_rel: str | None = None, extra_state: dict | None = None):
         ch = (channel or "decor").strip().lower()
         state = {
             "obj": (obj_rel or "").strip(),
             "icon": (icon_rel or "").strip() if icon_rel else "",
         }
+        if isinstance(extra_state, dict):
+            state.update(extra_state)
         self.preview_ws_state[ch] = state
         if not self.preview_ws_loop:
             return
@@ -2780,7 +4451,7 @@ class ServerGui:
         except Exception:
             pass
 
-    def _open_live_web_preview(self, channel: str, obj_rel: str, icon_rel: str | None = None):
+    def _open_live_web_preview(self, channel: str, obj_rel: str, icon_rel: str | None = None, extra_state: dict | None = None):
         if not self._ensure_preview_http_server():
             return False
         if not self._ensure_preview_ws_server():
@@ -2791,12 +4462,16 @@ class ServerGui:
         ws_url = f"ws://127.0.0.1:{self.preview_ws_port}/preview?channel={quote(ch, safe='')}"
         url = (
             f"http://127.0.0.1:{self.preview_http_port}/server/decor_preview.html"
-            f"?obj={obj_q}&ws={quote(ws_url, safe=':/?=&')}"
+            f"?obj={obj_q}&channel={quote(ch, safe='')}&ws={quote(ws_url, safe=':/?=&')}"
         )
         if icon_q:
             url += f"&icon={icon_q}"
+        if isinstance(extra_state, dict):
+            char_q = quote(str(extra_state.get("character_obj") or "").replace("\\", "/"), safe="/")
+            if char_q:
+                url += f"&char={char_q}"
         webbrowser.open(url, new=1, autoraise=True)
-        self._preview_publish(ch, obj_rel, icon_rel)
+        self._preview_publish(ch, obj_rel, icon_rel, extra_state)
         return True
 
     def decor_open_webgl_preview(self):
@@ -4681,6 +6356,33 @@ class ServerGui:
     def log(self, message: str):
         self.log_queue.put(f"{datetime.now().strftime('%H:%M:%S')} {message}")
 
+    def _handle_preview_input_event(self, evt: dict):
+        if not isinstance(evt, dict):
+            return
+        channel = str(evt.get("channel") or "").strip().lower()
+        event_name = str(evt.get("event") or "").strip().lower()
+        payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
+        if channel != "item":
+            return
+        if event_name != "equip_right_hand_changed":
+            return
+        equip_cfg = payload.get("equip_right_hand")
+        if not isinstance(equip_cfg, dict):
+            return
+        self._apply_item_right_hand_transform_to_form(equip_cfg)
+        state = self.preview_ws_state.get("item") if isinstance(self.preview_ws_state.get("item"), dict) else {}
+        if state:
+            state["equip_right_hand"] = self._item_collect_right_hand_transform_from_form()
+            self.preview_ws_state["item"] = state
+            if self.preview_ws_loop:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._preview_ws_broadcast("item", state),
+                        self.preview_ws_loop,
+                    )
+                except Exception:
+                    pass
+
     def _poll_logs(self):
         try:
             while True:
@@ -4700,6 +6402,14 @@ class ServerGui:
                     processed += 1
             except queue.Empty:
                 pass
+        try:
+            processed = 0
+            while processed < 120:
+                evt = self.preview_input_queue.get_nowait()
+                self._handle_preview_input_event(evt)
+                processed += 1
+        except queue.Empty:
+            pass
         self.root.after(150, self._poll_logs)
 
     def start_server(self):
@@ -4748,6 +6458,12 @@ class ServerGui:
         self.log("[INIT] Señal de apagado enviada.")
 
     def on_close(self):
+        if self.boxel_editor_window and self.boxel_editor_window.winfo_exists():
+            try:
+                self.boxel_editor_window.destroy()
+            except Exception:
+                pass
+            self.boxel_editor_window = None
         if self.item_editor_window and self.item_editor_window.winfo_exists():
             try:
                 self.item_editor_window.destroy()

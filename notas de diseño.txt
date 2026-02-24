@@ -1,0 +1,146 @@
+﻿NOTAS DE DISENO - GENERADOR DE MUNDOS
+
+Fecha: 2026-02-23
+Proyecto: voxel world con biomas por tinte (sin diferencias fisicas por bioma)
+
+==================================================
+1) ENFOQUE GENERAL
+==================================================
+- Los biomas son zonas visuales (color/tinte), no cambian fisica.
+- Se usa un atlas comun para todos los biomas.
+- Los boxels base son comunes; el servidor/cliente aplica tinte por bioma.
+- Objetivo: mantener rendimiento alto y pipeline simple.
+
+==================================================
+2) PALETA DE COLOR OFICIAL
+==================================================
+Base neutra atlas (texturas comunes): #B0B0B0
+Fuego (tinte bioma): #D94A3A
+Agua (tinte bioma): #3A7BD9
+Tierra (tinte bioma): #8A6A43
+Piedra (tinte bioma): #7A7F87
+Hierba (tinte bioma): #4FA64F
+Metal/Bridge (tinte bioma): #6D7480
+
+==================================================
+3) FORMATO OFICIAL DEL ATLAS
+==================================================
+- Grid fijo: 12 columnas x 12 filas.
+- Cada celda: 64x64 px de contenido util.
+- Separacion entre celdas: 1 px (contorno negro).
+- Rejilla completa con borde exterior de 1 px.
+- Tamano total esperado para 12x12: 781x781 px.
+  Formula: ancho = cols*65 + 1, alto = rows*65 + 1.
+
+Notas:
+- Si el atlas no cumple exactamente este formato, pueden aparecer cortes/bleeding.
+- Se recomienda mantener este formato como contrato fijo del proyecto.
+
+==================================================
+4) KIT FINAL DE BOXELS BASE (COMUNES)
+==================================================
+Kit recomendado (20):
+1. base_suelo_liso
+2. base_suelo_grano
+3. base_suelo_grietas_finas
+4. base_suelo_grietas_gruesas
+5. base_piedra_pequena
+6. base_piedra_media
+7. base_piedra_bloques
+8. base_roca_erosionada
+9. base_baldosa_lisa
+10. base_baldosa_rajada
+11. base_hormigon_liso
+12. base_hormigon_desgastado
+13. base_metal_panel
+14. base_metal_rayado
+15. base_rejilla_metal
+16. base_tierra_compacta
+17. base_grava
+18. base_arcilla
+19. base_transicion_suave
+20. base_detalle_micro
+
+Razon de los 2 ultimos:
+- base_transicion_suave: ayuda a mezclar materiales sin cortes visuales.
+- base_detalle_micro: rompe repeticion en superficies grandes.
+
+==================================================
+5) ALGORITMO OBJETIVO DE GENERACION DE MUNDO
+==================================================
+Paso 1: mapas base
+- Generar altura con ruido de baja frecuencia (seed del mundo).
+- Calcular pendiente local comparando vecinos.
+- Generar mascara de zona/bioma (grid, voronoi o simplex segun modo).
+
+Paso 2: clasificacion de capas
+- Superficie: voxel visible superior de cada columna.
+- Subsuelo: 1 a 3 voxels bajo superficie.
+- Profundo: resto.
+
+Paso 3: seleccion de familia de boxel (por contexto)
+- Pendiente baja: suelo/tierra.
+- Pendiente media: roca erosionada.
+- Pendiente alta: piedra/bloques.
+
+Paso 4: variacion controlada
+- Ruido de frecuencia media para alternar 2-3 boxels de la misma familia.
+- Aplicar pesos para evitar patron repetitivo.
+
+Paso 5: mezcla de transicion
+- En fronteras de zonas/biomas, introducir base_transicion_suave.
+- Suavizar cambios entre materiales contiguos.
+
+Paso 6: detalle fino
+- Aplicar base_detalle_micro con baja probabilidad.
+- Objetivo: romper tiling evidente en planos grandes.
+
+Paso 7: tinte final por bioma
+- Aplicar color de bioma al material final (shader/material), no duplicar atlas.
+- Fuego: #D94A3A
+- Agua: #3A7BD9
+- Tierra: #8A6A43
+- Piedra: #7A7F87
+- Hierba: #4FA64F
+- Metal/Bridge: #6D7480
+
+Paso 8: capas internas
+- Subsuelo: preferir base_tierra_compacta/base_arcilla.
+- Profundo: preferir base_piedra_media/base_piedra_bloques.
+
+==================================================
+6) RENDIMIENTO - REGLAS DE ORO
+==================================================
+- Un solo atlas compartido.
+- Grid fijo y parsing UV determinista.
+- Evitar atlas gigantes; priorizar tamano total contenido.
+- Orden de celdas en atlas importa mas para mantenimiento que para GPU.
+- Formato recomendado: atlas cuadrado o casi cuadrado.
+
+==================================================
+7) PROPUESTA DE DATOS (PARA FUTURA EVOLUCION)
+==================================================
+Campos minimos por boxel:
+- atlas
+- tile_col, tile_row
+- activo
+- emision (on/color/intensidad) opcional
+- drops opcional
+
+Reglas de uso por bioma/zona (si se amplía):
+- biome/zona permitida
+- layer_role (surface/subsoil/deep)
+- weight
+- rangos de altura/pendiente (opcionales)
+
+==================================================
+8) CHECKLIST PARA RETOMAR IMPLEMENTACION
+==================================================
+- Confirmar atlas 12x12 (781x781) con borde 1 px.
+- Cargar kit de 20 boxels base.
+- Asignar tile_col/tile_row correctos en DB para cada boxel.
+- Verificar mapeo block_id -> tile (sin fallback incorrecto).
+- Validar tinte por bioma en runtime (sin cambiar fisica).
+- Ajustar pesos de variacion hasta eliminar patrones repetitivos.
+
+FIN

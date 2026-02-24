@@ -35,6 +35,27 @@
     #controls input[type="range"] {
       width: 100%;
     }
+    #controls button {
+      width: 100%;
+      border: 1px solid rgba(130, 166, 208, 0.45);
+      background: rgba(18, 38, 64, 0.9);
+      color: #dce8f8;
+      border-radius: 6px;
+      padding: 4px 6px;
+      cursor: pointer;
+    }
+    #controls button:hover { filter: brightness(1.12); }
+    #xformReadout {
+      grid-column: 1 / -1;
+      font-family: Consolas, "Courier New", monospace;
+      color: #d6e7ff;
+      background: rgba(7, 16, 28, 0.8);
+      border: 1px solid rgba(120, 150, 196, 0.35);
+      border-radius: 6px;
+      padding: 6px;
+      font-size: 12px;
+      white-space: pre-line;
+    }
     #exposureValue {
       margin-left: 6px;
       color: #dce8f8;
@@ -65,7 +86,7 @@
 <body>
   <div id="hud">
     <div id="status">Inicializando visor...</div>
-    <div id="tips">Mouse: rotar / rueda: zoom / click derecho: pan / R: reset</div>
+    <div id="tips">Mouse: rotar / rueda: zoom / click derecho: pan / W: mover / E: rotar / R: reset vista</div>
     <div id="controls">
       <label for="presetSel">Preset luz</label>
       <select id="presetSel">
@@ -79,6 +100,53 @@
         <input id="expRange" type="range" min="0.6" max="2.2" step="0.05" value="1.15">
         <span id="exposureValue">1.15</span>
       </div>
+      <label for="gizmoEnable">Helper item</label>
+      <select id="gizmoEnable">
+        <option value="on">Activo</option>
+        <option value="off">Oculto</option>
+      </select>
+      <label for="gizmoMode">Modo</label>
+      <select id="gizmoMode">
+        <option value="translate">Mover</option>
+        <option value="rotate">Rotar</option>
+      </select>
+      <label for="gizmoSpace">Espacio</label>
+      <select id="gizmoSpace">
+        <option value="local">Local</option>
+        <option value="world">World</option>
+      </select>
+      <label for="snapPos">Snap Pos</label>
+      <select id="snapPos">
+        <option value="0">Off</option>
+        <option value="0.01">0.01</option>
+        <option value="0.05">0.05</option>
+        <option value="0.1">0.10</option>
+      </select>
+      <label for="snapRot">Snap Rot</label>
+      <select id="snapRot">
+        <option value="0">Off</option>
+        <option value="1">1°</option>
+        <option value="5">5°</option>
+        <option value="15">15°</option>
+      </select>
+      <label for="equipScaleRange">Scale item</label>
+      <div style="display:flex; align-items:center;">
+        <input id="equipScaleRange" type="range" min="0.05" max="8.0" step="0.01" value="1.00">
+        <span id="equipScaleValue">1.00</span>
+      </div>
+      <label for="boneSel">Bone</label>
+      <select id="boneSel">
+        <option value="auto">auto</option>
+      </select>
+      <label>Acciones</label>
+      <div style="display:flex; gap:6px;">
+        <button id="btnCopyXform" type="button">Copiar offset</button>
+        <button id="btnResetXform" type="button">Reset item</button>
+      </div>
+      <div id="xformReadout">pos: [0, 0, 0]
+rot: [0, 0, 0]
+scale: 1.000
+bone: auto</div>
     </div>
     <div id="iconBox">
       <div style="margin-bottom:6px;">Icono asociado</div>
@@ -97,6 +165,7 @@
   <script type="module">
     import * as THREE from "three";
     import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { TransformControls } from "three/addons/controls/TransformControls.js";
     import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
     import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
     import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
@@ -107,11 +176,24 @@
     const presetSel = document.getElementById("presetSel");
     const expRange = document.getElementById("expRange");
     const exposureValue = document.getElementById("exposureValue");
+    const gizmoEnableSel = document.getElementById("gizmoEnable");
+    const gizmoModeSel = document.getElementById("gizmoMode");
+    const gizmoSpaceSel = document.getElementById("gizmoSpace");
+    const snapPosSel = document.getElementById("snapPos");
+    const snapRotSel = document.getElementById("snapRot");
+    const equipScaleRange = document.getElementById("equipScaleRange");
+    const equipScaleValue = document.getElementById("equipScaleValue");
+    const boneSel = document.getElementById("boneSel");
+    const xformReadout = document.getElementById("xformReadout");
+    const btnCopyXform = document.getElementById("btnCopyXform");
+    const btnResetXform = document.getElementById("btnResetXform");
 
     const qp = new URLSearchParams(window.location.search);
     let modelPath = (qp.get("obj") || "").trim();
+    let characterPath = (qp.get("char") || "").trim();
     let iconPath = (qp.get("icon") || "").trim();
     const wsUrl = (qp.get("ws") || "").trim();
+    let equipRightHand = { pos: [0, 0, 0], rot: [0, 0, 0], scale: 1.0 };
 
     function setIcon(path) {
       iconPath = (path || "").trim();
@@ -149,6 +231,13 @@
     controls.enableDamping = true;
     controls.dampingFactor = 0.06;
     controls.target.set(0, 0.8, 0);
+    const gizmo = new TransformControls(camera, renderer.domElement);
+    gizmo.setSize(0.9);
+    gizmo.visible = false;
+    scene.add(gizmo);
+    gizmo.addEventListener("dragging-changed", (ev) => {
+      controls.enabled = !ev.value;
+    });
 
     const hemi = new THREE.HemisphereLight(0xcfe9ff, 0x273246, 1.0);
     scene.add(hemi);
@@ -164,6 +253,7 @@
     const rim = new THREE.DirectionalLight(0xe6f1ff, 0.55);
     rim.position.set(-5, 7, 9);
     scene.add(rim);
+    const textureLoader = new THREE.TextureLoader();
 
     const floor = new THREE.Mesh(
       new THREE.CircleGeometry(15, 72),
@@ -306,12 +396,403 @@
       });
     }
 
-    let currentRoot = null;
+    let currentRoot = null; // item
+    let currentCharacterRoot = null;
+    let currentHandAnchor = null;
+    let currentItemLight = null;
     let loadToken = 0;
+    let charLoadToken = 0;
+    let isApplyingEquipState = false;
+    let liveWs = null;
+    let publishEquipTimer = null;
+    let availableBoneNames = ["auto"];
+
+    function normalizeDeg(deg) {
+      let d = Number(deg) || 0;
+      while (d > 180) d -= 360;
+      while (d < -180) d += 360;
+      return d;
+    }
+
+    function updateTransformReadout() {
+      const cfg = normalizeEquipRightHand(equipRightHand);
+      const p = cfg.pos.map((v) => Number(v).toFixed(3));
+      const r = cfg.rot.map((v) => normalizeDeg(v).toFixed(1));
+      equipScaleRange.value = Number(cfg.scale).toFixed(2);
+      equipScaleValue.textContent = Number(cfg.scale).toFixed(2);
+      if (availableBoneNames.includes(cfg.bone)) {
+        boneSel.value = cfg.bone;
+      } else {
+        boneSel.value = "auto";
+      }
+      xformReadout.textContent = `pos: [${p.join(", ")}]\nrot: [${r.join(", ")}]\nscale: ${Number(cfg.scale).toFixed(3)}\nbone: ${cfg.bone || "auto"}`;
+    }
+
+    function sendEquipChangedToServer() {
+      if (!liveWs || liveWs.readyState !== WebSocket.OPEN) return;
+      const cfg = normalizeEquipRightHand(equipRightHand);
+      const payload = {
+        type: "preview_input",
+        channel: "item",
+        event: "equip_right_hand_changed",
+        equip_right_hand: {
+          pos: cfg.pos.map((v) => Number(v.toFixed(4))),
+          rot: cfg.rot.map((v) => Number(normalizeDeg(v).toFixed(2))),
+          scale: Number(cfg.scale.toFixed(4)),
+          bone: cfg.bone || "auto",
+          light: {
+            enabled: !!cfg.light?.enabled,
+            color: String(cfg.light?.color || "#ffd37a"),
+            intensity: Number((cfg.light?.intensity || 0).toFixed(3)),
+          },
+        },
+      };
+      try {
+        liveWs.send(JSON.stringify(payload));
+      } catch (_) {}
+    }
+
+    function scheduleEquipChangedToServer(delayMs = 70) {
+      if (publishEquipTimer) clearTimeout(publishEquipTimer);
+      publishEquipTimer = setTimeout(() => {
+        publishEquipTimer = null;
+        sendEquipChangedToServer();
+      }, Math.max(0, Number(delayMs) || 0));
+    }
+
+    function syncGizmoSettings() {
+      const mode = (gizmoModeSel?.value || "translate").toLowerCase();
+      const space = (gizmoSpaceSel?.value || "local").toLowerCase();
+      gizmo.setMode(mode === "rotate" ? "rotate" : "translate");
+      gizmo.setSpace(space === "world" ? "world" : "local");
+      const snapPos = Number(snapPosSel?.value || 0);
+      const snapRotDeg = Number(snapRotSel?.value || 0);
+      gizmo.translationSnap = snapPos > 0 ? snapPos : null;
+      gizmo.rotationSnap = snapRotDeg > 0 ? (snapRotDeg * Math.PI / 180) : null;
+      gizmo.visible = ((gizmoEnableSel?.value || "on") === "on") && !!currentRoot;
+    }
+
+    function syncGizmoAttachment() {
+      if (!currentRoot) {
+        try { gizmo.detach(); } catch (_) {}
+        gizmo.visible = false;
+        return;
+      }
+      if (gizmo.object !== currentRoot) gizmo.attach(currentRoot);
+      syncGizmoSettings();
+    }
+
+    function updateEquipFromCurrentRoot() {
+      if (!currentRoot || isApplyingEquipState) return;
+      const baseScale = Number(currentRoot.userData?.baseScale) || 1.0;
+      const s = Math.max(0.05, Math.min(8.0, Number(currentRoot.scale.x || 1) / Math.max(0.0001, baseScale)));
+      const next = normalizeEquipRightHand({
+        ...equipRightHand,
+        pos: [currentRoot.position.x, currentRoot.position.y, currentRoot.position.z],
+        rot: [
+          THREE.MathUtils.radToDeg(currentRoot.rotation.x),
+          THREE.MathUtils.radToDeg(currentRoot.rotation.y),
+          THREE.MathUtils.radToDeg(currentRoot.rotation.z),
+        ],
+        scale: s,
+      });
+      equipRightHand = next;
+      updateTransformReadout();
+      scheduleEquipChangedToServer();
+    }
+
+    function normalizeEquipRightHand(raw) {
+      const toNum = (v, d = 0) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : d;
+      };
+      const posRaw = Array.isArray(raw?.pos) ? raw.pos : [0, 0, 0];
+      const rotRaw = Array.isArray(raw?.rot) ? raw.rot : [0, 0, 0];
+      return {
+        pos: [toNum(posRaw[0], 0), toNum(posRaw[1], 0), toNum(posRaw[2], 0)],
+        rot: [toNum(rotRaw[0], 0), toNum(rotRaw[1], 0), toNum(rotRaw[2], 0)],
+        scale: Math.max(0.05, Math.min(8.0, toNum(raw?.scale, 1))),
+        bone: String(raw?.bone || "auto").trim() || "auto",
+        light: {
+          enabled: !!raw?.light?.enabled,
+          color: /^#[0-9a-f]{6}$/i.test(String(raw?.light?.color || "")) ? String(raw.light.color).toLowerCase() : "#ffd37a",
+          intensity: Math.max(0.0, Math.min(20.0, toNum(raw?.light?.intensity, 1.2))),
+        },
+      };
+    }
+
+    function collectCharacterBones(root) {
+      const names = new Set();
+      if (!root) return ["auto"];
+      root.traverse((node) => {
+        if (!node) return;
+        const nm = String(node.name || "").trim();
+        if (!nm) return;
+        if (node.isBone || node.type === "Bone" || /hand|arm|spine|head|leg|foot|mixamorig/i.test(nm)) {
+          names.add(nm);
+        }
+      });
+      const sorted = Array.from(names).sort((a, b) => a.localeCompare(b));
+      return ["auto", ...sorted];
+    }
+
+    function refreshBoneSelector() {
+      const cfg = normalizeEquipRightHand(equipRightHand);
+      availableBoneNames = collectCharacterBones(currentCharacterRoot);
+      if (cfg.bone && cfg.bone !== "auto" && !availableBoneNames.includes(cfg.bone)) {
+        availableBoneNames.push(cfg.bone);
+      }
+      const fragment = document.createDocumentFragment();
+      for (const nm of availableBoneNames) {
+        const opt = document.createElement("option");
+        opt.value = nm;
+        opt.textContent = nm;
+        fragment.appendChild(opt);
+      }
+      boneSel.innerHTML = "";
+      boneSel.appendChild(fragment);
+      boneSel.value = availableBoneNames.includes(cfg.bone) ? cfg.bone : "auto";
+    }
+
+    function findNodeByName(root, nameRaw) {
+      if (!root) return null;
+      const wanted = String(nameRaw || "").trim().toLowerCase();
+      if (!wanted || wanted === "auto") return null;
+      let out = null;
+      root.traverse((node) => {
+        if (out || !node) return;
+        const nm = String(node.name || "").trim().toLowerCase();
+        if (!nm) return;
+        if (nm === wanted) out = node;
+      });
+      return out;
+    }
+
+    function findRightHandBone(root) {
+      if (!root) return null;
+      const known = new Set([
+        "righthand", "hand_r", "mixamorig:righthand", "right_hand", "bip01 r hand", "valvebiped.bip01_r_hand",
+        "arm-right", "rightarm", "arm_r", "mixamorig:rightarm", "forearm-right", "rightforearm", "forearm_r", "mixamorig:rightforearm"
+      ]);
+      let out = null;
+      root.traverse((node) => {
+        if (out || !node) return;
+        const nm = String(node.name || "").trim().toLowerCase();
+        if (!nm) return;
+        if (known.has(nm) || (nm.includes("right") && (nm.includes("hand") || nm.includes("arm")))) out = node;
+      });
+      return out;
+    }
+
+    function ensureHandAnchor() {
+      if (!currentCharacterRoot) return null;
+      if (!currentHandAnchor) {
+        currentHandAnchor = new THREE.Group();
+        currentHandAnchor.name = "preview_hand_anchor";
+      }
+      const cfg = normalizeEquipRightHand(equipRightHand);
+      const preferred = findNodeByName(currentCharacterRoot, cfg.bone);
+      const handBone = preferred || findRightHandBone(currentCharacterRoot);
+      if (currentHandAnchor.parent) currentHandAnchor.parent.remove(currentHandAnchor);
+      if (handBone) {
+        handBone.add(currentHandAnchor);
+        currentHandAnchor.position.set(0.02, -0.02, -0.01);
+        currentHandAnchor.rotation.set(-0.55, 0.15, -1.05);
+      } else {
+        currentCharacterRoot.add(currentHandAnchor);
+        currentHandAnchor.position.set(0.34, 1.0, 0.06);
+        currentHandAnchor.rotation.set(-0.25, 0.05, -0.65);
+      }
+      return currentHandAnchor;
+    }
+
+    function applyItemTransformToHand() {
+      if (!currentRoot) return;
+      const cfg = normalizeEquipRightHand(equipRightHand);
+      const baseScale = Number(currentRoot.userData?.baseScale) || 1.0;
+      isApplyingEquipState = true;
+      currentRoot.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
+      currentRoot.rotation.set(
+        cfg.rot[0] * (Math.PI / 180),
+        cfg.rot[1] * (Math.PI / 180),
+        cfg.rot[2] * (Math.PI / 180),
+      );
+      const s = baseScale * cfg.scale;
+      currentRoot.scale.set(s, s, s);
+      isApplyingEquipState = false;
+      applyItemPointLight(cfg.light);
+      syncGizmoAttachment();
+      updateTransformReadout();
+    }
+
+    function applyItemPointLight(lightCfg) {
+      if (!currentRoot) return;
+      const cfg = (lightCfg && typeof lightCfg === "object") ? lightCfg : { enabled: false, color: "#ffd37a", intensity: 0 };
+      const runtimeIntensity = (Number(cfg.intensity) || 0) * 120.0;
+      if (!cfg.enabled || (Number(cfg.intensity) || 0) <= 0.0001) {
+        if (currentItemLight) {
+          if (currentItemLight.parent) currentItemLight.parent.remove(currentItemLight);
+          currentItemLight = null;
+        }
+        return;
+      }
+      if (!currentItemLight) {
+        currentItemLight = new THREE.PointLight(0xffffff, 1.0, 20.0, 2.0);
+        currentItemLight.position.set(0, 0, 0);
+      }
+      currentItemLight.color.set(cfg.color || "#ffd37a");
+      currentItemLight.distance = 20.0;
+      currentItemLight.decay = 2.0;
+      currentItemLight.intensity = runtimeIntensity;
+      if (currentItemLight.parent !== currentRoot) currentRoot.add(currentItemLight);
+    }
+
+    function createBoxelGeometry(cfg, texWidth, texHeight) {
+      // Layout atlas definitivo: 6x4 (sin compat legacy 64/12x12).
+      const cols = 6;
+      const rows = 4;
+      const col = Math.max(0, Math.min(cols - 1, Number(cfg?.tile_col) || 0));
+      const row = Math.max(0, Math.min(rows - 1, Number(cfg?.tile_row) || 0));
+      const g = new THREE.BoxGeometry(1, 1, 1);
+      const uvs = g.attributes.uv;
+      if (!uvs) return g;
+
+      const texW = Math.max(1, Number(texWidth) || 1);
+      const texH = Math.max(1, Number(texHeight) || 1);
+      const borderPx = 1;
+      const innerPx = 256;
+      const totalGridW = (cols * innerPx) + ((cols + 1) * borderPx);
+      const totalGridH = (rows * innerPx) + ((rows + 1) * borderPx);
+      const offX = Math.max(0, Math.floor((texW - totalGridW) * 0.5));
+      const offY = Math.max(0, Math.floor((texH - totalGridH) * 0.5));
+
+      // Interior exacto de la celda (sin contorno negro de 1px).
+      let x0 = offX + borderPx + (col * (innerPx + borderPx));
+      let y0 = offY + borderPx + (row * (innerPx + borderPx));
+      let x1 = x0 + innerPx;
+      let y1 = y0 + innerPx;
+      const inset = 0.35; // anti-bleeding sutil
+      x0 = Math.max(0, Math.min(texW, x0 + inset));
+      y0 = Math.max(0, Math.min(texH, y0 + inset));
+      x1 = Math.max(0, Math.min(texW, x1 - inset));
+      y1 = Math.max(0, Math.min(texH, y1 - inset));
+      if (x1 <= x0 + 0.5) x1 = Math.min(texW, x0 + 0.5);
+      if (y1 <= y0 + 0.5) y1 = Math.min(texH, y0 + 0.5);
+
+      const u0 = x0 / texW;
+      const u1 = x1 / texW;
+      const v0 = 1 - (y1 / texH);
+      const v1 = 1 - (y0 / texH);
+      for (let i = 0; i < uvs.count; i += 1) {
+        const u = uvs.getX(i);
+        const v = uvs.getY(i);
+        uvs.setXY(i, (u <= 0.5 ? u0 : u1), (v <= 0.5 ? v0 : v1));
+      }
+      uvs.needsUpdate = true;
+      return g;
+    }
+
+    function loadBoxelPreview(rawCfg) {
+      const cfg = rawCfg && typeof rawCfg === "object" ? rawCfg : {};
+      const atlasPath = String(cfg.atlas || "").trim();
+      if (!atlasPath) return;
+      loadToken += 1;
+      const token = loadToken;
+      const atlasUrl = `/${atlasPath.replace(/^\/+/, "")}`;
+      textureLoader.load(
+        atlasUrl,
+        (map) => {
+          if (token !== loadToken) return;
+          map.wrapS = THREE.ClampToEdgeWrapping;
+          map.wrapT = THREE.ClampToEdgeWrapping;
+          map.magFilter = THREE.NearestFilter;
+          map.minFilter = THREE.NearestMipmapNearestFilter;
+          map.colorSpace = THREE.SRGBColorSpace;
+          clearCurrentRoot();
+          const texWidth = Number(map?.image?.width) || 1;
+          const texHeight = Number(map?.image?.height) || 1;
+          const geometry = createBoxelGeometry(cfg, texWidth, texHeight);
+          const material = new THREE.MeshStandardMaterial({
+            map,
+            roughness: 0.92,
+            metalness: 0.03,
+            emissive: 0x000000,
+            emissiveIntensity: 0.0,
+          });
+          const mesh = new THREE.Mesh(geometry, material);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          currentRoot = new THREE.Group();
+          currentRoot.add(mesh);
+          const emission = cfg.emission && typeof cfg.emission === "object" ? cfg.emission : {};
+          const enabled = !!emission.enabled;
+          if (enabled) {
+            material.emissive.set(String(emission.color || "#ffd37a"));
+            material.emissiveIntensity = Math.max(0, Math.min(4, Number(emission.intensity) || 0)) * 0.2;
+          }
+          currentRoot.userData.baseScale = 0.55;
+          if (currentCharacterRoot) {
+            attachItemToSceneOrHand();
+          } else {
+            scene.add(currentRoot);
+            fitToObject(currentRoot);
+          }
+          applyItemPointLight(emission);
+          statusEl.textContent = `Boxel preview: ${atlasPath}`;
+        },
+        undefined,
+        (err) => {
+          if (token !== loadToken) return;
+          statusEl.textContent = `Error atlas boxel: ${atlasPath}`;
+          console.error(err);
+        }
+      );
+    }
+
+    function prepareItemForHand(root) {
+      if (!root) return;
+      const box = new THREE.Box3().setFromObject(root);
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      box.getSize(size);
+      box.getCenter(center);
+      const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+      root.position.sub(center);
+      root.userData.baseScale = 0.36 / maxDim;
+    }
+
+    function normalizeCharacterScaleForGame(root) {
+      if (!root) return;
+      const box = new THREE.Box3().setFromObject(root);
+      if (box.isEmpty()) return;
+      const minY = Number.isFinite(box.min.y) ? box.min.y : 0;
+      const centerX = Number.isFinite(box.min.x) && Number.isFinite(box.max.x) ? ((box.min.x + box.max.x) * 0.5) : 0;
+      const centerZ = Number.isFinite(box.min.z) && Number.isFinite(box.max.z) ? ((box.min.z + box.max.z) * 0.5) : 0;
+      root.position.set(root.position.x - centerX, root.position.y - minY, root.position.z - centerZ);
+      const box2 = new THREE.Box3().setFromObject(root);
+      const h = Number.isFinite(box2.max.y) && Number.isFinite(box2.min.y) ? Math.max(0.2, box2.max.y - box2.min.y) : 2.0;
+      const targetHeightInGame = 2.05 * 0.9;
+      const s = targetHeightInGame / Math.max(0.001, h);
+      root.scale.set(s, s, s);
+    }
+
+    function attachItemToSceneOrHand() {
+      if (!currentRoot) return;
+      if (currentCharacterRoot) {
+        const anchor = ensureHandAnchor();
+        if (anchor && currentRoot.parent !== anchor) anchor.add(currentRoot);
+        applyItemTransformToHand();
+      } else {
+        if (currentRoot.parent !== scene) scene.add(currentRoot);
+        applyItemTransformToHand();
+      }
+      syncGizmoAttachment();
+    }
 
     function clearCurrentRoot() {
       if (!currentRoot) return;
-      scene.remove(currentRoot);
+      try { if (gizmo.object === currentRoot) gizmo.detach(); } catch (_) {}
+      if (currentRoot.parent) currentRoot.parent.remove(currentRoot);
       currentRoot.traverse((node) => {
         if (!node?.isMesh) return;
         node.geometry?.dispose?.();
@@ -319,6 +800,22 @@
         else node.material?.dispose?.();
       });
       currentRoot = null;
+      currentItemLight = null;
+      syncGizmoAttachment();
+    }
+
+    function clearCharacterRoot() {
+      if (!currentCharacterRoot) return;
+      if (currentCharacterRoot.parent) currentCharacterRoot.parent.remove(currentCharacterRoot);
+      currentCharacterRoot.traverse((node) => {
+        if (!node?.isMesh) return;
+        node.geometry?.dispose?.();
+        if (Array.isArray(node.material)) node.material.forEach((m) => m?.dispose?.());
+        else node.material?.dispose?.();
+      });
+      currentCharacterRoot = null;
+      currentHandAnchor = null;
+      refreshBoneSelector();
     }
 
     function loadObjOnly(localObjPath, token) {
@@ -330,9 +827,10 @@
           if (token !== loadToken) return;
           clearCurrentRoot();
           enhanceMaterials(obj);
-          scene.add(obj);
           currentRoot = obj;
-          fitToObject(obj);
+          prepareItemForHand(currentRoot);
+          attachItemToSceneOrHand();
+          if (!currentCharacterRoot) fitToObject(obj);
           statusEl.textContent = `OBJ cargado (sin MTL): ${localObjPath}`;
         },
         undefined,
@@ -369,9 +867,10 @@
               if (token !== loadToken) return;
               clearCurrentRoot();
               enhanceMaterials(obj);
-              scene.add(obj);
               currentRoot = obj;
-              fitToObject(obj);
+              prepareItemForHand(currentRoot);
+              attachItemToSceneOrHand();
+              if (!currentCharacterRoot) fitToObject(obj);
               statusEl.textContent = `OBJ + MTL cargados: ${localObjPath}`;
             },
             undefined,
@@ -405,9 +904,10 @@
           }
           clearCurrentRoot();
           enhanceMaterials(root);
-          scene.add(root);
           currentRoot = root;
-          fitToObject(root);
+          prepareItemForHand(currentRoot);
+          attachItemToSceneOrHand();
+          if (!currentCharacterRoot) fitToObject(root);
           statusEl.textContent = `GLB/GLTF cargado: ${localPath}`;
         },
         undefined,
@@ -417,6 +917,120 @@
           console.error(err);
         }
       );
+    }
+
+    function loadCharacterObjOnly(localObjPath, token) {
+      const objUrl = `/${localObjPath.replace(/^\/+/, "")}`;
+      const objLoader = new OBJLoader();
+      objLoader.load(
+        objUrl,
+        (obj) => {
+          if (token !== charLoadToken) return;
+          clearCharacterRoot();
+          enhanceMaterials(obj);
+          normalizeCharacterScaleForGame(obj);
+          scene.add(obj);
+          currentCharacterRoot = obj;
+          refreshBoneSelector();
+          fitToObject(obj);
+          attachItemToSceneOrHand();
+          statusEl.textContent = `Personaje de referencia cargado: ${localObjPath}`;
+        },
+        undefined,
+        (err) => {
+          if (token !== charLoadToken) return;
+          statusEl.textContent = `Error cargando personaje OBJ: ${localObjPath}`;
+          console.error(err);
+        }
+      );
+    }
+
+    function loadCharacterObjWithMtl(localObjPath, token) {
+      const objUrl = `/${localObjPath.replace(/^\/+/, "")}`;
+      const slash = localObjPath.lastIndexOf("/");
+      const baseDir = slash >= 0 ? localObjPath.slice(0, slash + 1) : "";
+      const objName = slash >= 0 ? localObjPath.slice(slash + 1) : localObjPath;
+      const mtlName = objName.replace(/\.obj$/i, ".mtl");
+      const mtlBaseUrl = `/${baseDir.replace(/^\/+/, "")}`;
+      const mtlLoader = new MTLLoader();
+      mtlLoader.setPath(mtlBaseUrl);
+      mtlLoader.setResourcePath(mtlBaseUrl);
+      mtlLoader.load(
+        mtlName,
+        (materials) => {
+          try { materials.preload(); } catch (_) {}
+          const objLoader = new OBJLoader();
+          objLoader.setMaterials(materials);
+          objLoader.load(
+            objUrl,
+            (obj) => {
+              if (token !== charLoadToken) return;
+              clearCharacterRoot();
+              enhanceMaterials(obj);
+              normalizeCharacterScaleForGame(obj);
+              scene.add(obj);
+              currentCharacterRoot = obj;
+              refreshBoneSelector();
+              fitToObject(obj);
+              attachItemToSceneOrHand();
+              statusEl.textContent = `Personaje ref OBJ+MTL: ${localObjPath}`;
+            },
+            undefined,
+            (err) => {
+              if (token !== charLoadToken) return;
+              statusEl.textContent = `Error personaje OBJ (MTL): ${localObjPath}`;
+              console.error(err);
+            }
+          );
+        },
+        undefined,
+        () => {
+          if (token !== charLoadToken) return;
+          loadCharacterObjOnly(localObjPath, token);
+        }
+      );
+    }
+
+    function loadCharacterGlb(localPath, token) {
+      const modelUrl = `/${localPath.replace(/^\/+/, "")}`;
+      const loader = new GLTFLoader();
+      loader.load(
+        modelUrl,
+        (gltf) => {
+          if (token !== charLoadToken) return;
+          const root = gltf?.scene || gltf?.scenes?.[0];
+          if (!root) return;
+          clearCharacterRoot();
+          enhanceMaterials(root);
+          normalizeCharacterScaleForGame(root);
+          scene.add(root);
+          currentCharacterRoot = root;
+          refreshBoneSelector();
+          fitToObject(root);
+          attachItemToSceneOrHand();
+          statusEl.textContent = `Personaje de referencia: ${localPath}`;
+        },
+        undefined,
+        (err) => {
+          if (token !== charLoadToken) return;
+          statusEl.textContent = `Error personaje GLB/GLTF: ${localPath}`;
+          console.error(err);
+        }
+      );
+    }
+
+    function loadCharacterModel(path) {
+      const next = (path || "").trim();
+      if (!next) return;
+      characterPath = next;
+      charLoadToken += 1;
+      const token = charLoadToken;
+      const lower = characterPath.toLowerCase();
+      if (lower.endsWith(".glb") || lower.endsWith(".gltf")) {
+        loadCharacterGlb(characterPath, token);
+      } else if (lower.endsWith(".obj")) {
+        loadCharacterObjWithMtl(characterPath, token);
+      }
     }
 
     function loadModel(path) {
@@ -439,6 +1053,61 @@
     if (modelPath) {
       loadModel(modelPath);
     }
+    if (characterPath) {
+      loadCharacterModel(characterPath);
+    }
+
+    gizmo.addEventListener("objectChange", () => {
+      updateEquipFromCurrentRoot();
+    });
+    gizmoEnableSel.addEventListener("change", syncGizmoSettings);
+    gizmoModeSel.addEventListener("change", syncGizmoSettings);
+    gizmoSpaceSel.addEventListener("change", syncGizmoSettings);
+    snapPosSel.addEventListener("change", syncGizmoSettings);
+    snapRotSel.addEventListener("change", syncGizmoSettings);
+    btnResetXform.addEventListener("click", () => {
+      equipRightHand = normalizeEquipRightHand({
+        ...equipRightHand,
+        pos: [0, 0, 0],
+        rot: [0, 0, 0],
+        scale: 1.0,
+      });
+      applyItemTransformToHand();
+      scheduleEquipChangedToServer(10);
+    });
+    equipScaleRange.addEventListener("input", () => {
+      const cfg = normalizeEquipRightHand(equipRightHand);
+      cfg.scale = Math.max(0.05, Math.min(8.0, Number(equipScaleRange.value) || 1.0));
+      equipRightHand = cfg;
+      applyItemTransformToHand();
+      scheduleEquipChangedToServer();
+    });
+    boneSel.addEventListener("change", () => {
+      const cfg = normalizeEquipRightHand(equipRightHand);
+      const selected = String(boneSel.value || "auto").trim() || "auto";
+      cfg.bone = availableBoneNames.includes(selected) ? selected : "auto";
+      equipRightHand = cfg;
+      applyItemTransformToHand();
+      scheduleEquipChangedToServer(10);
+    });
+    btnCopyXform.addEventListener("click", async () => {
+      const cfg = normalizeEquipRightHand(equipRightHand);
+      const text = JSON.stringify({
+        pos: cfg.pos.map((v) => Number(v.toFixed(4))),
+        rot: cfg.rot.map((v) => Number(normalizeDeg(v).toFixed(2))),
+        scale: Number(cfg.scale.toFixed(4)),
+        bone: cfg.bone || "auto",
+      });
+      try {
+        await navigator.clipboard.writeText(text);
+        statusEl.textContent = "Offset copiado al portapapeles";
+      } catch (_) {
+        statusEl.textContent = `Offset: ${text}`;
+      }
+    });
+    syncGizmoSettings();
+    refreshBoneSelector();
+    updateTransformReadout();
 
     if (wsUrl) {
       let ws = null;
@@ -450,6 +1119,7 @@
           return;
         }
         ws.onopen = () => {
+          liveWs = ws;
           statusEl.textContent = modelPath ? statusEl.textContent : "Conectado al canal live. Esperando modelo...";
         };
         ws.onmessage = (ev) => {
@@ -457,10 +1127,28 @@
             const msg = JSON.parse(ev.data || "{}");
             if (msg?.type !== "preview_state") return;
             if (msg?.icon !== undefined) setIcon(msg.icon || "");
-            if (msg?.obj) loadModel((msg.obj || "").trim());
+            if (msg?.equip_right_hand !== undefined) {
+              equipRightHand = normalizeEquipRightHand(msg.equip_right_hand || {});
+              refreshBoneSelector();
+              applyItemTransformToHand();
+            }
+            if (msg?.character_obj !== undefined) {
+              const nextChar = String(msg.character_obj || "").trim();
+              if (nextChar && nextChar !== characterPath) loadCharacterModel(nextChar);
+            }
+            if (msg?.obj !== undefined) {
+              const nextObj = String(msg.obj || "").trim();
+              if (nextObj && nextObj !== modelPath) loadModel(nextObj);
+            }
+            if (msg?.boxel_preview !== undefined) {
+              loadBoxelPreview(msg.boxel_preview || {});
+            }
           } catch (_err) {}
         };
-        ws.onclose = () => setTimeout(connect, 900);
+        ws.onclose = () => {
+          if (liveWs === ws) liveWs = null;
+          setTimeout(connect, 900);
+        };
         ws.onerror = () => {
           try { ws.close(); } catch (_e) {}
         };
@@ -469,8 +1157,30 @@
     }
 
     window.addEventListener("keydown", (ev) => {
-      if ((ev.key || "").toLowerCase() !== "r") return;
-      controls.reset();
+      const key = (ev.key || "").toLowerCase();
+      if (key === "r") {
+        controls.reset();
+        return;
+      }
+      if (key === "w") {
+        gizmoModeSel.value = "translate";
+        syncGizmoSettings();
+        return;
+      }
+      if (key === "e") {
+        gizmoModeSel.value = "rotate";
+        syncGizmoSettings();
+        return;
+      }
+      if (key === "x") {
+        gizmoSpaceSel.value = gizmoSpaceSel.value === "local" ? "world" : "local";
+        syncGizmoSettings();
+        return;
+      }
+      if (key === "g") {
+        gizmoEnableSel.value = gizmoEnableSel.value === "on" ? "off" : "on";
+        syncGizmoSettings();
+      }
     });
 
     window.addEventListener("resize", () => {

@@ -22,6 +22,13 @@ export class Simple3D {
         this.viewDistanceChunks = 3;
         this.chunkQueue = [];
         this.chunkQueueKeys = new Set();
+        this.chunkWorker = null;
+        this.chunkWorkerEnabled = false;
+        this.chunkWorkerSeq = 1;
+        this.chunkWorkerPending = new Map();
+        this.chunkWorkerMaxInFlight = 4;
+        this.chunkPreloadMargin = 1;
+        this.chunkUnloadMargin = 3;
         this.chunks = new Map();
         this.chunkCenter = { cx: 0, cz: 0 };
         this.generatedChunks = 0;
@@ -44,6 +51,17 @@ export class Simple3D {
         this.waterRippleLifeSec = 2.6;
         this.spawnMarker = null;
         this.characterRig = null;
+        this.localHeldItemAnchor = null;
+        this.localHeldItemRoot = null;
+        this.localHeldItemModelKey = '';
+        this.localHeldItemTransformSignature = '';
+        this.localHeldItemBoneName = 'auto';
+        this.localHeldItemPointLight = null;
+        this.localHeldItemLightSmoothedIntensity = 0;
+        this.localHeldItemLightIntensityMul = 85.0;
+        this.localHeldItemLightOutdoorSuppress = 0.82;
+        this.localHeldItemLightLerp = 12.0;
+        this.localHeldItemLightWorldPos = null;
         this.characterClass = 'rogue';
         this.characterAnimTime = 0;
         this.emoticonMesh = null;
@@ -65,6 +83,7 @@ export class Simple3D {
         this.lastNetworkSentPos = null;
         this.lastNetworkPositionQueuedAt = -999;
         this.pendingNetworkAnimState = null;
+        this.interactionAnimUntil = 0;
         this.localAnimState = 'idle';
         this.pendingNetworkClassChange = null;
         this.localNameTag = null;
@@ -108,6 +127,7 @@ export class Simple3D {
         this.decorCollisionCellByKey = new Map();
         this.decorModelCache = new Map();
         this.playerModelCache = new Map();
+        this.heldItemModelCache = new Map();
         this.decorFadeOutByKey = new Map();
         this.decorFadeOutDurationSec = 0.28;
         this.pendingDecorRemoveKey = null;
@@ -147,6 +167,22 @@ export class Simple3D {
         this.voxelAoEnabled = true;
         this.voxelAoMin = 0.52;
         this.voxelAoStrength = 0.78;
+        this.voxelUseTextureAtlas = false;
+        this.voxelAtlasPath = './assets/sprites/texturas/atlas_base_boxel.png';
+        this.voxelAtlasCols = 6;
+        this.voxelAtlasRows = 4;
+        this.voxelAtlasCellInnerPad = 0.08;
+        this.voxelAtlasBiomeTintStrength = 0.42;
+        this.voxelAtlasTexture = null;
+        this.voxelAtlasLoading = false;
+        this.caveLightMeshesByChunk = new Map();
+        this.caveAtmosphereBlend = 0;
+        this.caveAtmosphereResponse = 5.5;
+        this.caveFogEnabled = true;
+        this.caveFogLinearNear = 16;
+        this.caveFogLinearFar = 96;
+        this.caveFogExpDensityBoost = 0.018;
+        this.sceneFogBase = null;
         this.pendingVoxelActions = [];
         this.breakActionHeld = false;
         this.breakBaseDurationSec = 1.0;
@@ -154,6 +190,7 @@ export class Simple3D {
         this.breakTargetKey = '';
         this.worldVoxelOverrides = new Map();
         this.worldVoxelOverridesByChunk = new Map();
+        this.voxelBlockDefs = new Map();
 
         this.renderer = null;
         this.scene = null;
@@ -172,6 +209,7 @@ export class Simple3D {
         this.sunOrbitPhase = 1.5707963267948966;
         this.sunVisualRadius = 7.5;
         this.sunVisualColor = 0xffe29a;
+        this.sunDaylight01 = 1.0;
         this.sunServerEpochSec = null;
         this.sunClientPerfStartSec = 0;
         this.clockStarted = false;
@@ -182,6 +220,7 @@ export class Simple3D {
         this.gridMoveDuration = 0.14;
         this.actorCollisionRadius = 0.28;
         this.playerGroundOffset = 0.5;
+        this.playerVisualFootLift = 0.15;
         this.capsuleBodyHeight = 1.72;
         this.capsuleWallSkin = 0.10;
         this.desktopThirdPersonEnabled = true;
@@ -236,9 +275,23 @@ export class Simple3D {
         this.cameraCollisionPadding = 0.38;
         this.cameraCollisionMinDistance = 1.05;
         this.cameraCollisionGroundClearance = 0.34;
+        this.cameraCollisionSphereRadius = 0.22;
+        this.cameraCollisionSweepStep = 0.14;
+        this.cameraPivotProbeRadius = 0.14;
+        this.cameraPivotMinOffsetFromActor = 0.36;
+        this.cameraPivotHeadClearance = 0.04;
+        this.cameraPivotLerpUp = 8.0;
+        this.cameraPivotLerpDown = 24.0;
+        this.cameraPivotYSmoothed = null;
         this.cameraCollisionRaycaster = null;
         this.cameraViewMode = 'third_person';
         this.cameraFirstPersonEyeOffset = 0.02;
+        this.localCharacterFadeStartDistance = 1.10;
+        this.localCharacterFadeEndDistance = 0.58;
+        this.localCharacterFadeMinOpacity = 0.00;
+        this.localCharacterOpacity = 1.0;
+        this.localCharacterOpacityLerp = 14.0;
+        this.localCharacterRenderLayer = 2;
         this.mouseLookActive = false;
         this.pointerLocked = false;
         this.controlKeybinds = {
@@ -285,7 +338,7 @@ export class Simple3D {
         this.onPointerLockError = this.onPointerLockError.bind(this);
     }
 
-    init({ world, player, spawn, serverTimeUtc, terrainConfig, decor, worldLoot, voxelOverrides } = {}) {
+    init({ world, player, spawn, serverTimeUtc, terrainConfig, decor, worldLoot, voxelOverrides, voxelBlockDefs } = {}) {
         const THREE = THREE_MODULE;
         if (!THREE) {
             console.error('Simple3D: THREE no está disponible. Verifica index.html.');
@@ -298,6 +351,7 @@ export class Simple3D {
         this.elapsed = 0;
         this.setSunServerTime(serverTimeUtc || null);
         this.params = this.buildTerrainParams(this.world, terrainConfig || null);
+        this.voxelUseTextureAtlas = false;
         this.voxelChunkHeight = Math.max(16, Math.min(512, Math.round(Number(this.params?.voxelWorldHeight ?? 128))));
         this.voxelLayerSize = this.chunkSize * this.chunkSize;
         this.voxelChunkVolume = this.voxelLayerSize * this.voxelChunkHeight;
@@ -319,6 +373,7 @@ export class Simple3D {
         this.autoStepState.progress = 0;
         this.jumpQueued = false;
         this.actorGrounded = true;
+        this.cameraPivotYSmoothed = null;
         this.seedHash = this.hashSeed(this.params.seed);
         this.floatingLayout = this.buildFloatingLayout(this.params);
         this.chunkQueue = [];
@@ -360,6 +415,7 @@ export class Simple3D {
         this.characterAnimTime = 0;
         this.localAnimState = 'idle';
         this.pendingNetworkAnimState = 'idle';
+        this.interactionAnimUntil = 0;
         this.activeEmoticon = 'neutral';
         this.emoticonExpireAt = 0;
         this.vegetationConfig = null;
@@ -422,6 +478,7 @@ export class Simple3D {
         this.voxelBreakFxEntries = [];
         this.worldVoxelOverrides.clear();
         this.worldVoxelOverridesByChunk.clear();
+        this.voxelBlockDefs.clear();
         const incomingVoxelOverrides = Array.isArray(voxelOverrides) ? voxelOverrides : [];
         for (const row of incomingVoxelOverrides) {
             const x = Number(row?.x);
@@ -431,11 +488,43 @@ export class Simple3D {
             if (![x, y, z].every((v) => Number.isFinite(v))) continue;
             this._setWorldVoxelOverrideCache(x, y, z, blockId);
         }
+        const incomingBlockDefs = Array.isArray(voxelBlockDefs) ? voxelBlockDefs : [];
+        let preferredAtlasPath = '';
+        for (const row of incomingBlockDefs) {
+            const blockId = Math.max(0, Number(row?.block_id) | 0);
+            if (blockId <= 0) continue;
+            // Layout atlas definitivo: 6x4 (sin compat legacy 64/12x12).
+            const tileCols = 6;
+            const tileRows = 4;
+            const tileCol = Math.max(0, Math.min(tileCols - 1, Number(row?.tile_col) | 0));
+            const tileRow = Math.max(0, Math.min(tileRows - 1, Number(row?.tile_row) | 0));
+            const atlas = (row?.atlas || '').toString().trim().replace(/\\/g, '/');
+            if (!preferredAtlasPath && atlas) {
+                preferredAtlasPath = atlas.startsWith('./') ? atlas : `./${atlas}`;
+            }
+            this.voxelBlockDefs.set(blockId, {
+                block_id: blockId,
+                atlas,
+                tile_col: tileCol,
+                tile_row: tileRow,
+                tile_cols: tileCols,
+                tile_rows: tileRows,
+            });
+        }
+        if (preferredAtlasPath && preferredAtlasPath !== this.voxelAtlasPath) {
+            this.voxelAtlasPath = preferredAtlasPath;
+            if (this.voxelAtlasTexture) {
+                try { this.voxelAtlasTexture.dispose?.(); } catch (_) { }
+            }
+            this.voxelAtlasTexture = null;
+            this.voxelAtlasLoading = false;
+        }
         this.activeCollectKind = null;
         this.currentBiomeKey = null;
         this.pendingBiomeChange = null;
         this.ensureRenderer(THREE);
         this.setupScene(THREE);
+        this._setupChunkWorker();
         this.enqueueInitialChunks();
         this.spawnWorldDecor();
         this.replaceWorldLoot(Array.isArray(worldLoot) ? worldLoot : []);
@@ -451,7 +540,7 @@ export class Simple3D {
         const safeDt = Number.isFinite(dt) ? dt : 0;
         this.elapsed += safeDt;
 
-        this.processChunkQueue(4);
+        this.processChunkQueue(8);
         if (this.terrainDirty) {
             this.rebuildTerrainMesh(THREE);
             this.terrainDirty = false;
@@ -475,7 +564,8 @@ export class Simple3D {
         this.updateRemotePlayers(safeDt);
         this.updateDamageEffects(safeDt);
         this.updateVoxelBreakEffects(safeDt);
-        this.updateLights();
+        this.updateLights(safeDt);
+        this._updateLocalHeldItemPointLightRuntime(safeDt);
         this.renderer.render(this.scene, this.camera);
     }
 
@@ -505,6 +595,7 @@ export class Simple3D {
 
     dispose() {
         this.initialized = false;
+        this._teardownChunkWorker();
         this.world = null;
         this.player = null;
         this.spawn = null;
@@ -555,6 +646,7 @@ export class Simple3D {
         this.sunMesh = null;
         this.sunServerEpochSec = null;
         this.sunClientPerfStartSec = 0;
+        this.cameraPivotYSmoothed = null;
 
         if (this.renderer) {
             this.renderer.dispose();
@@ -570,6 +662,7 @@ export class Simple3D {
         this.terrainBodyMesh = null;
         this.fixedTerrainMeshes = [];
         this.voxelChunkMeshes.clear();
+        this.caveLightMeshesByChunk.clear();
         this.voxelDirtyChunkKeys.clear();
         this.waterMesh = null;
         this.waterFxUniforms = null;
@@ -577,6 +670,14 @@ export class Simple3D {
         this.waterRipples = [];
         this.spawnMarker = null;
         this.characterRig = null;
+        this.localHeldItemAnchor = null;
+        this.localHeldItemRoot = null;
+        this.localHeldItemModelKey = '';
+        this.localHeldItemTransformSignature = '';
+        this.localHeldItemBoneName = 'auto';
+        this.localHeldItemPointLight = null;
+        this.localHeldItemLightSmoothedIntensity = 0;
+        this.localHeldItemLightWorldPos = null;
         this.emoticonMesh = null;
         this.emoticonTexture = null;
         this.activeEmoticon = 'neutral';
@@ -587,6 +688,7 @@ export class Simple3D {
         this.lastNetworkSentPos = null;
         this.lastNetworkPositionQueuedAt = -999;
         this.pendingNetworkAnimState = null;
+        this.interactionAnimUntil = 0;
         this.localAnimState = 'idle';
         this.pendingNetworkClassChange = null;
         this.localNameTag = null;
@@ -598,6 +700,11 @@ export class Simple3D {
         this.voxelBreakFxEntries = [];
         try { this.voxelBreakFxTexture?.dispose?.(); } catch (_) { }
         this.voxelBreakFxTexture = null;
+        if (this.voxelAtlasTexture) {
+            try { this.voxelAtlasTexture.dispose?.(); } catch (_) { }
+        }
+        this.voxelAtlasTexture = null;
+        this.voxelAtlasLoading = false;
         this._removeLocalDamageOverlay();
         this.vegetationConfig = null;
         this.vegetationSlots = [];
@@ -627,6 +734,7 @@ export class Simple3D {
         this.decorCollisionCellByKey.clear();
         this.decorModelCache.clear();
         this.playerModelCache.clear();
+        this.heldItemModelCache.clear();
         this.pendingDecorRemoveKey = null;
         this.activeCollectKind = null;
         this.currentBiomeKey = null;
@@ -652,6 +760,7 @@ export class Simple3D {
         this.pendingVoxelActions = [];
         this.worldVoxelOverrides.clear();
         this.worldVoxelOverridesByChunk.clear();
+        this.voxelBlockDefs.clear();
         this.decorGroup = null;
         this.decorCollisionCellGroup = null;
         this.worldLootGroup = null;
@@ -724,15 +833,18 @@ export class Simple3D {
         const fogEnabled = (fogEnabledRaw == null) ? true : (Number(fogEnabledRaw) === 1);
         const fogColorHex = parseHexColor(this.world?.fog_color, 0xb8def2);
         this.scene.background = new THREE.Color(fogColorHex);
+        this.sceneFogBase = null;
         if (fogEnabled) {
             const fogMode = (this.world?.fog_mode || 'linear').toString().toLowerCase();
             if (fogMode === 'exp2') {
                 const density = Math.max(0.00001, Math.min(0.2, Number(this.world?.fog_density ?? 0.0025)));
                 this.scene.fog = new THREE.FogExp2(fogColorHex, density);
+                this.sceneFogBase = { mode: 'exp2', colorHex: fogColorHex, density };
             } else {
                 const near = Math.max(1, Number(this.world?.fog_near ?? 110));
                 const far = Math.max(near + 1, Number(this.world?.fog_far ?? 520));
                 this.scene.fog = new THREE.Fog(fogColorHex, near, far);
+                this.sceneFogBase = { mode: 'linear', colorHex: fogColorHex, near, far };
             }
         } else {
             this.scene.fog = null;
@@ -750,7 +862,7 @@ export class Simple3D {
             );
             this.camera.lookAt(this.spawn.x, this.spawn.y + 1.0, this.spawn.z);
         } else {
-            this.camera = new THREE.PerspectiveCamera(68, aspect, 0.05, 3000);
+            this.camera = new THREE.PerspectiveCamera(68, aspect, 0.08, 3000);
             const targetY = this.spawn.y + this.cameraTargetHeight;
             const horizDist = this.cameraDistance * Math.cos(this.cameraPitch);
             this.camera.position.set(
@@ -759,6 +871,7 @@ export class Simple3D {
                 this.spawn.z - (Math.cos(this.cameraYaw) * horizDist)
             );
             this.camera.lookAt(this.spawn.x, targetY, this.spawn.z);
+            this.camera.layers.enable(this.localCharacterRenderLayer);
         }
 
         this.ambientLight = new THREE.AmbientLight(0xffffff, 0.52);
@@ -1102,6 +1215,18 @@ export class Simple3D {
         return { dir: `./assets/modelos/personajes/${rel.slice(0, idx + 1)}`, name: rel.slice(idx + 1) };
     }
 
+    _itemModelUrl(modelKeyRaw = '') {
+        const rel = (modelKeyRaw || '').toString().replace(/\\/g, '/').replace(/^\/+/, '');
+        return `./assets/modelos/objetos/${rel}`;
+    }
+
+    _itemModelDirAndName(modelKeyRaw = '') {
+        const rel = (modelKeyRaw || '').toString().replace(/\\/g, '/').replace(/^\/+/, '');
+        const idx = rel.lastIndexOf('/');
+        if (idx < 0) return { dir: './assets/modelos/objetos/', name: rel };
+        return { dir: `./assets/modelos/objetos/${rel.slice(0, idx + 1)}`, name: rel.slice(idx + 1) };
+    }
+
     _normalizeCharacterTemplateObject(THREE, obj, animations = []) {
         if (!obj) return { template: null, animations: [] };
         obj.traverse((node) => {
@@ -1216,6 +1341,13 @@ export class Simple3D {
 
     _clearCharacterRigVisual(rig) {
         if (!rig) return;
+        if (rig === this.spawnMarker && this.localHeldItemAnchor?.parent && this.localHeldItemAnchor.parent !== rig) {
+            try { rig.add(this.localHeldItemAnchor); } catch (_) { }
+        }
+        const remoteHeldAnchor = rig.userData?.remoteHeldItemAnchor || null;
+        if (remoteHeldAnchor?.parent && remoteHeldAnchor.parent !== rig) {
+            try { rig.add(remoteHeldAnchor); } catch (_) { }
+        }
         const anim = rig.userData?.animator || null;
         if (anim?.mixer) {
             try { anim.mixer.stopAllAction(); } catch (_) { }
@@ -1226,6 +1358,7 @@ export class Simple3D {
         rig.remove(old);
         this.clearObject(old);
         rig.userData.modelRoot = null;
+        rig.userData.renderMeshes = [];
         rig.userData.characterModelKey = '';
         rig.userData.nameTagYOffset = 3.5;
     }
@@ -1259,10 +1392,12 @@ export class Simple3D {
         const idleClip = this._resolveCharacterClip(animations, ['idle', 'static']);
         const walkClip = this._resolveCharacterClip(animations, ['walk', 'sprint']);
         const gatherClip = this._resolveCharacterClip(animations, ['pick-up', 'interact-right', 'interact-left']);
+        const holdingClip = this._resolveCharacterClip(animations, ['holding-right', 'holding-right-shoot', 'holding-both', 'holding-left']);
         const actions = {};
         if (idleClip) actions.idle = mixer.clipAction(idleClip);
         if (walkClip) actions.walk = mixer.clipAction(walkClip);
         if (gatherClip) actions.gather = mixer.clipAction(gatherClip);
+        if (holdingClip) actions.holding = mixer.clipAction(holdingClip);
         for (const action of Object.values(actions)) {
             action.enabled = true;
             action.clampWhenFinished = false;
@@ -1272,7 +1407,8 @@ export class Simple3D {
         if (!actions.idle && actions.walk) actions.idle = actions.walk;
         if (!actions.walk && actions.idle) actions.walk = actions.idle;
         if (!actions.gather) actions.gather = actions.idle || actions.walk || null;
-        if (!actions.idle && !actions.walk && !actions.gather) return null;
+        if (!actions.holding) actions.holding = actions.idle || actions.walk || actions.gather || null;
+        if (!actions.idle && !actions.walk && !actions.gather && !actions.holding) return null;
         return { mixer, actions, currentState: null };
     }
 
@@ -1280,11 +1416,11 @@ export class Simple3D {
         if (!rig) return;
         const animator = rig.userData?.animator || null;
         const state = (nextStateRaw || 'idle').toString().toLowerCase();
-        const normalized = (state === 'walk' || state === 'gather') ? state : 'idle';
+        const normalized = (state === 'walk' || state === 'gather' || state === 'holding') ? state : 'idle';
         rig.userData.animationState = normalized;
         if (!animator?.actions) return;
         if (animator.currentState === normalized) return;
-        const nextAction = animator.actions[normalized] || animator.actions.idle || animator.actions.walk || animator.actions.gather || null;
+        const nextAction = animator.actions[normalized] || animator.actions.idle || animator.actions.walk || animator.actions.gather || animator.actions.holding || null;
         if (!nextAction) return;
         for (const action of Object.values(animator.actions)) {
             if (!action || action === nextAction) continue;
@@ -1312,16 +1448,578 @@ export class Simple3D {
             // El actor mantiene un offset de suelo para logica de juego;
             // compensamos visualmente el modelo para que no "flote".
             const worldLift = Math.max(0, Number(this.playerGroundOffset) || 0);
-            if (worldLift > 0.0001) {
-                model.position.y -= (worldLift / s);
+            const visualLift = Math.max(0, Number(this.playerVisualFootLift) || 0);
+            const effectiveLift = Math.max(0, worldLift - visualLift);
+            if (effectiveLift > 0.0001) {
+                model.position.y -= (effectiveLift / s);
             }
             rig.add(model);
             rig.userData.modelRoot = model;
+            rig.userData.renderMeshes = [];
+            model.traverse((node) => {
+                if (!node?.isMesh) return;
+                rig.userData.renderMeshes.push(node);
+            });
             rig.userData.characterModelKey = modelKey;
             const renderedH = targetH * visualScale;
             rig.userData.nameTagYOffset = Math.max(2.2, renderedH + 1.0);
             rig.userData.animator = this._buildCharacterAnimator(THREE, model, animations);
             this._setRigAnimationState(rig, rig.userData.animationState || 'idle');
+            if (rig === this.spawnMarker) {
+                const layer = Math.max(1, Number(this.localCharacterRenderLayer) || 2) | 0;
+                const meshes = Array.isArray(rig.userData.renderMeshes) ? rig.userData.renderMeshes : [];
+                for (const m of meshes) {
+                    try { m.layers.set(layer); } catch (_) { }
+                }
+                this._applyLocalCharacterCameraLayerState();
+            }
+            if (rig === this.spawnMarker) this._attachLocalHeldItemAnchorToRig();
+            const remotePid = rig.userData?.remotePlayerId;
+            if (remotePid != null) {
+                const rp = this.remotePlayers?.get?.(String(remotePid)) || null;
+                if (rp) this._attachRemoteHeldItemAnchorToRig(rp);
+            }
+        });
+    }
+
+    _applyLocalCharacterOpacity(alphaRaw = 1.0) {
+        const rig = this.spawnMarker;
+        if (!rig) return;
+        const alpha = Math.max(0.0, Math.min(1.0, Number(alphaRaw) || 1.0));
+        const meshes = Array.isArray(rig.userData?.renderMeshes) ? rig.userData.renderMeshes : [];
+        if (meshes.length <= 0) return;
+        for (const mesh of meshes) {
+            const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+            for (const mat of mats) {
+                if (!mat) continue;
+                if (mat.userData._localBaseOpacity == null) {
+                    mat.userData._localBaseOpacity = Number.isFinite(mat.opacity) ? mat.opacity : 1.0;
+                    mat.userData._localBaseTransparent = !!mat.transparent;
+                    mat.userData._localBaseDepthWrite = mat.depthWrite !== false;
+                    mat.userData._localBaseColorWrite = mat.colorWrite !== false;
+                }
+                const baseOpacity = Math.max(0.01, Number(mat.userData._localBaseOpacity) || 1.0);
+                if (alpha >= 0.999) {
+                    mat.opacity = baseOpacity;
+                    mat.transparent = !!mat.userData._localBaseTransparent;
+                    mat.depthWrite = mat.userData._localBaseDepthWrite !== false;
+                    mat.colorWrite = mat.userData._localBaseColorWrite !== false;
+                } else {
+                    mat.opacity = Math.max(0.0, baseOpacity * alpha);
+                    mat.transparent = true;
+                    mat.depthWrite = false;
+                    mat.colorWrite = alpha > 0.001;
+                }
+                mat.needsUpdate = true;
+            }
+        }
+    }
+
+    _updateLocalCharacterOpacityByCamera(targetX, targetY, targetZ, safeDt = 0.016) {
+        const cam = this.camera;
+        if (!cam || !this.spawnMarker || this.cameraViewMode !== 'third_person') return;
+        const dx = cam.position.x - targetX;
+        const dy = cam.position.y - targetY;
+        const dz = cam.position.z - targetZ;
+        const dist = Math.hypot(dx, dy, dz);
+        const fadeStart = Math.max(0.1, Number(this.localCharacterFadeStartDistance) || 1.10);
+        const fadeEnd = Math.max(0.05, Math.min(fadeStart - 0.01, Number(this.localCharacterFadeEndDistance) || 0.58));
+        const minOpacity = Math.max(0.0, Math.min(1.0, Number(this.localCharacterFadeMinOpacity) || 0.0));
+        let targetOpacity = 1.0;
+        if (dist <= fadeEnd) {
+            targetOpacity = minOpacity;
+        } else if (dist < fadeStart) {
+            const t = (dist - fadeEnd) / Math.max(0.0001, (fadeStart - fadeEnd));
+            targetOpacity = minOpacity + ((1.0 - minOpacity) * t);
+        }
+        const k = Math.max(1.0, Number(this.localCharacterOpacityLerp) || 14.0);
+        const a = Math.min(1.0, k * Math.max(0.001, safeDt));
+        this.localCharacterOpacity += (targetOpacity - this.localCharacterOpacity) * a;
+        this._applyLocalCharacterOpacity(this.localCharacterOpacity);
+    }
+
+    _normalizeHeldItemTemplateObject(THREE, obj) {
+        if (!THREE || !obj) return null;
+        obj.traverse((node) => {
+            if (!node?.isMesh) return;
+            node.castShadow = true;
+            node.receiveShadow = true;
+            if (Array.isArray(node.material)) {
+                node.material = node.material.map((m) => (m?.clone ? m.clone() : m));
+            } else if (node.material?.clone) {
+                node.material = node.material.clone();
+            }
+        });
+        const bbox = new THREE.Box3().setFromObject(obj);
+        const sx = Number.isFinite(bbox.max.x) && Number.isFinite(bbox.min.x) ? Math.max(0.001, bbox.max.x - bbox.min.x) : 0.4;
+        const sy = Number.isFinite(bbox.max.y) && Number.isFinite(bbox.min.y) ? Math.max(0.001, bbox.max.y - bbox.min.y) : 0.4;
+        const sz = Number.isFinite(bbox.max.z) && Number.isFinite(bbox.min.z) ? Math.max(0.001, bbox.max.z - bbox.min.z) : 0.4;
+        const maxDim = Math.max(sx, sy, sz, 0.001);
+        const cx = Number.isFinite(bbox.min.x) && Number.isFinite(bbox.max.x) ? ((bbox.min.x + bbox.max.x) * 0.5) : 0;
+        const cy = Number.isFinite(bbox.min.y) && Number.isFinite(bbox.max.y) ? ((bbox.min.y + bbox.max.y) * 0.5) : 0;
+        const cz = Number.isFinite(bbox.min.z) && Number.isFinite(bbox.max.z) ? ((bbox.min.z + bbox.max.z) * 0.5) : 0;
+        const normalized = new THREE.Group();
+        normalized.add(obj);
+        obj.position.set(-cx, -cy, -cz);
+        normalized.userData.maxDim = maxDim;
+        return normalized;
+    }
+
+    _getOrLoadHeldItemTemplate(modelKeyRaw, onReady) {
+        const THREE = THREE_MODULE;
+        const modelKey = (modelKeyRaw || '').toString().trim().replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!modelKey || !THREE) {
+            onReady(null);
+            return;
+        }
+        const cached = this.heldItemModelCache.get(modelKey);
+        if (cached?.status === 'ready' && cached.template) {
+            onReady(cached.template);
+            return;
+        }
+        if (cached?.status === 'loading') {
+            cached.waiters.push(onReady);
+            return;
+        }
+        const waiters = [onReady];
+        this.heldItemModelCache.set(modelKey, { status: 'loading', waiters });
+        const finish = (objRoot) => {
+            const tpl = this._normalizeHeldItemTemplateObject(THREE, objRoot);
+            const entry = this.heldItemModelCache.get(modelKey) || { waiters: [] };
+            entry.status = tpl ? 'ready' : 'error';
+            entry.template = tpl || null;
+            this.heldItemModelCache.set(modelKey, entry);
+            for (const cb of entry.waiters || []) cb(tpl || null);
+            entry.waiters = [];
+        };
+        const fail = () => {
+            const entry = this.heldItemModelCache.get(modelKey) || { waiters: [] };
+            entry.status = 'error';
+            entry.template = null;
+            this.heldItemModelCache.set(modelKey, entry);
+            for (const cb of entry.waiters || []) cb(null);
+            entry.waiters = [];
+        };
+        const lower = modelKey.toLowerCase();
+        const modelUrl = this._itemModelUrl(modelKey);
+        if (lower.endsWith('.glb') || lower.endsWith('.gltf')) {
+            const gltfLoader = new GLTFLoader();
+            gltfLoader.load(
+                modelUrl,
+                (gltf) => finish(gltf?.scene || gltf?.scenes?.[0] || null),
+                undefined,
+                () => fail()
+            );
+            return;
+        }
+        const objLoader = new OBJLoader();
+        const dirAndName = this._itemModelDirAndName(modelKey);
+        const loadObjOnly = () => {
+            objLoader.load(
+                modelUrl,
+                (obj) => finish(obj),
+                undefined,
+                () => fail()
+            );
+        };
+        if (lower.endsWith('.obj')) {
+            const mtlLoader = new MTLLoader();
+            mtlLoader.setPath(dirAndName.dir);
+            mtlLoader.setResourcePath(dirAndName.dir);
+            const mtlName = dirAndName.name.replace(/\.obj$/i, '.mtl');
+            mtlLoader.load(
+                mtlName,
+                (materials) => {
+                    try {
+                        materials.preload();
+                        objLoader.setMaterials(materials);
+                    } catch (_) { }
+                    loadObjOnly();
+                },
+                undefined,
+                () => loadObjOnly()
+            );
+            return;
+        }
+        fail();
+    }
+
+    _findRightHandBone(root) {
+        if (!root) return null;
+        const names = [
+            'righthand', 'hand_r', 'mixamorig:righthand', 'right_hand', 'bip01 r hand', 'valvebiped.bip01_r_hand',
+            'arm-right', 'rightarm', 'arm_r', 'mixamorig:rightarm', 'forearm-right', 'rightforearm', 'forearm_r', 'mixamorig:rightforearm'
+        ];
+        let best = null;
+        root.traverse((node) => {
+            if (best || !node) return;
+            const nm = (node.name || '').toString().trim().toLowerCase();
+            if (!nm) return;
+            if (
+                names.includes(nm) ||
+                (nm.includes('right') && (nm.includes('hand') || nm.includes('arm')))
+            ) {
+                best = node;
+            }
+        });
+        return best;
+    }
+
+    _findNodeByName(root, nodeNameRaw = '') {
+        if (!root) return null;
+        const wanted = (nodeNameRaw || '').toString().trim().toLowerCase();
+        if (!wanted || wanted === 'auto') return null;
+        let found = null;
+        root.traverse((node) => {
+            if (found || !node) return;
+            const nm = (node.name || '').toString().trim().toLowerCase();
+            if (!nm) return;
+            if (nm === wanted) found = node;
+        });
+        return found;
+    }
+
+    _ensureLocalHeldItemAnchor() {
+        const THREE = THREE_MODULE;
+        if (!THREE || !this.spawnMarker) return null;
+        if (!this.localHeldItemAnchor) {
+            const anchor = new THREE.Group();
+            anchor.userData.tag = 'local_held_item_anchor';
+            this.localHeldItemAnchor = anchor;
+        }
+        if (!this.localHeldItemRoot) {
+            const root = new THREE.Group();
+            root.userData.tag = 'local_held_item_root';
+            this.localHeldItemRoot = root;
+            this.localHeldItemAnchor.add(root);
+        } else if (this.localHeldItemRoot.parent !== this.localHeldItemAnchor) {
+            this.localHeldItemAnchor.add(this.localHeldItemRoot);
+        }
+        return this.localHeldItemAnchor;
+    }
+
+    _applyLocalHeldItemAnchorTransform(onBone = false) {
+        const anchor = this.localHeldItemAnchor;
+        if (!anchor) return;
+        if (onBone) {
+            anchor.position.set(0.02, -0.02, -0.01);
+            anchor.rotation.set(-0.55, 0.15, -1.05);
+        } else {
+            anchor.position.set(0.34, 1.00, 0.06);
+            anchor.rotation.set(-0.25, 0.05, -0.65);
+        }
+    }
+
+    _attachLocalHeldItemAnchorToRig() {
+        if (!this.spawnMarker) return;
+        const anchor = this._ensureLocalHeldItemAnchor();
+        if (!anchor) return;
+        const modelRoot = this.spawnMarker.userData?.modelRoot || null;
+        const preferred = this._findNodeByName(modelRoot, this.localHeldItemBoneName);
+        const rightHand = preferred || this._findRightHandBone(modelRoot);
+        if (anchor.parent) {
+            try { anchor.parent.remove(anchor); } catch (_) { }
+        }
+        if (rightHand) {
+            rightHand.add(anchor);
+            this._applyLocalHeldItemAnchorTransform(true);
+        } else {
+            this.spawnMarker.add(anchor);
+            this._applyLocalHeldItemAnchorTransform(false);
+        }
+    }
+
+    _clearLocalHeldItemVisual() {
+        if (!this.localHeldItemRoot) return;
+        for (let i = this.localHeldItemRoot.children.length - 1; i >= 0; i -= 1) {
+            const ch = this.localHeldItemRoot.children[i];
+            if (!ch) continue;
+            if (ch.userData?.tag === 'held_item_point_light') continue;
+            this.localHeldItemRoot.remove(ch);
+            this.clearObject(ch);
+        }
+    }
+
+    _normalizeLocalHeldItemTransform(raw = null) {
+        const out = {
+            pos: [0, 0, 0],
+            rot: [0, 0, 0],
+            scale: 1.0,
+            bone: 'auto',
+            light: { enabled: false, color: '#ffd37a', intensity: 1.2 },
+            signature: '0,0,0|0,0,0|1|auto|0|#ffd37a|1.2',
+        };
+        if (!raw || typeof raw !== 'object') return out;
+        const posRaw = Array.isArray(raw.pos) ? raw.pos : [];
+        const rotRaw = Array.isArray(raw.rot) ? raw.rot : [];
+        const n = (v, d = 0) => {
+            const x = Number(v);
+            return Number.isFinite(x) ? x : d;
+        };
+        out.pos = [n(posRaw[0], 0), n(posRaw[1], 0), n(posRaw[2], 0)];
+        out.rot = [n(rotRaw[0], 0), n(rotRaw[1], 0), n(rotRaw[2], 0)];
+        out.scale = Math.max(0.05, Math.min(8.0, n(raw.scale, 1)));
+        const bone = (raw.bone || 'auto').toString().trim();
+        out.bone = bone || 'auto';
+        const lightRaw = (raw.light && typeof raw.light === 'object') ? raw.light : {};
+        const lightEnabled = !!lightRaw.enabled;
+        const colorRaw = (lightRaw.color || '#ffd37a').toString().trim().toLowerCase();
+        const lightColor = /^#[0-9a-f]{6}$/.test(colorRaw) ? colorRaw : '#ffd37a';
+        const lightIntensity = Math.max(0.0, Math.min(20.0, n(lightRaw.intensity, 1.2)));
+        out.light = { enabled: lightEnabled, color: lightColor, intensity: lightIntensity };
+        out.signature = `${out.pos.join(',')}|${out.rot.join(',')}|${out.scale}|${out.bone}|${lightEnabled ? 1 : 0}|${lightColor}|${lightIntensity}`;
+        return out;
+    }
+
+    _applyLocalHeldItemPointLight(lightCfgRaw = null) {
+        const THREE = THREE_MODULE;
+        if (!THREE || !this.localHeldItemRoot) return;
+        const cfg = (lightCfgRaw && typeof lightCfgRaw === 'object') ? lightCfgRaw : {};
+        const enabled = !!cfg.enabled;
+        const colorRaw = (cfg.color || '#ffd37a').toString().trim().toLowerCase();
+        const color = /^#[0-9a-f]{6}$/.test(colorRaw) ? colorRaw : '#ffd37a';
+        const intensity = Math.max(0.0, Math.min(20.0, Number(cfg.intensity) || 0));
+        const baseRuntimeIntensity = intensity * Math.max(1.0, Number(this.localHeldItemLightIntensityMul) || 85.0);
+        if (!enabled || intensity <= 0.0001) {
+            if (this.localHeldItemPointLight) {
+                this.localHeldItemRoot.remove(this.localHeldItemPointLight);
+                this.localHeldItemPointLight.dispose?.();
+                this.localHeldItemPointLight = null;
+            }
+            this.localHeldItemLightSmoothedIntensity = 0;
+            return;
+        }
+        if (!this.localHeldItemPointLight) {
+            const pl = new THREE.PointLight(0xffffff, 1.0, 18.0, 2.0);
+            pl.userData.tag = 'held_item_point_light';
+            pl.position.set(0, 0, 0);
+            this.localHeldItemPointLight = pl;
+            this.localHeldItemRoot.add(pl);
+        } else if (this.localHeldItemPointLight.parent !== this.localHeldItemRoot) {
+            this.localHeldItemRoot.add(this.localHeldItemPointLight);
+        }
+        this.localHeldItemPointLight.color.set(color);
+        this.localHeldItemPointLight.distance = 18.0;
+        this.localHeldItemPointLight.decay = 2.0;
+        this.localHeldItemPointLight.userData.baseIntensity = baseRuntimeIntensity;
+        if (!Number.isFinite(this.localHeldItemLightSmoothedIntensity) || this.localHeldItemLightSmoothedIntensity <= 0) {
+            this.localHeldItemLightSmoothedIntensity = baseRuntimeIntensity;
+        }
+        this.localHeldItemPointLight.intensity = this.localHeldItemLightSmoothedIntensity;
+    }
+
+    _updateLocalHeldItemPointLightRuntime(safeDt = 0.016) {
+        const pl = this.localHeldItemPointLight;
+        if (!pl || !this.localHeldItemRoot) return;
+        const baseIntensity = Math.max(0, Number(pl.userData?.baseIntensity) || 0);
+        if (baseIntensity <= 0.0001) {
+            pl.intensity = 0;
+            this.localHeldItemLightSmoothedIntensity = 0;
+            return;
+        }
+        const THREE = THREE_MODULE;
+        if (!THREE) return;
+        if (!this.localHeldItemLightWorldPos) this.localHeldItemLightWorldPos = new THREE.Vector3();
+        this.localHeldItemRoot.getWorldPosition(this.localHeldItemLightWorldPos);
+        const wx = Math.round(this.localHeldItemLightWorldPos.x);
+        const wy = Math.round(this.localHeldItemLightWorldPos.y);
+        const wz = Math.round(this.localHeldItemLightWorldPos.z);
+        const skylightLevel = this._estimateSkylightLevelWorld(wx, wy, wz);
+        const sky01 = Math.max(0, Math.min(1, skylightLevel / Math.max(1, Number(this.voxelSkylightMax) || 15)));
+        const daylight = Math.max(0, Math.min(1, Number(this.sunDaylight01) || 0));
+        const outdoorDayFactor = sky01 * daylight;
+        const suppress = Math.max(0, Math.min(0.95, outdoorDayFactor * Math.max(0, Math.min(0.95, Number(this.localHeldItemLightOutdoorSuppress) || 0.82))));
+        const envFactor = 1.0 - suppress;
+        const targetIntensity = baseIntensity * envFactor;
+        const k = Math.max(1.0, Number(this.localHeldItemLightLerp) || 12.0);
+        const a = Math.min(1.0, k * Math.max(0.001, Number(safeDt) || 0.016));
+        const cur = Number.isFinite(this.localHeldItemLightSmoothedIntensity) ? this.localHeldItemLightSmoothedIntensity : targetIntensity;
+        this.localHeldItemLightSmoothedIntensity = cur + ((targetIntensity - cur) * a);
+        pl.intensity = this.localHeldItemLightSmoothedIntensity;
+    }
+
+    _applyLocalHeldItemTransform(raw = null) {
+        if (!this.localHeldItemRoot) return '';
+        const t = this._normalizeLocalHeldItemTransform(raw);
+        this.localHeldItemRoot.position.set(t.pos[0], t.pos[1], t.pos[2]);
+        this.localHeldItemRoot.rotation.set(
+            t.rot[0] * (Math.PI / 180),
+            t.rot[1] * (Math.PI / 180),
+            t.rot[2] * (Math.PI / 180),
+        );
+        this.localHeldItemRoot.scale.set(t.scale, t.scale, t.scale);
+        this._applyLocalHeldItemPointLight(t.light);
+        return t.signature;
+    }
+
+    setLocalHeldItemModel(modelKeyRaw = '', transformRaw = null) {
+        const modelKey = (modelKeyRaw || '').toString().trim().replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!this.spawnMarker) return;
+        const normalizedTransform = this._normalizeLocalHeldItemTransform(transformRaw);
+        const transformSignature = normalizedTransform.signature;
+        const sameModel = (this.localHeldItemModelKey === modelKey);
+        const sameTransform = (this.localHeldItemTransformSignature === transformSignature);
+        this.localHeldItemModelKey = modelKey;
+        this.localHeldItemBoneName = normalizedTransform.bone || 'auto';
+        this._attachLocalHeldItemAnchorToRig();
+        this.localHeldItemTransformSignature = this._applyLocalHeldItemTransform(transformRaw);
+        if (!modelKey) {
+            this._clearLocalHeldItemVisual();
+            return;
+        }
+        if (sameModel && sameTransform) return;
+        this._clearLocalHeldItemVisual();
+        this._getOrLoadHeldItemTemplate(modelKey, (template) => {
+            if (!template) return;
+            if (this.localHeldItemModelKey !== modelKey) return;
+            if (!this.localHeldItemRoot) return;
+            const item = template.clone(true);
+            const maxDim = Math.max(0.001, Number(template.userData?.maxDim) || 0.4);
+            const targetDim = 0.36;
+            const s = targetDim / maxDim;
+            item.scale.set(s, s, s);
+            this.localHeldItemRoot.add(item);
+        });
+    }
+
+    _ensureRemoteHeldItemAnchor(rp) {
+        const THREE = THREE_MODULE;
+        if (!THREE || !rp?.rig) return null;
+        if (!rp.heldItemAnchor) {
+            const anchor = new THREE.Group();
+            anchor.userData.tag = 'remote_held_item_anchor';
+            rp.heldItemAnchor = anchor;
+            rp.rig.userData.remoteHeldItemAnchor = anchor;
+        }
+        if (!rp.heldItemRoot) {
+            const root = new THREE.Group();
+            root.userData.tag = 'remote_held_item_root';
+            rp.heldItemRoot = root;
+            rp.heldItemAnchor.add(root);
+        } else if (rp.heldItemRoot.parent !== rp.heldItemAnchor) {
+            rp.heldItemAnchor.add(rp.heldItemRoot);
+        }
+        return rp.heldItemAnchor;
+    }
+
+    _applyRemoteHeldItemAnchorTransform(anchor, onBone = false) {
+        if (!anchor) return;
+        if (onBone) {
+            anchor.position.set(0.02, -0.02, -0.01);
+            anchor.rotation.set(-0.55, 0.15, -1.05);
+        } else {
+            anchor.position.set(0.34, 1.00, 0.06);
+            anchor.rotation.set(-0.25, 0.05, -0.65);
+        }
+    }
+
+    _attachRemoteHeldItemAnchorToRig(rp) {
+        if (!rp?.rig) return;
+        const anchor = this._ensureRemoteHeldItemAnchor(rp);
+        if (!anchor) return;
+        const modelRoot = rp.rig.userData?.modelRoot || null;
+        const preferred = this._findNodeByName(modelRoot, rp.heldItemBoneName || 'auto');
+        const rightHand = preferred || this._findRightHandBone(modelRoot);
+        if (anchor.parent) {
+            try { anchor.parent.remove(anchor); } catch (_) { }
+        }
+        if (rightHand) {
+            rightHand.add(anchor);
+            this._applyRemoteHeldItemAnchorTransform(anchor, true);
+        } else {
+            rp.rig.add(anchor);
+            this._applyRemoteHeldItemAnchorTransform(anchor, false);
+        }
+    }
+
+    _clearRemoteHeldItemVisual(rp) {
+        if (!rp?.heldItemRoot) return;
+        for (let i = rp.heldItemRoot.children.length - 1; i >= 0; i -= 1) {
+            const ch = rp.heldItemRoot.children[i];
+            if (!ch) continue;
+            if (ch.userData?.tag === 'held_item_point_light_remote') continue;
+            rp.heldItemRoot.remove(ch);
+            this.clearObject(ch);
+        }
+    }
+
+    _applyRemoteHeldItemPointLight(rp, lightCfgRaw = null) {
+        const THREE = THREE_MODULE;
+        if (!THREE || !rp?.heldItemRoot) return;
+        const cfg = (lightCfgRaw && typeof lightCfgRaw === 'object') ? lightCfgRaw : {};
+        const enabled = !!cfg.enabled;
+        const colorRaw = (cfg.color || '#ffd37a').toString().trim().toLowerCase();
+        const color = /^#[0-9a-f]{6}$/.test(colorRaw) ? colorRaw : '#ffd37a';
+        const intensity = Math.max(0.0, Math.min(20.0, Number(cfg.intensity) || 0));
+        const baseRuntimeIntensity = intensity * Math.max(1.0, Number(this.localHeldItemLightIntensityMul) || 85.0);
+        if (!enabled || intensity <= 0.0001) {
+            if (rp.heldItemPointLight) {
+                rp.heldItemRoot.remove(rp.heldItemPointLight);
+                rp.heldItemPointLight.dispose?.();
+                rp.heldItemPointLight = null;
+            }
+            return;
+        }
+        if (!rp.heldItemPointLight) {
+            const pl = new THREE.PointLight(0xffffff, 1.0, 18.0, 2.0);
+            pl.userData.tag = 'held_item_point_light_remote';
+            pl.position.set(0, 0, 0);
+            rp.heldItemPointLight = pl;
+            rp.heldItemRoot.add(pl);
+        } else if (rp.heldItemPointLight.parent !== rp.heldItemRoot) {
+            rp.heldItemRoot.add(rp.heldItemPointLight);
+        }
+        rp.heldItemPointLight.color.set(color);
+        rp.heldItemPointLight.distance = 18.0;
+        rp.heldItemPointLight.decay = 2.0;
+        rp.heldItemPointLight.intensity = baseRuntimeIntensity;
+    }
+
+    _applyRemoteHeldItemTransform(rp, raw = null) {
+        if (!rp?.heldItemRoot) return '';
+        const t = this._normalizeLocalHeldItemTransform(raw);
+        rp.heldItemRoot.position.set(t.pos[0], t.pos[1], t.pos[2]);
+        rp.heldItemRoot.rotation.set(
+            t.rot[0] * (Math.PI / 180),
+            t.rot[1] * (Math.PI / 180),
+            t.rot[2] * (Math.PI / 180),
+        );
+        rp.heldItemRoot.scale.set(t.scale, t.scale, t.scale);
+        this._applyRemoteHeldItemPointLight(rp, t.light);
+        return t.signature;
+    }
+
+    setRemotePlayerHeldItem(playerId, modelKeyRaw = '', transformRaw = null) {
+        if (playerId == null) return;
+        const rp = this.remotePlayers.get(String(playerId));
+        if (!rp || !rp.rig) return;
+        const modelKey = (modelKeyRaw || '').toString().trim().replace(/\\/g, '/').replace(/^\/+/, '');
+        const normalizedTransform = this._normalizeLocalHeldItemTransform(transformRaw);
+        const transformSignature = normalizedTransform.signature;
+        const sameModel = (rp.heldItemModelKey === modelKey);
+        const sameTransform = (rp.heldItemTransformSignature === transformSignature);
+        rp.heldItemModelKey = modelKey;
+        rp.heldItemBoneName = normalizedTransform.bone || 'auto';
+        this._attachRemoteHeldItemAnchorToRig(rp);
+        rp.heldItemTransformSignature = this._applyRemoteHeldItemTransform(rp, transformRaw);
+        if (!modelKey) {
+            this._clearRemoteHeldItemVisual(rp);
+            return;
+        }
+        if (sameModel && sameTransform) return;
+        this._clearRemoteHeldItemVisual(rp);
+        this._getOrLoadHeldItemTemplate(modelKey, (template) => {
+            if (!template) return;
+            const live = this.remotePlayers.get(String(playerId));
+            if (!live || !live.rig) return;
+            if (live.heldItemModelKey !== modelKey) return;
+            if (!live.heldItemRoot) return;
+            const item = template.clone(true);
+            const maxDim = Math.max(0.001, Number(template.userData?.maxDim) || 0.4);
+            const targetDim = 0.36;
+            const s = targetDim / maxDim;
+            item.scale.set(s, s, s);
+            live.heldItemRoot.add(item);
         });
     }
 
@@ -2069,6 +2767,35 @@ export class Simple3D {
         }
         if (!best) return { x, z, changed: false };
         return { x: best.x, z: best.z, changed: true };
+    }
+
+    _resolveUpwardCeilingClamp(xRaw, zRaw, fromYRaw, toYRaw) {
+        const x = Number(xRaw) || 0;
+        const z = Number(zRaw) || 0;
+        const fromY = Number(fromYRaw) || 0;
+        const toY = Number(toYRaw) || fromY;
+        if (toY <= fromY) return toY;
+        const dy = toY - fromY;
+        const step = 0.035;
+        const steps = Math.max(1, Math.ceil(dy / step));
+        let lastFreeY = fromY;
+        for (let i = 1; i <= steps; i += 1) {
+            const t = i / steps;
+            const y = fromY + (dy * t);
+            if (this._isVoxelCapsuleBlockingPosition(x, z, y)) {
+                let lo = lastFreeY;
+                let hi = y;
+                for (let j = 0; j < 6; j += 1) {
+                    const mid = (lo + hi) * 0.5;
+                    if (this._isVoxelCapsuleBlockingPosition(x, z, mid)) hi = mid;
+                    else lo = mid;
+                }
+                const ceilingSkin = 0.012;
+                return Math.max(fromY, lo - ceilingSkin);
+            }
+            lastFreeY = y;
+        }
+        return toY;
     }
 
     updateDecorCollectHighlight() {
@@ -3038,16 +3765,37 @@ export class Simple3D {
         return bestGroundY;
     }
 
-    _sampleGroundYFromTargetColumn(x, z) {
+    _sampleGroundYFromTargetColumn(x, z, refGroundY = null) {
         const cx = Math.round(Number(x) || 0);
         const cz = Math.round(Number(z) || 0);
-        const topY = this.getTopSolidYAtWorld(cx, cz);
-        if (!Number.isFinite(topY)) return null;
-        if (topY < 0 || topY >= (this.voxelChunkHeight - 1)) return null;
-        if (this._isSolidBlockId(this.getVoxelAtWorld(cx, topY + 1, cz))) return null;
-        const gy = Number(topY) + 0.5;
-        if (!this._hasMovementHeadroomAt(cx, cz, gy)) return null;
-        return gy;
+        const ref = Number.isFinite(Number(refGroundY))
+            ? Number(refGroundY)
+            : this.sampleGroundY(cx, cz);
+        if (!Number.isFinite(ref)) return null;
+        const refTop = Math.round(ref - 0.5);
+        const up = Math.max(1, Math.ceil(Math.max(0.1, Number(this.maxStepHeight) || 0.75)) + 1);
+        const down = Math.max(2, Math.ceil(Math.max(0.5, Number(this.maxDownStep) || 1.2)) + 2);
+        const maxOffset = Math.max(up, down);
+        let best = null;
+        let bestScore = Infinity;
+        for (let offset = 0; offset <= maxOffset; offset += 1) {
+            const candidates = (offset === 0)
+                ? [refTop]
+                : [refTop - offset, refTop + offset];
+            for (const topY of candidates) {
+                if (topY < 0 || topY >= (this.voxelChunkHeight - 1)) continue;
+                if (!this._isSolidBlockId(this.getVoxelAtWorld(cx, topY, cz))) continue;
+                if (this._isSolidBlockId(this.getVoxelAtWorld(cx, topY + 1, cz))) continue;
+                const gy = Number(topY) + 0.5;
+                if (!this._hasMovementHeadroomAt(cx, cz, gy)) continue;
+                const score = Math.abs(gy - ref);
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = gy;
+                }
+            }
+        }
+        return best;
     }
 
     _resolveNextGroundCandidate(fromGroundY, toX, toZ) {
@@ -3055,7 +3803,7 @@ export class Simple3D {
             ? Number(fromGroundY)
             : ((Number(this.actor?.y) || 0) - this.playerGroundOffset);
         const sampled = this._sampleGroundYNearHeight(toX, toZ, fromGroundY);
-        const column = this._sampleGroundYFromTargetColumn(toX, toZ);
+        const column = this._sampleGroundYFromTargetColumn(toX, toZ, fromGroundY);
         const candidates = [];
         if (Number.isFinite(sampled)) candidates.push(Number(sampled));
         if (Number.isFinite(column)) candidates.push(Number(column));
@@ -3073,7 +3821,7 @@ export class Simple3D {
         const actorRefGround = (Number(this.actor?.y) || 0) - this.playerGroundOffset;
         const nearFrom = this._sampleGroundYNearHeight(toX, toZ, fromGroundY);
         const nearActor = this._sampleGroundYNearHeight(toX, toZ, actorRefGround);
-        const column = this._sampleGroundYFromTargetColumn(toX, toZ);
+        const column = this._sampleGroundYFromTargetColumn(toX, toZ, actorRefGround);
         const candidates = [];
         if (Number.isFinite(nearFrom)) candidates.push(Number(nearFrom));
         if (Number.isFinite(nearActor)) candidates.push(Number(nearActor));
@@ -3235,7 +3983,15 @@ export class Simple3D {
     _updateDesktopCameraFollow(safeDt) {
         const actor = this.actor;
         const targetX = actor.x;
-        const targetY = actor.y + this.cameraTargetHeight;
+        const baseTargetY = actor.y + this.cameraTargetHeight;
+        const targetY = this._resolveCameraPivotY(
+            targetX,
+            baseTargetY,
+            actor.y,
+            actor.z,
+            safeDt,
+            this.cameraViewMode === 'first_person'
+        );
         const targetZ = actor.z;
         if (this.cameraViewMode === 'first_person') {
             const eyeY = targetY + this.cameraFirstPersonEyeOffset;
@@ -3248,6 +4004,8 @@ export class Simple3D {
             this.camera.position.y += (eyeY - this.camera.position.y) * followLerpFp;
             this.camera.position.z += (targetZ - this.camera.position.z) * followLerpFp;
             this.camera.lookAt(fpTargetX, fpTargetY, fpTargetZ);
+            this.localCharacterOpacity = 1.0;
+            this._applyLocalCharacterOpacity(1.0);
             this._setLocalCharacterRenderVisible(false);
             return;
         }
@@ -3262,18 +4020,142 @@ export class Simple3D {
         this.camera.position.y += (safeCam.y - this.camera.position.y) * followLerp;
         this.camera.position.z += (safeCam.z - this.camera.position.z) * followLerp;
         this.camera.lookAt(targetX, targetY, targetZ);
+        this._updateLocalCharacterOpacityByCamera(targetX, targetY, targetZ, safeDt);
+    }
+
+    _isVoxelSphereColliding(xRaw, yRaw, zRaw, rRaw) {
+        if (!this.useVoxelTerrainMeshing) return false;
+        const x = Number(xRaw) || 0;
+        const y = Number(yRaw) || 0;
+        const z = Number(zRaw) || 0;
+        const r = Math.max(0.02, Number(rRaw) || 0.2);
+        const r2 = r * r;
+        const minX = Math.floor(x - r - 0.5);
+        const maxX = Math.ceil(x + r + 0.5);
+        const minY = Math.max(0, Math.floor(y - r - 0.5));
+        const maxY = Math.min(this.voxelChunkHeight - 1, Math.ceil(y + r + 0.5));
+        const minZ = Math.floor(z - r - 0.5);
+        const maxZ = Math.ceil(z + r + 0.5);
+        for (let vy = minY; vy <= maxY; vy += 1) {
+            for (let vx = minX; vx <= maxX; vx += 1) {
+                for (let vz = minZ; vz <= maxZ; vz += 1) {
+                    if (!this._isSolidBlockId(this.getVoxelAtWorld(vx, vy, vz))) continue;
+                    const boxMinX = vx - 0.5;
+                    const boxMaxX = vx + 0.5;
+                    const boxMinY = vy - 0.5;
+                    const boxMaxY = vy + 0.5;
+                    const boxMinZ = vz - 0.5;
+                    const boxMaxZ = vz + 0.5;
+                    const cx = Math.max(boxMinX, Math.min(x, boxMaxX));
+                    const cy = Math.max(boxMinY, Math.min(y, boxMaxY));
+                    const cz = Math.max(boxMinZ, Math.min(z, boxMaxZ));
+                    const dx = x - cx;
+                    const dy = y - cy;
+                    const dz = z - cz;
+                    if (((dx * dx) + (dy * dy) + (dz * dz)) <= r2) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    _resolveCameraPivotY(xRaw, desiredYRaw, actorYRaw, zRaw, safeDt = 0.016, firstPerson = false) {
+        const x = Number(xRaw) || 0;
+        const z = Number(zRaw) || 0;
+        let yDesired = Number(desiredYRaw) || 0;
+        const actorY = Number(actorYRaw) || 0;
+        const minY = actorY + Math.max(0.2, Number(this.cameraPivotMinOffsetFromActor) || 0.36);
+        const feetY = actorY - this.playerGroundOffset;
+        const bodyHeight = Math.max(0.8, Number(this.capsuleBodyHeight) || 1.72);
+        const headY = feetY + bodyHeight;
+        const probeR = Math.max(0.08, Number(this.cameraPivotProbeRadius) || 0.14);
+        if (!firstPerson) {
+            const headClear = Math.max(0.015, Number(this.cameraPivotHeadClearance) || 0.04);
+            yDesired = Math.min(yDesired, headY - headClear);
+        }
+        let yMaxByCeiling = Number.POSITIVE_INFINITY;
+        if (this.useVoxelTerrainMeshing) {
+            const startY = Math.max(minY, yDesired);
+            const maxProbeY = Math.min(this.voxelChunkHeight - 0.5, startY + 1.8);
+            for (let py = startY; py <= maxProbeY; py += 0.06) {
+                if (!this._isVoxelSphereColliding(x, py, z, probeR)) continue;
+                yMaxByCeiling = py - (probeR + 0.02);
+                break;
+            }
+        }
+        let yTarget = yDesired;
+        if (Number.isFinite(yMaxByCeiling)) yTarget = Math.min(yTarget, yMaxByCeiling);
+        yTarget = Math.max(minY, yTarget);
+        for (let i = 0; i < 18; i += 1) {
+            if (yTarget <= minY) break;
+            if (!this._isVoxelSphereColliding(x, yTarget, z, probeR)) break;
+            yTarget -= 0.055;
+        }
+        yTarget = Math.max(minY, yTarget);
+        if (!Number.isFinite(this.cameraPivotYSmoothed)) {
+            this.cameraPivotYSmoothed = yTarget;
+        } else {
+            const riseLerp = Math.max(1, Number(this.cameraPivotLerpUp) || 8.0);
+            const fallLerp = Math.max(1, Number(this.cameraPivotLerpDown) || 24.0);
+            const rate = (yTarget < this.cameraPivotYSmoothed) ? fallLerp : riseLerp;
+            const a = Math.min(1, rate * Math.max(0.001, Number(safeDt) || 0.016));
+            this.cameraPivotYSmoothed += (yTarget - this.cameraPivotYSmoothed) * a;
+        }
+        return Math.max(minY, this.cameraPivotYSmoothed);
+    }
+
+    _resolveCameraVoxelSweep(targetVec, desiredVec) {
+        const THREE = THREE_MODULE;
+        if (!THREE || !this.useVoxelTerrainMeshing) return desiredVec.clone();
+        const seg = desiredVec.clone().sub(targetVec);
+        const dist = seg.length();
+        if (!Number.isFinite(dist) || dist <= 0.0001) return desiredVec.clone();
+        const dir = seg.divideScalar(dist);
+        const radius = Math.max(0.08, Number(this.cameraCollisionSphereRadius) || 0.22);
+        const stepLen = Math.max(0.06, Number(this.cameraCollisionSweepStep) || 0.14);
+        const steps = Math.max(1, Math.ceil(dist / stepLen));
+        for (let i = 1; i <= steps; i += 1) {
+            const t = Math.min(dist, i * stepLen);
+            const px = targetVec.x + (dir.x * t);
+            const py = targetVec.y + (dir.y * t);
+            const pz = targetVec.z + (dir.z * t);
+            if (!this._isVoxelSphereColliding(px, py, pz, radius)) continue;
+            const pullBack = Math.max(0.04, radius + Math.max(0.04, Number(this.cameraCollisionPadding) * 0.2 || 0.08));
+            const safeT = Math.max(0.03, t - pullBack);
+            return targetVec.clone().addScaledVector(dir, safeT);
+        }
+        return desiredVec.clone();
     }
 
     _setLocalCharacterRenderVisible(visible) {
         const v = !!visible;
-        if (this.spawnMarker) this.spawnMarker.visible = v;
+        // No ocultar el rig completo ni meshes con visible=false:
+        // el item puede estar anclado dentro de esa jerarquia.
+        if (this.spawnMarker) this.spawnMarker.visible = true;
+        const meshes = Array.isArray(this.spawnMarker?.userData?.renderMeshes)
+            ? this.spawnMarker.userData.renderMeshes
+            : [];
+        for (const mesh of meshes) {
+            if (!mesh) continue;
+            mesh.visible = true;
+        }
+        this._applyLocalCharacterOpacity(v ? 1.0 : 0.0);
+        this._applyLocalCharacterCameraLayerState();
         if (this.localNameTag?.sprite) this.localNameTag.sprite.visible = v;
+    }
+
+    _applyLocalCharacterCameraLayerState() {
+        if (!this.camera) return;
+        const layer = Math.max(1, Number(this.localCharacterRenderLayer) || 2) | 0;
+        if (this.cameraViewMode === 'first_person') this.camera.layers.disable(layer);
+        else this.camera.layers.enable(layer);
     }
 
     toggleCameraPerspective() {
         if (!this.initialized || !this.desktopThirdPersonActive) return this.cameraViewMode;
         this.cameraViewMode = (this.cameraViewMode === 'first_person') ? 'third_person' : 'first_person';
         this._setLocalCharacterRenderVisible(this.cameraViewMode !== 'first_person');
+        this._applyLocalCharacterCameraLayerState();
         return this.cameraViewMode;
     }
 
@@ -3284,10 +4166,11 @@ export class Simple3D {
         }
         const target = new THREE.Vector3(targetX, targetY, targetZ);
         const desired = new THREE.Vector3(desiredX, desiredY, desiredZ);
-        const seg = desired.clone().sub(target);
+        let finalPos = this._resolveCameraVoxelSweep(target, desired);
+        const seg = finalPos.clone().sub(target);
         const dist = seg.length();
         if (!Number.isFinite(dist) || dist <= 0.0001) {
-            return { x: desiredX, y: desiredY, z: desiredZ };
+            return { x: finalPos.x, y: finalPos.y, z: finalPos.z };
         }
         const dir = seg.clone().divideScalar(dist);
         if (!this.cameraCollisionRaycaster) this.cameraCollisionRaycaster = new THREE.Raycaster();
@@ -3306,7 +4189,6 @@ export class Simple3D {
         }
         if (this.decorGroup) colliders.push(this.decorGroup);
 
-        let finalPos = desired.clone();
         if (colliders.length > 0) {
             const hits = this.cameraCollisionRaycaster.intersectObjects(colliders, true);
             const hit = hits.find((h) => {
@@ -3537,7 +4419,16 @@ export class Simple3D {
         if (!grounded) {
             const prevY = actor.y;
             this.actorVelY -= Math.max(4.0, Number(this.gravity) || 26.0) * safeDt;
-            actor.y += this.actorVelY * safeDt;
+            let nextY = actor.y + (this.actorVelY * safeDt);
+            if (this.actorVelY > 0) {
+                const clampedY = this._resolveUpwardCeilingClamp(actor.x, actor.z, actor.y, nextY);
+                if (clampedY < (nextY - 0.0001)) {
+                    nextY = clampedY;
+                    // Corta subida en seco al tocar techo y fuerza inicio de caida.
+                    this.actorVelY = Math.min(this.actorVelY, -0.4);
+                }
+            }
+            actor.y = nextY;
             const landGroundY = this._sampleGroundYNearHeight(actor.x, actor.z, actor.y - this.playerGroundOffset);
             if (landGroundY !== null) {
                 const targetGroundY = landGroundY + this.playerGroundOffset;
@@ -3718,8 +4609,19 @@ export class Simple3D {
 
     determineLocalAnimationState() {
         if (this.vegetationCollectActive) return 'gather';
+        if (Number(this.interactionAnimUntil) > Number(this.elapsed || 0)) return 'gather';
+        const breakProg = this.getBreakProgressState?.() || { active: false };
+        if (breakProg.active) return 'holding';
         if (this.actor?.moving) return 'walk';
         return 'idle';
+    }
+
+    triggerInteractionAnimationPulse(durationSec = 0.26) {
+        const d = Math.max(0.08, Math.min(1.0, Number(durationSec) || 0.26));
+        const until = Number(this.elapsed || 0) + d;
+        if (!Number.isFinite(this.interactionAnimUntil) || until > this.interactionAnimUntil) {
+            this.interactionAnimUntil = until;
+        }
     }
 
     updateLocalAnimationState() {
@@ -4384,7 +5286,12 @@ export class Simple3D {
         const pos = player.position || { x: 0, y: 60, z: 0 };
         const cls = this.resolveCharacterClass({ skin_id: player.character_class || player.rol || 'rogue' });
         const modelKey = (player.model_key || '').toString().trim();
+        const heldItemModelKey = (player.held_item_model_key || '').toString().trim();
+        const heldItemTransform = (player.held_item_transform && typeof player.held_item_transform === 'object')
+            ? player.held_item_transform
+            : null;
         const animState = (player.animation_state || 'idle').toString().toLowerCase();
+        const normalizeAnim = (s) => (s === 'walk' || s === 'gather' || s === 'holding') ? s : 'idle';
         const displayName = this._resolveDisplayPlayerName(player, `P${pid}`);
         const existing = this.remotePlayers.get(pid);
         if (existing) {
@@ -4401,7 +5308,7 @@ export class Simple3D {
                 existing.nameTag.name = displayName;
                 this.drawNameTag(existing.nameTag);
             }
-            existing.networkAnimState = (animState === 'walk' || animState === 'gather') ? animState : 'idle';
+            existing.networkAnimState = normalizeAnim(animState);
             this._setRigAnimationState(existing.rig, existing.networkAnimState);
             if (player.hp != null || player.max_hp != null) {
                 this.setRemotePlayerHealth(pid, player.hp ?? existing.nameTag?.hp ?? 1000, player.max_hp ?? existing.nameTag?.maxHp ?? 1000);
@@ -4410,6 +5317,7 @@ export class Simple3D {
             if (player.active_emotion) {
                 this.setRemotePlayerEmotion(pid, player.active_emotion, 0);
             }
+            this.setRemotePlayerHeldItem(pid, heldItemModelKey, heldItemTransform);
             return;
         }
         const rig = new THREE.Group();
@@ -4417,6 +5325,7 @@ export class Simple3D {
         rig.userData.nameTagYOffset = 3.2;
         rig.userData.characterModelKey = '';
         rig.userData.characterVisualScale = 0.9;
+        rig.userData.remotePlayerId = pid;
         this.scene.add(rig);
         if (modelKey) this._applyCharacterModelToRig(rig, modelKey);
         const emoticonTexture = this.findEmoticonTextureFromRig(rig);
@@ -4438,10 +5347,19 @@ export class Simple3D {
             targetPos: new THREE.Vector3(rig.position.x, rig.position.y, rig.position.z),
             moveProgress: 1,
             moving: false,
-            networkAnimState: (animState === 'walk' || animState === 'gather') ? animState : 'idle',
+            networkAnimState: normalizeAnim(animState),
+            heldItemAnchor: null,
+            heldItemRoot: null,
+            heldItemPointLight: null,
+            heldItemModelKey: '',
+            heldItemTransformSignature: '',
+            heldItemBoneName: 'auto',
         });
         const rpNew = this.remotePlayers.get(pid);
-        if (rpNew) this._setRigAnimationState(rpNew.rig, rpNew.networkAnimState);
+        if (rpNew) {
+            this._setRigAnimationState(rpNew.rig, rpNew.networkAnimState);
+            this.setRemotePlayerHeldItem(pid, heldItemModelKey, heldItemTransform);
+        }
     }
 
     setRemotePlayerClass(playerId, classId) {
@@ -4485,7 +5403,7 @@ export class Simple3D {
             return;
         }
         rp.targetPos.set(tx, ty, tz);
-        if (rp.networkAnimState !== 'gather' && Math.hypot(dxNow, dzNow) > 0.04) {
+        if (rp.networkAnimState !== 'gather' && rp.networkAnimState !== 'holding' && Math.hypot(dxNow, dzNow) > 0.04) {
             rp.networkAnimState = 'walk';
         }
     }
@@ -4495,7 +5413,7 @@ export class Simple3D {
         const rp = this.remotePlayers.get(String(playerId));
         if (!rp) return;
         const next = (stateRaw || 'idle').toString().toLowerCase();
-        rp.networkAnimState = (next === 'walk' || next === 'gather') ? next : 'idle';
+        rp.networkAnimState = (next === 'walk' || next === 'gather' || next === 'holding') ? next : 'idle';
         this._setRigAnimationState(rp.rig, rp.networkAnimState);
     }
 
@@ -4506,6 +5424,11 @@ export class Simple3D {
         if (!rp) return;
         if (this.scene) this.scene.remove(rp.rig);
         if (this.scene && rp.nameTag?.sprite) this.scene.remove(rp.nameTag.sprite);
+        if (rp.heldItemPointLight && rp.heldItemRoot) {
+            try { rp.heldItemRoot.remove(rp.heldItemPointLight); } catch (_) { }
+            rp.heldItemPointLight.dispose?.();
+            rp.heldItemPointLight = null;
+        }
         this.clearObject(rp.rig);
         if (rp.nameTag?.texture) rp.nameTag.texture.dispose();
         if (rp.nameTag?.sprite?.material) rp.nameTag.sprite.material.dispose();
@@ -4539,8 +5462,8 @@ export class Simple3D {
             }
             const animator = rp.rig?.userData?.animator || null;
             if (animator?.mixer) animator.mixer.update(Math.max(0, Number(dt) || 0));
-            const effectiveState = (rp.networkAnimState === 'gather')
-                ? 'gather'
+            const effectiveState = (rp.networkAnimState === 'gather' || rp.networkAnimState === 'holding')
+                ? rp.networkAnimState
                 : (rp.moving ? 'walk' : (rp.networkAnimState || 'idle'));
             this._setRigAnimationState(rp.rig, effectiveState);
             if (rp.emoticonExpireAt > 0 && this.elapsed >= rp.emoticonExpireAt) {
@@ -4955,7 +5878,57 @@ export class Simple3D {
         };
     }
 
-    updateLights() {
+    _sampleLocalCaveFactor() {
+        const x = Math.round(Number(this.actor?.x) || 0);
+        const z = Math.round(Number(this.actor?.z) || 0);
+        const y = Math.round((Number(this.actor?.y) || 0) + 0.6);
+        const maxL = Math.max(1, Number(this.voxelSkylightMax) | 0);
+        const skyL = this._estimateSkylightLevelWorld(x, y, z);
+        const sky01 = Math.max(0, Math.min(1, Number(skyL) / maxL));
+        const topY = this.getTopSolidYAtWorld(x, z);
+        const roofDepth = Number.isFinite(topY) ? Math.max(0, (Number(topY) - y) + 1) : 0;
+        const roof01 = Math.max(0, Math.min(1, (roofDepth - 2) / 10));
+        const caveRaw = ((1.0 - sky01) * 0.78) + (roof01 * 0.38);
+        return Math.max(0, Math.min(1, caveRaw));
+    }
+
+    _applyCaveAtmosphericLights(dayAmbient, dayDir, dayFill, dayHemi, nightMinLight, safeDt = 0.016) {
+        const raw = this._sampleLocalCaveFactor();
+        const response = Math.max(1.0, Math.min(18.0, Number(this.caveAtmosphereResponse) || 5.5));
+        const dt = Math.max(0.001, Math.min(0.10, Number(safeDt) || 0.016));
+        const alpha = Math.max(0, Math.min(1, 1 - Math.exp(-response * dt)));
+        this.caveAtmosphereBlend += (raw - this.caveAtmosphereBlend) * alpha;
+        const cave = Math.max(0, Math.min(1, this.caveAtmosphereBlend));
+
+        const caveMinLight = Math.max(0.0, Math.min(0.30, Number(this.params?.caveMinLight ?? 0.03)));
+        const ambientMin = Math.max(0.0, caveMinLight);
+        const fillMin = Math.max(0.0, caveMinLight * 0.40);
+        const hemiMin = Math.max(0.0, caveMinLight * 0.52);
+        const dirMin = Math.max(0.0, caveMinLight * 0.08);
+
+        if (this.ambientLight) this.ambientLight.intensity = dayAmbient + ((ambientMin - dayAmbient) * cave);
+        if (this.fillLight) this.fillLight.intensity = dayFill + ((fillMin - dayFill) * cave);
+        if (this.hemiLight) this.hemiLight.intensity = dayHemi + ((hemiMin - dayHemi) * cave);
+        this.dirLight.intensity = dayDir + ((dirMin - dayDir) * cave);
+
+        if (this.scene?.fog && this.sceneFogBase && this.caveFogEnabled) {
+            const mode = this.sceneFogBase.mode;
+            if (mode === 'linear' && this.scene.fog.isFog) {
+                const nearBase = Math.max(1, Number(this.sceneFogBase.near) || 110);
+                const farBase = Math.max(nearBase + 1, Number(this.sceneFogBase.far) || 520);
+                const nearCave = Math.max(2, Math.min(48, Number(this.caveFogLinearNear) || 16));
+                const farCave = Math.max(nearCave + 8, Math.min(220, Number(this.caveFogLinearFar) || 96));
+                this.scene.fog.near = nearBase + ((nearCave - nearBase) * cave);
+                this.scene.fog.far = farBase + ((farCave - farBase) * cave);
+            } else if (mode === 'exp2' && this.scene.fog.isFogExp2) {
+                const baseD = Math.max(0.00001, Number(this.sceneFogBase.density) || 0.0025);
+                const caveD = Math.max(baseD, Math.min(0.08, baseD + (Number(this.caveFogExpDensityBoost) || 0.018)));
+                this.scene.fog.density = baseD + ((caveD - baseD) * cave);
+            }
+        }
+    }
+
+    updateLights(safeDt = 0.016) {
         if (!this.dirLight || !this.sunMesh) return;
         const center = this.sunOrbitCenter || { x: 0, y: 72, z: 0 };
         const sunClockSec = this.getSunClockSeconds();
@@ -4967,6 +5940,7 @@ export class Simple3D {
         const sunY = center.y + this.sunOrbitHeightBase + (orbitSin * this.sunOrbitHeightAmplitude);
         const daylightRaw = Math.max(0, Math.min(1, (orbitSin + 0.12) / 1.12));
         const daylight = Math.pow(daylightRaw, 1.35);
+        this.sunDaylight01 = daylight;
         const nightMinLight = Math.max(0.0, Math.min(0.30, Number(this.params?.nightMinLight ?? 0.04)));
 
         this.sunMesh.position.set(sunX, sunY, sunZ);
@@ -4975,10 +5949,11 @@ export class Simple3D {
             this.sunMesh.material.needsUpdate = true;
         }
         this.dirLight.position.set(sunX, sunY, sunZ);
-        this.dirLight.intensity = (nightMinLight * 0.25) + (1.28 * daylight);
-        if (this.ambientLight) this.ambientLight.intensity = nightMinLight + (0.58 * daylight);
-        if (this.fillLight) this.fillLight.intensity = (nightMinLight * 0.50) + (0.34 * daylight);
-        if (this.hemiLight) this.hemiLight.intensity = (nightMinLight * 0.75) + (0.49 * daylight);
+        const dayDir = (nightMinLight * 0.25) + (1.28 * daylight);
+        const dayAmbient = nightMinLight + (0.58 * daylight);
+        const dayFill = (nightMinLight * 0.50) + (0.34 * daylight);
+        const dayHemi = (nightMinLight * 0.75) + (0.49 * daylight);
+        this._applyCaveAtmosphericLights(dayAmbient, dayDir, dayFill, dayHemi, nightMinLight, safeDt);
         if (this.dirLightTarget) {
             this.dirLightTarget.position.set(center.x, center.y, center.z);
             this.dirLightTarget.updateMatrixWorld();
@@ -5060,6 +6035,25 @@ export class Simple3D {
                 physicsGravity: Number(terrainConfig.physics_gravity ?? 26.0),
                 physicsAirControl: Number(terrainConfig.physics_air_control ?? 0.45),
                 nightMinLight: Number(terrainConfig.night_min_light ?? 0.04),
+                caveEnabled: Number(terrainConfig.cave_enabled ?? terrainConfig.caves_enabled ?? 1) === 1,
+                caveNoiseScale: Number(terrainConfig.cave_noise_scale ?? 0.045),
+                caveDensityThreshold: Number(terrainConfig.cave_density_threshold ?? 0.62),
+                caveNoiseOctaves: Number(terrainConfig.cave_noise_octaves ?? 3),
+                caveMinY: Number(terrainConfig.cave_min_y ?? 8),
+                caveSurfaceBuffer: Number(terrainConfig.cave_surface_buffer ?? 4),
+                caveSpawnSafeRadius: Number(terrainConfig.cave_spawn_safe_radius ?? 24),
+                caveEmissiveEnabled: Number(terrainConfig.cave_emissive_enabled ?? 1) === 1,
+                caveEmissiveDensity: Number(terrainConfig.cave_emissive_density ?? 0.018),
+                caveEmissiveIntensity: Number(terrainConfig.cave_emissive_intensity ?? 1.6),
+                caveEmissiveRadius: Number(terrainConfig.cave_emissive_radius ?? 6.0),
+                caveEmissiveMaxActive: Number(terrainConfig.cave_emissive_max_active ?? 24),
+                caveMinLight: Number(terrainConfig.cave_min_light ?? 0.03),
+                wormEnabled: Number(terrainConfig.worm_enabled ?? 1) === 1,
+                wormCount: Number(terrainConfig.worm_count ?? 3),
+                wormLengthMin: Number(terrainConfig.worm_length_min ?? 48),
+                wormLengthMax: Number(terrainConfig.worm_length_max ?? 120),
+                wormRadiusMin: Number(terrainConfig.worm_radius_min ?? 2.2),
+                wormRadiusMax: Number(terrainConfig.worm_radius_max ?? 4.8),
                 terrainCells: terrainConfig.terrain_cells || null
             };
         }
@@ -5112,6 +6106,25 @@ export class Simple3D {
             physicsGravity: 26.0,
             physicsAirControl: 0.45,
             nightMinLight: 0.04,
+            caveEnabled: true,
+            caveNoiseScale: 0.045,
+            caveDensityThreshold: 0.62,
+            caveNoiseOctaves: 3,
+            caveMinY: 8,
+            caveSurfaceBuffer: 4,
+            caveSpawnSafeRadius: 24,
+            caveEmissiveEnabled: true,
+            caveEmissiveDensity: 0.018,
+            caveEmissiveIntensity: 1.6,
+            caveEmissiveRadius: 6.0,
+            caveEmissiveMaxActive: 24,
+            caveMinLight: 0.03,
+            wormEnabled: true,
+            wormCount: 3,
+            wormLengthMin: 48,
+            wormLengthMax: 120,
+            wormRadiusMin: 2.2,
+            wormRadiusMax: 4.8,
             terrainCells: null
         };
     }
@@ -5202,12 +6215,80 @@ export class Simple3D {
     _removeVoxelChunkMesh(chunkKey) {
         const key = (chunkKey || '').toString();
         if (!key) return;
+        this._removeVoxelChunkLights(key);
         const mesh = this.voxelChunkMeshes.get(key);
         if (!mesh) return;
         if (this.terrainGroup) this.terrainGroup.remove(mesh);
         if (mesh.geometry) mesh.geometry.dispose();
         if (mesh.material) mesh.material.dispose();
         this.voxelChunkMeshes.delete(key);
+    }
+
+    _removeVoxelChunkLights(chunkKey) {
+        const key = (chunkKey || '').toString();
+        if (!key) return;
+        const lights = this.caveLightMeshesByChunk.get(key);
+        if (Array.isArray(lights) && lights.length > 0) {
+            for (const l of lights) {
+                try { this.terrainGroup?.remove?.(l); } catch (_) { }
+            }
+        }
+        this.caveLightMeshesByChunk.delete(key);
+    }
+
+    _syncVoxelChunkEmissiveLights(THREE, chunkKey, spots = []) {
+        const key = (chunkKey || '').toString();
+        if (!key) return;
+        this._removeVoxelChunkLights(key);
+        const enabled = Number(this.params?.caveEmissiveEnabled ?? 1) === 1;
+        if (!enabled) return;
+        if (!Array.isArray(spots) || spots.length <= 0) return;
+        const maxActiveGlobal = Math.max(4, Math.min(96, Math.round(Number(this.params?.caveEmissiveMaxActive ?? 24))));
+        let activeCount = 0;
+        for (const arr of this.caveLightMeshesByChunk.values()) activeCount += Array.isArray(arr) ? arr.length : 0;
+        if (activeCount >= maxActiveGlobal) return;
+        const intensityBase = Math.max(0.2, Math.min(8.0, Number(this.params?.caveEmissiveIntensity ?? 1.6)));
+        const radiusBase = Math.max(1.0, Math.min(20.0, Number(this.params?.caveEmissiveRadius ?? 6.0)));
+        const perChunkCap = Math.max(1, Math.min(4, Math.round(maxActiveGlobal / Math.max(1, (this.viewDistanceChunks * this.viewDistanceChunks)))));
+        const out = [];
+        for (let i = 0; i < spots.length; i += 1) {
+            if (out.length >= perChunkCap) break;
+            if ((activeCount + out.length) >= maxActiveGlobal) break;
+            const s = spots[i];
+            const biome = (s?.biome || 'grass').toString().toLowerCase();
+            const colorHex = ({
+                fire: 0xff9a4d,
+                lava: 0xff9a4d,
+                wind: 0x7ecbff,
+                water: 0x7ecbff,
+                earth: 0xc2a37a,
+                grass: 0x9edb8c,
+                stone: 0xe8e3d4,
+                bridge: 0xd4d4d4,
+                metal: 0xd4d4d4,
+            }[biome] ?? 0xe8e3d4);
+            const sx = Number(s.x) || 0;
+            const sy = Number(s.y) || 0;
+            const sz = Number(s.z) || 0;
+            const nudgeX = Math.max(-1, Math.min(1, Number(s.nx) || 0));
+            const nudgeY = Math.max(-1, Math.min(1, Number(s.ny) || 0));
+            const nudgeZ = Math.max(-1, Math.min(1, Number(s.nz) || 0));
+            const skyL = this._estimateSkylightLevelWorld(Math.round(sx), Math.round(sy + 1), Math.round(sz));
+            const sky01 = Math.max(0, Math.min(1, skyL / Math.max(1, Number(this.voxelSkylightMax) | 0)));
+            const caveExposure = 1.0 - sky01;
+            const intensity = intensityBase * (0.30 + (0.70 * caveExposure));
+            const radius = radiusBase * (0.70 + (0.30 * caveExposure));
+            const light = new THREE.PointLight(colorHex, intensity, radius, 2.4);
+            light.position.set(
+                sx + (nudgeX * 0.42),
+                sy + (nudgeY * 0.42),
+                sz + (nudgeZ * 0.42)
+            );
+            light.castShadow = false;
+            this.terrainGroup?.add?.(light);
+            out.push(light);
+        }
+        if (out.length > 0) this.caveLightMeshesByChunk.set(key, out);
     }
 
     _markVoxelChunkDirty(cx, cz, includeNeighbors = false) {
@@ -5227,19 +6308,240 @@ export class Simple3D {
     }
 
     _biomeTopBlockId(biomeRaw = '') {
-        const biome = (biomeRaw || '').toString().toLowerCase();
-        if (biome === 'fire' || biome === 'lava') return 5;
-        if (biome === 'wind') return 6;
-        if (biome === 'bridge') return 7;
-        if (biome === 'stone') return 4;
-        if (biome === 'earth') return 3;
-        return 2;
+        return this._defaultSurfaceBlockId((this.params?.seed || 'default-seed').toString(), biomeRaw, 0, 0, 0);
     }
 
-    _columnMaterialByDepth(topY, y, biomeRaw = '') {
-        if (y === topY) return this._biomeTopBlockId(biomeRaw);
-        if (y >= (topY - 3)) return 3;
-        return 1;
+    _pickWeightedBlock(worldSeed, x, z, salt, entries = [], fallbackBlockId = 1) {
+        const valid = [];
+        let total = 0;
+        for (const row of (entries || [])) {
+            const bid = Math.max(1, Number(row?.[0]) | 0);
+            const w = Number(row?.[1]);
+            if (!Number.isFinite(w) || w <= 0) continue;
+            valid.push([bid, w]);
+            total += w;
+        }
+        if (!valid.length || total <= 0) return Math.max(1, Number(fallbackBlockId) | 0);
+        const seed = this.hashSeed(`${worldSeed}:${salt}`);
+        const jitter = this.hashSeed(salt) & 0xffff;
+        const r = this._randomFromInt2DWithSeed((Number(x) | 0) + jitter, (Number(z) | 0) - jitter, seed);
+        let t = Math.max(0, Math.min(0.999999, r)) * total;
+        let acc = 0;
+        for (const [bid, w] of valid) {
+            acc += w;
+            if (t <= acc) return bid;
+        }
+        return valid[valid.length - 1][0];
+    }
+
+    _columnSlopeHint(worldSeed, wx, wz, topY) {
+        const hpx = this.sampleFixedColumn((Number(wx) | 0) + 1, Number(wz) | 0)?.height;
+        const hnx = this.sampleFixedColumn((Number(wx) | 0) - 1, Number(wz) | 0)?.height;
+        const hpz = this.sampleFixedColumn(Number(wx) | 0, (Number(wz) | 0) + 1)?.height;
+        const hnz = this.sampleFixedColumn(Number(wx) | 0, (Number(wz) | 0) - 1)?.height;
+        const y = Number(topY) | 0;
+        return Math.max(
+            Math.abs((Number(hpx) | 0) - y),
+            Math.abs((Number(hnx) | 0) - y),
+            Math.abs((Number(hpz) | 0) - y),
+            Math.abs((Number(hnz) | 0) - y),
+        );
+    }
+
+    _defaultSurfaceBlockId(worldSeed, biomeRaw = '', x = 0, z = 0, slopeHint = 0) {
+        const b = (biomeRaw || '').toString().toLowerCase();
+        const slope = Math.max(0, Number(slopeHint) || 0);
+        const slopeBin = slope < 1.0 ? 0 : (slope < 2.5 ? 1 : 2);
+        const byBiome = {
+            grass: [[2, 3.0], [1, 2.2], [3, 1.6], [16, 1.0], [17, 0.8], [19, 0.6], [20, 0.35]],
+            earth: [[16, 2.8], [18, 2.0], [17, 1.8], [3, 1.2], [1, 0.8], [19, 0.7], [20, 0.35]],
+            stone: [[5, 2.6], [6, 2.2], [8, 1.5], [7, 1.2], [3, 0.8], [19, 0.45], [20, 0.3]],
+            fire: [[4, 2.5], [3, 1.9], [8, 1.8], [6, 1.3], [14, 0.9], [19, 0.5], [20, 0.4]],
+            wind: [[9, 2.1], [10, 1.8], [11, 1.5], [12, 1.2], [1, 0.7], [19, 0.55], [20, 0.35]],
+            bridge: [[13, 2.5], [14, 2.2], [15, 1.7], [10, 1.0], [11, 0.8], [19, 0.45], [20, 0.35]],
+        };
+        const base = byBiome[b] || byBiome.grass;
+        const adjusted = base.map(([bid, w]) => {
+            let ww = Number(w);
+            if (slopeBin === 1) {
+                if ([5, 6, 7, 8, 11, 12, 13, 14, 15].includes(bid)) ww *= 1.35;
+                if ([2, 16, 18].includes(bid)) ww *= 0.78;
+                if (bid === 19) ww *= 1.2;
+            } else if (slopeBin === 2) {
+                if ([5, 6, 7, 8, 11, 12, 13, 14, 15].includes(bid)) ww *= 1.8;
+                if ([1, 2, 16, 17, 18].includes(bid)) ww *= 0.5;
+                if (bid === 19) ww *= 1.45;
+            }
+            return [bid, ww];
+        });
+        return this._pickWeightedBlock(worldSeed, x, z, `surface:${b}:s${slopeBin}`, adjusted, 2);
+    }
+
+    _defaultSubsoilBlockId(worldSeed, biomeRaw = '', x = 0, y = 0, z = 0) {
+        const b = (biomeRaw || '').toString().toLowerCase();
+        const byBiome = {
+            grass: [[16, 2.6], [17, 1.8], [18, 1.6], [3, 1.1], [19, 0.5]],
+            earth: [[16, 2.7], [18, 2.1], [17, 1.6], [3, 1.0], [19, 0.5]],
+            stone: [[6, 2.2], [5, 1.7], [7, 1.5], [8, 1.2], [19, 0.4]],
+            fire: [[6, 2.0], [8, 1.9], [4, 1.3], [3, 1.2], [19, 0.55]],
+            wind: [[11, 1.8], [12, 1.7], [9, 1.4], [10, 1.2], [19, 0.5]],
+            bridge: [[13, 2.1], [14, 1.9], [15, 1.4], [11, 1.0], [19, 0.5]],
+        };
+        const base = byBiome[b] || byBiome.grass;
+        return this._pickWeightedBlock(worldSeed, (Number(x) | 0) + ((Number(y) | 0) * 11), (Number(z) | 0) - ((Number(y) | 0) * 7), `subsoil:${b}`, base, 16);
+    }
+
+    _defaultDeepBlockId(worldSeed, biomeRaw = '', x = 0, y = 0, z = 0) {
+        const b = (biomeRaw || '').toString().toLowerCase();
+        const byBiome = {
+            grass: [[6, 2.8], [7, 2.1], [5, 1.8], [8, 1.2], [17, 0.6], [20, 0.25]],
+            earth: [[6, 2.7], [7, 2.2], [5, 1.7], [8, 1.3], [18, 0.55], [20, 0.25]],
+            stone: [[7, 2.9], [6, 2.3], [5, 1.7], [8, 1.3], [12, 0.45], [20, 0.25]],
+            fire: [[8, 2.4], [6, 2.1], [7, 1.8], [4, 1.2], [14, 0.6], [20, 0.35]],
+            wind: [[12, 2.1], [11, 2.0], [6, 1.5], [7, 1.2], [9, 0.8], [20, 0.25]],
+            bridge: [[14, 2.2], [13, 2.0], [15, 1.5], [11, 1.0], [7, 0.8], [20, 0.25]],
+        };
+        const base = byBiome[b] || byBiome.grass;
+        return this._pickWeightedBlock(worldSeed, (Number(x) | 0) + ((Number(y) | 0) * 17), (Number(z) | 0) - ((Number(y) | 0) * 13), `deep:${b}`, base, 6);
+    }
+
+    _dist2PointSegment3D(px, py, pz, ax, ay, az, bx, by, bz) {
+        const abx = bx - ax;
+        const aby = by - ay;
+        const abz = bz - az;
+        const apx = px - ax;
+        const apy = py - ay;
+        const apz = pz - az;
+        const ab2 = (abx * abx) + (aby * aby) + (abz * abz);
+        if (ab2 <= 1e-9) return (apx * apx) + (apy * apy) + (apz * apz);
+        let t = ((apx * abx) + (apy * aby) + (apz * abz)) / ab2;
+        t = Math.max(0, Math.min(1, t));
+        const qx = ax + (abx * t);
+        const qy = ay + (aby * t);
+        const qz = az + (abz * t);
+        const dx = px - qx;
+        const dy = py - qy;
+        const dz = pz - qz;
+        return (dx * dx) + (dy * dy) + (dz * dz);
+    }
+
+    _shouldCarveWormAt(worldSeed, x, y, z, topY) {
+        if (!this.params?.wormEnabled) return false;
+        const wormCount = Math.max(0, Math.min(8, Math.round(Number(this.params?.wormCount ?? 3))));
+        if (wormCount <= 0) return false;
+        const minLen = Math.max(12, Math.min(160, Number(this.params?.wormLengthMin ?? 48)));
+        const maxLen = Math.max(minLen, Math.min(220, Number(this.params?.wormLengthMax ?? 120)));
+        const minRad = Math.max(0.8, Math.min(6.0, Number(this.params?.wormRadiusMin ?? 2.2)));
+        const maxRad = Math.max(minRad, Math.min(9.0, Number(this.params?.wormRadiusMax ?? 4.8)));
+        const region = 64;
+        const rx = Math.floor((Number(x) | 0) / region);
+        const rz = Math.floor((Number(z) | 0) / region);
+        const caveMinY = Math.max(1, Math.min(64, Math.round(Number(this.params?.caveMinY ?? 8))));
+        let bandTop = Math.max(caveMinY + 6, (Number(topY) | 0) - 8);
+        const bandBot = Math.max(caveMinY + 2, (Number(topY) | 0) - 44);
+        if (bandTop <= bandBot) bandTop = bandBot + 2;
+        const px = Number(x);
+        const py = Number(y);
+        const pz = Number(z);
+        for (let rzz = rz - 1; rzz <= rz + 1; rzz += 1) {
+            for (let rxx = rx - 1; rxx <= rx + 1; rxx += 1) {
+                const regionSeed = this.hashSeed(`${worldSeed}:worms:v1:${rxx}:${rzz}`);
+                const baseX = rxx * region;
+                const baseZ = rzz * region;
+                for (let i = 0; i < wormCount; i += 1) {
+                    const rnd = (a, b) => this._randomFromInt2DWithSeed(a, b, regionSeed);
+                    const sx = baseX + (rnd((rxx * 131) + (i * 17) + 11, (rzz * 193) - (i * 29) - 7) * region);
+                    const sz = baseZ + (rnd((rxx * 197) + (i * 23) + 5, (rzz * 149) - (i * 31) - 13) * region);
+                    const sy = bandBot + (rnd((rxx * 167) + (i * 19) + 3, (rzz * 173) - (i * 37) - 9) * (bandTop - bandBot));
+                    const theta = rnd((rxx * 181) + (i * 41) + 1, (rzz * 211) - (i * 43) - 1) * (Math.PI * 2);
+                    const length = minLen + (rnd((rxx * 223) + (i * 47) + 2, (rzz * 227) - (i * 53) - 2) * (maxLen - minLen));
+                    const radius = minRad + (rnd((rxx * 229) + (i * 59) + 4, (rzz * 233) - (i * 61) - 4) * (maxRad - minRad));
+                    const dySlope = (rnd((rxx * 239) + (i * 67) + 6, (rzz * 241) - (i * 71) - 6) - 0.5) * (length * 0.18);
+                    const curveLat = (rnd((rxx * 251) + (i * 73) + 8, (rzz * 257) - (i * 79) - 8) - 0.5) * (length * 0.45);
+                    const curveY = (rnd((rxx * 263) + (i * 83) + 10, (rzz * 269) - (i * 89) - 10) - 0.5) * (length * 0.22);
+                    const dx = Math.cos(theta);
+                    const dz = Math.sin(theta);
+                    const pxPerp = -dz;
+                    const pzPerp = dx;
+                    const ex = sx + (dx * length);
+                    const ey = sy + dySlope;
+                    const ez = sz + (dz * length);
+                    const mx = sx + (dx * (length * 0.5)) + (pxPerp * curveLat);
+                    const my = sy + (dySlope * 0.5) + curveY;
+                    const mz = sz + (dz * (length * 0.5)) + (pzPerp * curveLat);
+                    const rad2 = radius * radius;
+                    const minX = Math.min(sx, mx, ex) - radius;
+                    const maxX = Math.max(sx, mx, ex) + radius;
+                    const minY = Math.min(sy, my, ey) - radius;
+                    const maxY = Math.max(sy, my, ey) + radius;
+                    const minZ = Math.min(sz, mz, ez) - radius;
+                    const maxZ = Math.max(sz, mz, ez) + radius;
+                    if (px < minX || px > maxX || py < minY || py > maxY || pz < minZ || pz > maxZ) continue;
+                    if (this._dist2PointSegment3D(px, py, pz, sx, sy, sz, mx, my, mz) <= rad2) return true;
+                    if (this._dist2PointSegment3D(px, py, pz, mx, my, mz, ex, ey, ez) <= rad2) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    _shouldCarveCaveAt(worldSeed, biomeRaw = '', x = 0, y = 0, z = 0, topY = 0) {
+        if (!this.params?.caveEnabled) return false;
+        const iy = Number(y) | 0;
+        const top = Number(topY) | 0;
+        const minY = Math.max(1, Math.min(64, Math.round(Number(this.params?.caveMinY ?? 8))));
+        if (iy < minY) return false;
+        const surfaceBuffer = Math.max(2, Math.min(12, Math.round(Number(this.params?.caveSurfaceBuffer ?? 4))));
+        if (iy >= (top - surfaceBuffer)) return false;
+        const safeR = Math.max(0, Math.min(64, Math.round(Number(this.params?.caveSpawnSafeRadius ?? 24))));
+        if (safeR > 0 && (((x * x) + (z * z)) <= (safeR * safeR))) return false;
+        const scale = Math.max(0.010, Math.min(0.120, Number(this.params?.caveNoiseScale ?? 0.045)));
+        const octaves = Math.max(1, Math.min(4, Math.round(Number(this.params?.caveNoiseOctaves ?? 3))));
+        let threshold = Math.max(0.45, Math.min(0.90, Number(this.params?.caveDensityThreshold ?? 0.62)));
+        const b = (biomeRaw || '').toString().toLowerCase();
+        const biomeAdjust = ({ fire: -0.03, stone: -0.02, earth: 0.00, grass: +0.02, wind: +0.03, bridge: +0.04 }[b] ?? 0.0);
+        threshold = Math.max(0.40, Math.min(0.95, threshold + biomeAdjust));
+        const depth = Math.max(0, top - iy);
+        if (depth < (surfaceBuffer + 6)) threshold += 0.06;
+        else if (depth > 24) threshold -= 0.03;
+        threshold = Math.max(0.40, Math.min(0.95, threshold));
+        const seed = this.hashSeed(`${worldSeed}:caves:v1`);
+        let noise = 0;
+        let weight = 0;
+        let freq = 1;
+        let amp = 1;
+        for (let i = 0; i < octaves; i += 1) {
+            const n = this.valueNoise3D(x * scale * freq, iy * scale * freq, z * scale * freq, seed);
+            noise += n * amp;
+            weight += amp;
+            freq *= 2.03;
+            amp *= 0.5;
+        }
+        const normalized = weight > 0 ? (noise / weight) : 0;
+        const n01 = (normalized * 0.5) + 0.5;
+        const carveNoise = n01 > threshold;
+        const carveWorm = this._shouldCarveWormAt(worldSeed, x, iy, z, top);
+        return carveNoise || carveWorm;
+    }
+
+    _maybePromoteEmissiveBlock(worldSeed, blockId = 0, x = 0, y = 0, z = 0, topY = 0) {
+        const bid = Math.max(0, Number(blockId) | 0);
+        if (bid <= 0) return 0;
+        const enabled = Number(this.params?.caveEmissiveEnabled ?? 1) === 1;
+        if (!enabled) return bid;
+        const iy = Number(y) | 0;
+        const top = Number(topY) | 0;
+        const surfaceBuffer = Math.max(2, Math.min(12, Math.round(Number(this.params?.caveSurfaceBuffer ?? 4))));
+        if (iy >= (top - (surfaceBuffer + 2))) return bid;
+        const density = Math.max(0.0, Math.min(0.08, Number(this.params?.caveEmissiveDensity ?? 0.018)));
+        if (density <= 0) return bid;
+        const depth = Math.max(0, top - iy);
+        const depthMul = 1.0 + Math.min(0.9, Math.max(0.0, (depth - 8) * 0.03));
+        const chance = Math.max(0.0, Math.min(0.25, density * depthMul));
+        const seed = this.hashSeed(`${worldSeed}:cave-emissive:v1`);
+        const r = this._randomFromInt3DWithSeed(Number(x) | 0, Number(y) | 0, Number(z) | 0, seed);
+        if (r < chance) return 20;
+        return bid;
     }
 
     _worldVoxelKey(x, y, z) {
@@ -5281,9 +6583,20 @@ export class Simple3D {
                     : (this.params.worldStyle === 'floating_hub_islands' ? this.sampleFloatingColumn(wx, wz) : null);
                 const biome = (sample?.biome || this.world?.main_biome || 'grass').toString().toLowerCase();
                 const topY = Math.max(0, Math.min(this.voxelChunkHeight - 1, Math.round(Number(h) || 0)));
+                const worldSeed = (this.params?.seed || 'default-seed').toString();
+                const slopeHint = this._columnSlopeHint(worldSeed, wx, wz, topY);
+                const surfaceBlockId = this._defaultSurfaceBlockId(worldSeed, biome, wx, wz, slopeHint);
                 for (let y = 0; y <= topY; y += 1) {
-                    blocks[this.voxelIndex(x, y, z)] = this._columnMaterialByDepth(topY, y, biome);
-                    solidCount += 1;
+                    let blockId = 0;
+                    if (y === topY) blockId = surfaceBlockId;
+                    else if (y >= (topY - 3)) blockId = this._defaultSubsoilBlockId(worldSeed, biome, wx, y, wz);
+                    else blockId = this._defaultDeepBlockId(worldSeed, biome, wx, y, wz);
+                    blockId = this._maybePromoteEmissiveBlock(worldSeed, blockId, wx, y, wz, topY);
+                    if (blockId > 0 && this._shouldCarveCaveAt(worldSeed, biome, wx, y, wz, topY)) {
+                        blockId = 0;
+                    }
+                    blocks[this.voxelIndex(x, y, z)] = blockId;
+                    if (this._isSolidBlockId(blockId)) solidCount += 1;
                 }
             }
         }
@@ -5326,12 +6639,123 @@ export class Simple3D {
         return null;
     }
 
+    _setupChunkWorker() {
+        this._teardownChunkWorker();
+        if (typeof Worker === 'undefined') {
+            this.chunkWorkerEnabled = false;
+            return;
+        }
+        try {
+            const worker = new Worker('./libraries/voxelChunkWorker.js');
+            worker.onmessage = (ev) => this._onChunkWorkerMessage(ev);
+            worker.onerror = () => {
+                this.chunkWorkerEnabled = false;
+                this._teardownChunkWorker();
+            };
+            this.chunkWorker = worker;
+            this.chunkWorkerEnabled = true;
+            this.chunkWorkerSeq = 1;
+            this.chunkWorkerPending.clear();
+            worker.postMessage({
+                type: 'configure',
+                params: this.params,
+                chunkSize: this.chunkSize,
+                voxelChunkHeight: this.voxelChunkHeight,
+            });
+        } catch (_) {
+            this.chunkWorkerEnabled = false;
+            this._teardownChunkWorker();
+        }
+    }
+
+    _teardownChunkWorker() {
+        if (this.chunkWorker) {
+            try { this.chunkWorker.terminate(); } catch (_) { }
+        }
+        this.chunkWorker = null;
+        this.chunkWorkerEnabled = false;
+        this.chunkWorkerPending.clear();
+    }
+
+    _chunkOverrideRowsForChunkKey(chunkKey) {
+        const bucket = this.worldVoxelOverridesByChunk.get(chunkKey);
+        if (!bucket || bucket.size <= 0) return [];
+        const out = [];
+        for (const [worldKey, blockId] of bucket.entries()) {
+            const parts = String(worldKey).split(',');
+            if (parts.length !== 3) continue;
+            const wx = Number(parts[0]);
+            const wy = Number(parts[1]);
+            const wz = Number(parts[2]);
+            if (![wx, wy, wz].every((v) => Number.isFinite(v))) continue;
+            out.push([wx | 0, wy | 0, wz | 0, Math.max(0, Number(blockId) | 0)]);
+        }
+        return out;
+    }
+
+    _dispatchChunkJob(cx, cz) {
+        if (!this.chunkWorkerEnabled || !this.chunkWorker) return false;
+        const key = this.chunkKey(cx, cz);
+        if (this.chunks.has(key)) return true;
+        for (const pending of this.chunkWorkerPending.values()) {
+            if (pending?.key === key) return true;
+        }
+        const reqId = this.chunkWorkerSeq++;
+        this.chunkWorkerPending.set(reqId, { key, cx, cz });
+        this.chunkWorker.postMessage({
+            type: 'generate',
+            reqId,
+            cx: cx | 0,
+            cz: cz | 0,
+            overrides: this._chunkOverrideRowsForChunkKey(key),
+        });
+        return true;
+    }
+
+    _onChunkWorkerMessage(ev) {
+        const msg = ev?.data || {};
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.type !== 'generated') return;
+        const reqId = Number(msg.reqId) | 0;
+        const pending = this.chunkWorkerPending.get(reqId);
+        if (!pending) return;
+        this.chunkWorkerPending.delete(reqId);
+        const cx = Number(msg.cx) | 0;
+        const cz = Number(msg.cz) | 0;
+        const key = this.chunkKey(cx, cz);
+        if (key !== pending.key) return;
+        if (this.chunks.has(key)) return;
+        const dcx = Math.abs(cx - (this.chunkCenter?.cx || 0));
+        const dcz = Math.abs(cz - (this.chunkCenter?.cz || 0));
+        const discardRadius = this.viewDistanceChunks + Math.max(1, Number(this.chunkUnloadMargin) | 0);
+        if (dcx > discardRadius || dcz > discardRadius) {
+            return;
+        }
+        const blocks = new Uint16Array(msg.blocksBuffer || 0);
+        const chunk = {
+            cx,
+            cz,
+            minH: Number(msg.minH),
+            maxH: Number(msg.maxH),
+            heights: Array.isArray(msg.heights) ? msg.heights : [],
+            columnCount: Number(msg.columnCount) | 0,
+            blocks,
+            solidCount: Number(msg.solidCount) | 0,
+        };
+        this.generatedVoxelBlocks += chunk.solidCount;
+        this.generatedChunks += 1;
+        this.chunks.set(key, chunk);
+        this._markVoxelChunkDirty(cx, cz, true);
+        this.terrainDirty = true;
+    }
+
     enqueueInitialChunks() {
         const cx = Math.floor(this.spawn.x / this.chunkSize);
         const cz = Math.floor(this.spawn.z / this.chunkSize);
         this.viewDistanceChunks = this.params.viewDistanceChunks;
         this.chunkCenter = { cx, cz };
-        this.enqueueChunksAround(cx, cz, this.viewDistanceChunks);
+        const preloadRadius = this.viewDistanceChunks + Math.max(0, Number(this.chunkPreloadMargin) | 0);
+        this.enqueueChunksAround(cx, cz, preloadRadius);
     }
 
     enqueueChunk(cx, cz) {
@@ -5379,12 +6803,31 @@ export class Simple3D {
         const cz = Math.floor(this.actor.z / this.chunkSize);
         if (cx === this.chunkCenter.cx && cz === this.chunkCenter.cz) return;
         this.chunkCenter = { cx, cz };
-        this.enqueueChunksAround(cx, cz, this.viewDistanceChunks);
-        this.unloadFarChunks(cx, cz, this.viewDistanceChunks + 1);
+        const preloadRadius = this.viewDistanceChunks + Math.max(0, Number(this.chunkPreloadMargin) | 0);
+        const unloadRadius = this.viewDistanceChunks + Math.max(1, Number(this.chunkUnloadMargin) | 0);
+        this.enqueueChunksAround(cx, cz, preloadRadius);
+        this.unloadFarChunks(cx, cz, unloadRadius);
     }
 
     processChunkQueue(maxPerTick) {
         let remaining = maxPerTick;
+        if (this.chunkWorkerEnabled && this.chunkWorker) {
+            const inflightLimit = Math.max(1, Number(this.chunkWorkerMaxInFlight) | 0);
+            while (
+                remaining > 0 &&
+                this.chunkQueue.length > 0 &&
+                this.chunkWorkerPending.size < inflightLimit
+            ) {
+                const next = this.chunkQueue.shift();
+                const key = this.chunkKey(next.cx, next.cz);
+                this.chunkQueueKeys.delete(key);
+                if (!this.chunks.has(key)) {
+                    this._dispatchChunkJob(next.cx, next.cz);
+                }
+                remaining -= 1;
+            }
+            return;
+        }
         while (remaining > 0 && this.chunkQueue.length > 0) {
             const next = this.chunkQueue.shift();
             const key = this.chunkKey(next.cx, next.cz);
@@ -5570,7 +7013,18 @@ export class Simple3D {
     }
 
     randomFromInt2D(x, z) {
-        let n = Math.imul(x, 374761393) ^ Math.imul(z, 668265263) ^ this.seedHash;
+        return this._randomFromInt2DWithSeed(x, z, this.seedHash);
+    }
+
+    _randomFromInt2DWithSeed(x, z, seedHash) {
+        let n = Math.imul(x, 374761393) ^ Math.imul(z, 668265263) ^ (seedHash | 0);
+        n = (n ^ (n >>> 13)) >>> 0;
+        n = Math.imul(n, 1274126177) >>> 0;
+        return (n & 0x7fffffff) / 0x7fffffff;
+    }
+
+    _randomFromInt3DWithSeed(x, y, z, seedHash) {
+        let n = (Math.imul(x, 374761393) ^ Math.imul(y, 1442695041) ^ Math.imul(z, 668265263) ^ (seedHash | 0)) >>> 0;
         n = (n ^ (n >>> 13)) >>> 0;
         n = Math.imul(n, 1274126177) >>> 0;
         return (n & 0x7fffffff) / 0x7fffffff;
@@ -5582,6 +7036,34 @@ export class Simple3D {
 
     lerp(a, b, t) {
         return a + ((b - a) * t);
+    }
+
+    valueNoise3D(x, y, z, seedHash = this.seedHash) {
+        const x0 = Math.floor(x);
+        const y0 = Math.floor(y);
+        const z0 = Math.floor(z);
+        const x1 = x0 + 1;
+        const y1 = y0 + 1;
+        const z1 = z0 + 1;
+        const sx = this.smoothstep(x - x0);
+        const sy = this.smoothstep(y - y0);
+        const sz = this.smoothstep(z - z0);
+        const c000 = this._randomFromInt3DWithSeed(x0, y0, z0, seedHash);
+        const c100 = this._randomFromInt3DWithSeed(x1, y0, z0, seedHash);
+        const c010 = this._randomFromInt3DWithSeed(x0, y1, z0, seedHash);
+        const c110 = this._randomFromInt3DWithSeed(x1, y1, z0, seedHash);
+        const c001 = this._randomFromInt3DWithSeed(x0, y0, z1, seedHash);
+        const c101 = this._randomFromInt3DWithSeed(x1, y0, z1, seedHash);
+        const c011 = this._randomFromInt3DWithSeed(x0, y1, z1, seedHash);
+        const c111 = this._randomFromInt3DWithSeed(x1, y1, z1, seedHash);
+        const ix00 = this.lerp(c000, c100, sx);
+        const ix10 = this.lerp(c010, c110, sx);
+        const ix01 = this.lerp(c001, c101, sx);
+        const ix11 = this.lerp(c011, c111, sx);
+        const iy0 = this.lerp(ix00, ix10, sy);
+        const iy1 = this.lerp(ix01, ix11, sy);
+        const v = this.lerp(iy0, iy1, sz);
+        return (v * 2.0) - 1.0;
     }
 
     _applyTerrainToneVariation(THREE, baseColor, wx, wz, h, biomeKey = '') {
@@ -5780,6 +7262,7 @@ export class Simple3D {
         waterMat.needsUpdate = true;
     }
 
+
     pushWaterRipple(x, z, strength = 1) {
         if (!Number.isFinite(x) || !Number.isFinite(z)) return;
         if (!this.waterMesh) return;
@@ -5838,6 +7321,124 @@ export class Simple3D {
         return Number(blockId) > 0;
     }
 
+    _ensureVoxelAtlasTexture(THREE) {
+        if (!THREE || !this.voxelUseTextureAtlas) return;
+        if (this.voxelAtlasTexture || this.voxelAtlasLoading) return;
+        const path = (this.voxelAtlasPath || '').toString().trim();
+        if (!path) return;
+        this.voxelAtlasLoading = true;
+        const loader = new THREE.TextureLoader();
+        loader.load(
+            path,
+            (tex) => {
+                this.voxelAtlasLoading = false;
+                this.voxelAtlasTexture = tex;
+                tex.colorSpace = THREE.SRGBColorSpace;
+                tex.wrapS = THREE.ClampToEdgeWrapping;
+                tex.wrapT = THREE.ClampToEdgeWrapping;
+                tex.magFilter = THREE.NearestFilter;
+                tex.minFilter = THREE.NearestFilter;
+                tex.generateMipmaps = false;
+                tex.needsUpdate = true;
+                if (this.chunks?.size > 0) {
+                    for (const key of this.chunks.keys()) this.voxelDirtyChunkKeys.add(key);
+                    this.terrainDirty = true;
+                }
+            },
+            undefined,
+            () => {
+                this.voxelAtlasLoading = false;
+                console.warn(`Simple3D: no se pudo cargar atlas voxel "${path}"`);
+            }
+        );
+    }
+
+    _voxelAtlasRowForBlock(blockId, faceName = 'py') {
+        const id = Number(blockId) | 0;
+        if (id === 5) return 0; // fuego
+        if (id === 6) return 2; // rayo/viento
+        if (id === 7) return 3; // metal/bridge
+        if (id === 2) {
+            if (faceName === 'ny') return 1; // base inferior
+            return 2; // hierva/hierba
+        }
+        if (id === 1 || id === 3 || id === 4) return 1; // piedra/tierra
+        return 1;
+    }
+
+    _voxelAtlasTileForBlock(blockId, faceName = 'py') {
+        const cols = Math.max(1, Number(this.voxelAtlasCols) | 0);
+        const rows = Math.max(1, Number(this.voxelAtlasRows) | 0);
+        const id = Math.max(0, Number(blockId) | 0);
+        const atlasPathNorm = (this.voxelAtlasPath || '')
+            .toString()
+            .trim()
+            .replace(/\\/g, '/')
+            .replace(/^\.\//, '');
+        const def = this.voxelBlockDefs.get(id);
+        if (def) {
+            const defAtlasNorm = (def.atlas || '')
+                .toString()
+                .trim()
+                .replace(/\\/g, '/')
+                .replace(/^\.\//, '');
+            const defBase = defAtlasNorm.split('/').pop() || '';
+            const pathBase = atlasPathNorm.split('/').pop() || '';
+            const atlasMatches = (
+                !defAtlasNorm ||
+                defAtlasNorm === atlasPathNorm ||
+                atlasPathNorm.endsWith(defAtlasNorm) ||
+                (defBase && pathBase && defBase === pathBase)
+            );
+            if (atlasMatches) {
+                const col = Math.max(0, Math.min(cols - 1, Number(def.tile_col) | 0));
+                const row = Math.max(0, Math.min(rows - 1, Number(def.tile_row) | 0));
+                return { col, row };
+            }
+        }
+        const row = Math.max(0, Math.min(rows - 1, this._voxelAtlasRowForBlock(id, faceName)));
+        const col = this._voxelAtlasColForBlock(id, faceName);
+        return { col, row };
+    }
+
+    _voxelAtlasColForBlock(blockId, faceName = 'py') {
+        const cols = Math.max(1, Number(this.voxelAtlasCols) | 0);
+        const id = Math.max(0, Number(blockId) | 0);
+        // Mapeo determinista (sin aleatoriedad por voxel/cara) para evitar
+        // mosaico visual incoherente.
+        if (id <= 0) return 0;
+        if (id === 2 && faceName === 'ny') return 0;
+        return Math.max(0, Math.min(cols - 1, 0));
+    }
+
+    _voxelAtlasUvRectForFace(blockId, wx, wy, wz, faceName = 'py') {
+        const cols = Math.max(1, Number(this.voxelAtlasCols) | 0);
+        const rows = Math.max(1, Number(this.voxelAtlasRows) | 0);
+        const tile = this._voxelAtlasTileForBlock(blockId, faceName);
+        const row = Math.max(0, Math.min(rows - 1, Number(tile?.row) | 0));
+        const col = Math.max(0, Math.min(cols - 1, Number(tile?.col) | 0));
+        const texW = Number(this.voxelAtlasTexture?.image?.width) || 0;
+        const texH = Number(this.voxelAtlasTexture?.image?.height) || 0;
+        // Formato definitivo: 6x4, celda interior 256x256, borde negro 1px.
+        const borderPx = 1;
+        const innerPx = 256;
+        const stridePx = innerPx + borderPx; // 257
+        const expectedW = (cols * stridePx) + borderPx;
+        const expectedH = (rows * stridePx) + borderPx;
+        const offX = Math.max(0, (texW - expectedW) * 0.5);
+        const offY = Math.max(0, (texH - expectedH) * 0.5);
+        const insetPx = Math.max(0.35, Math.min(3.0, Number(this.voxelAtlasCellInnerPad) || 0.75));
+        const x0 = offX + borderPx + (col * stridePx) + insetPx;
+        const x1 = offX + borderPx + (col * stridePx) + innerPx - insetPx;
+        const y0 = offY + borderPx + (row * stridePx) + insetPx;
+        const y1 = offY + borderPx + (row * stridePx) + innerPx - insetPx;
+        const uMin = x0 / texW;
+        const uMax = x1 / texW;
+        const vMax = 1 - (y0 / texH);
+        const vMin = 1 - (y1 / texH);
+        return { uMin, uMax, vMin, vMax };
+    }
+
     _baseColorForBlockId(THREE, blockId) {
         const id = Number(blockId) | 0;
         if (id === 1) return new THREE.Color(0x7b7b7b); // stone
@@ -5850,28 +7451,49 @@ export class Simple3D {
         return new THREE.Color(0x9aa39f);
     }
 
+    _biomeBaseColor(THREE, biomeRaw = '') {
+        const key = (biomeRaw || '').toString().toLowerCase();
+        const palette = {
+            fire: 0xd94a3a,
+            lava: 0xd94a3a,
+            water: 0x3a7bd9,
+            wind: 0x3a7bd9,
+            earth: 0x8a6a43,
+            stone: 0x7a7f87,
+            grass: 0x4fa64f,
+            bridge: 0x6d7480,
+            metal: 0x6d7480,
+        };
+        return new THREE.Color(palette[key] || 0x4fa64f);
+    }
+
     _voxelTintedColorForBlock(THREE, blockId, wx, wy, wz, topY = null, biomeHint = '') {
-        const base = this._baseColorForBlockId(THREE, blockId);
-        let color = this._applyTerrainToneVariation(THREE, base, wx, wz, wy, biomeHint || 'grass');
+        // Estilo unificado: un color base por bioma + tono por profundidad.
+        // No mezclamos color por block_id para evitar mosaico multicolor.
+        const biome = (biomeHint || 'grass').toString().toLowerCase();
+        const base = this._biomeBaseColor(THREE, biome);
+        const color = base.clone();
 
         const worldH = Math.max(8, Number(this.voxelChunkHeight) || 128);
-        const altN = Math.max(0, Math.min(1, Number(wy) / Math.max(1, worldH - 1)));
-        const altMul = 0.93 + (altN * 0.15);
+        const y01 = Math.max(0, Math.min(1, Number(wy) / Math.max(1, worldH - 1)));
+        const altMul = 0.96 + (y01 * 0.08);
 
         let depthMul = 1.0;
         if (Number.isFinite(topY)) {
             const depth = Math.max(0, Number(topY) - Number(wy));
-            depthMul = 1.0 - Math.min(0.20, depth * 0.012);
+            depthMul = 1.0 - Math.min(0.40, depth * 0.016);
         }
 
-        // Variacion local: mezcla ruido por columna + micro ruido por voxel.
-        const sameLevelRnd = this.randomFromInt2D((Math.round(wx) * 41) + 11, (Math.round(wz) * 37) - 19);
+        // Microvariacion muy sutil para no romper continuidad visual del bioma.
         const microRnd = this.randomFromInt2D(
-            (Math.round(wx) * 131) + (Math.round(wy) * 17) + 7,
-            (Math.round(wz) * 137) - (Math.round(wy) * 13) - 5
+            (Math.round(wx) * 97) + (Math.round(wy) * 11) + 3,
+            (Math.round(wz) * 101) - (Math.round(wy) * 7) - 5
         );
-        const jitter = ((sameLevelRnd - 0.5) * 0.14) + ((microRnd - 0.5) * 0.06);
-        const mul = Math.max(0.82, Math.min(1.18, (1 + jitter) * altMul * depthMul));
+        const microMul = 0.98 + ((microRnd - 0.5) * 0.04); // +/-2%
+
+        // Los bloques emisivos siguen el mismo color de bioma; su "magia"
+        // visual viene de la luz, no del albedo base.
+        const mul = Math.max(0.55, Math.min(1.15, altMul * depthMul * microMul));
         color.multiplyScalar(mul);
         color.r = Math.max(0, Math.min(1, color.r));
         color.g = Math.max(0, Math.min(1, color.g));
@@ -5953,9 +7575,12 @@ export class Simple3D {
         return Math.max(0, maxL - Math.round(depth * 1.25));
     }
 
-    _isSolidVoxelWorld(wx, wy, wz) {
-        if (wy < 0 || wy >= this.voxelChunkHeight) return false;
-        return this._isSolidBlockId(this.getVoxelAtWorld(wx, wy, wz));
+    _isSolidVoxelWorld(wx, wy, wz, unknownIsSolid = false) {
+        const pos = this.worldToChunkAndLocal(wx, wy, wz);
+        if (pos.ly < 0 || pos.ly >= this.voxelChunkHeight) return false;
+        const chunk = this.chunks.get(this.chunkKey(pos.cx, pos.cz));
+        if (!chunk || !chunk.blocks) return !!unknownIsSolid;
+        return this._isSolidBlockId(chunk.blocks[this.voxelIndex(pos.lx, pos.ly, pos.lz)] || 0);
     }
 
     _computeVoxelFaceVertexAo(wx, wy, wz, faceName) {
@@ -5980,17 +7605,20 @@ export class Simple3D {
             const s1 = this._isSolidVoxelWorld(
                 wx + cfg.n[0] + (cfg.u[0] * su),
                 wy + cfg.n[1] + (cfg.u[1] * su),
-                wz + cfg.n[2] + (cfg.u[2] * su)
+                wz + cfg.n[2] + (cfg.u[2] * su),
+                true
             ) ? 1 : 0;
             const s2 = this._isSolidVoxelWorld(
                 wx + cfg.n[0] + (cfg.v[0] * sv),
                 wy + cfg.n[1] + (cfg.v[1] * sv),
-                wz + cfg.n[2] + (cfg.v[2] * sv)
+                wz + cfg.n[2] + (cfg.v[2] * sv),
+                true
             ) ? 1 : 0;
             const c = this._isSolidVoxelWorld(
                 wx + cfg.n[0] + (cfg.u[0] * su) + (cfg.v[0] * sv),
                 wy + cfg.n[1] + (cfg.u[1] * su) + (cfg.v[1] * sv),
-                wz + cfg.n[2] + (cfg.u[2] * su) + (cfg.v[2] * sv)
+                wz + cfg.n[2] + (cfg.u[2] * su) + (cfg.v[2] * sv),
+                true
             ) ? 1 : 0;
             let aoLevel = 0;
             if (s1 && s2) aoLevel = 0;
@@ -6001,7 +7629,7 @@ export class Simple3D {
         return out;
     }
 
-    _appendVoxelFace(positions, normals, colors, indices, cx, cy, cz, faceName, baseColor, skyFactor = 1.0, vertexAo = null) {
+    _appendVoxelFace(positions, normals, colors, uvs, indices, cx, cy, cz, faceName, baseColor, skyFactor = 1.0, vertexAo = null, uvRect = null) {
         const FACE = {
             px: {
                 n: [1, 0, 0],
@@ -6039,11 +7667,19 @@ export class Simple3D {
         const b = Math.max(0, Math.min(1, baseColor.b * shade * skyMul));
 
         const start = (positions.length / 3);
+        const t = uvRect || { uMin: 0, uMax: 1, vMin: 0, vMax: 1 };
+        const faceUv = [
+            [t.uMax, t.vMin],
+            [t.uMax, t.vMax],
+            [t.uMin, t.vMax],
+            [t.uMin, t.vMin],
+        ];
         for (let vi = 0; vi < face.v.length; vi += 1) {
             const v = face.v[vi];
             const aoMul = Math.max(0.2, Math.min(1.0, Number(vertexAo?.[vi]) || 1.0));
             positions.push(cx + v[0], cy + v[1], cz + v[2]);
             normals.push(normal[0], normal[1], normal[2]);
+            uvs.push(faceUv[vi][0], faceUv[vi][1]);
             colors.push(
                 Math.max(0, Math.min(1, r * aoMul)),
                 Math.max(0, Math.min(1, g * aoMul)),
@@ -6058,7 +7694,10 @@ export class Simple3D {
         const positions = [];
         const normals = [];
         const colors = [];
+        const uvs = [];
         const indices = [];
+        this._ensureVoxelAtlasTexture(THREE);
+        const useAtlas = !!(this.voxelUseTextureAtlas && this.voxelAtlasTexture);
 
         const baseX = chunk.cx * this.chunkSize;
         const baseZ = chunk.cz * this.chunkSize;
@@ -6066,6 +7705,8 @@ export class Simple3D {
         const skylightMax = Math.max(1, Number(this.voxelSkylightMax) | 0);
         const skylightMinFace = Math.max(0, Math.min(1, Number(this.voxelSkylightMinFace) || 0.18));
         const skylightStrength = Math.max(0, Math.min(1.2, Number(this.voxelSkylightStrength) || 0.92));
+        const emissiveSpots = [];
+        const emissiveCandidateCap = 24;
         const dirs = [
             { name: 'px', dx: 1, dy: 0, dz: 0 },
             { name: 'nx', dx: -1, dy: 0, dz: 0 },
@@ -6105,22 +7746,38 @@ export class Simple3D {
                     const wx = baseX + x;
                     const wz = baseZ + z;
                     const cidx = x + (z * this.chunkSize);
-                    const color = this._voxelTintedColorForBlock(
-                        THREE,
-                        blockId,
-                        wx,
-                        y,
-                        wz,
-                        columnTopY[cidx],
-                        columnBiome[cidx]
-                    );
+                    const biomeKey = (columnBiome[cidx] || mainBiome || 'grass').toString().toLowerCase();
+                    const color = (() => {
+                        if (!useAtlas) {
+                            return this._voxelTintedColorForBlock(
+                                THREE,
+                                blockId,
+                                wx,
+                                y,
+                                wz,
+                                columnTopY[cidx],
+                                biomeKey
+                            );
+                        }
+                        const tintBase = this._biomeBaseColor(THREE, biomeKey);
+                        const tintVar = this._applyTerrainToneVariation(THREE, tintBase, wx, wz, y, biomeKey);
+                        const tintStrength = Math.max(0.0, Math.min(1.0, Number(this.voxelAtlasBiomeTintStrength) || 0.0));
+                        return new THREE.Color(1, 1, 1).lerp(tintVar, tintStrength);
+                    })();
 
+                    let hasOpenFace = false;
+                    let openDx = 0;
+                    let openDy = 0;
+                    let openDz = 0;
                     for (const d of dirs) {
                         const nx = wx + d.dx;
                         const ny = y + d.dy;
                         const nz = wz + d.dz;
-                        const nBlock = this.getVoxelAtWorld(nx, ny, nz);
-                        if (this._isSolidBlockId(nBlock)) continue;
+                        if (this._isSolidVoxelWorld(nx, ny, nz, true)) continue;
+                        hasOpenFace = true;
+                        openDx += d.dx;
+                        openDy += d.dy;
+                        openDz += d.dz;
                         let skyLevel = skylightMax;
                         if (this.voxelSkylightEnabled) {
                             const nlx = nx - baseX;
@@ -6140,7 +7797,20 @@ export class Simple3D {
                         const sky01 = Math.max(0, Math.min(1, skyLevel / skylightMax));
                         const skyFactor = skylightMinFace + ((1 - skylightMinFace) * Math.pow(sky01, skylightStrength));
                         const vertexAo = this._computeVoxelFaceVertexAo(wx, y, wz, d.name);
-                        this._appendVoxelFace(positions, normals, colors, indices, wx, y, wz, d.name, color, skyFactor, vertexAo);
+                        const uvRect = useAtlas ? this._voxelAtlasUvRectForFace(blockId, wx, y, wz, d.name) : null;
+                        this._appendVoxelFace(positions, normals, colors, uvs, indices, wx, y, wz, d.name, color, skyFactor, vertexAo, uvRect);
+                    }
+                    if (blockId === 20 && hasOpenFace && emissiveSpots.length < emissiveCandidateCap) {
+                        const nLen = Math.hypot(openDx, openDy, openDz) || 1;
+                        emissiveSpots.push({
+                            x: wx,
+                            y,
+                            z: wz,
+                            biome: biomeKey,
+                            nx: openDx / nLen,
+                            ny: openDy / nLen,
+                            nz: openDz / nLen,
+                        });
                     }
                 }
             }
@@ -6151,12 +7821,14 @@ export class Simple3D {
         geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
         geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
         geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+        geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
         geometry.setIndex(indices);
         geometry.computeBoundingSphere();
         geometry.computeBoundingBox();
 
         const material = new THREE.MeshLambertMaterial({
             vertexColors: true,
+            map: useAtlas ? this.voxelAtlasTexture : null,
         });
         const mesh = new THREE.Mesh(geometry, material);
         mesh.castShadow = false;
@@ -6164,6 +7836,7 @@ export class Simple3D {
         mesh.frustumCulled = true;
         mesh.userData.tag = 'terrain_voxel';
         mesh.userData.chunkKey = this.chunkKey(chunk.cx, chunk.cz);
+        mesh.userData.emissiveSpots = emissiveSpots;
         return mesh;
     }
 
@@ -6184,6 +7857,7 @@ export class Simple3D {
             if (!mesh) continue;
             this.terrainGroup.add(mesh);
             this.voxelChunkMeshes.set(key, mesh);
+            this._syncVoxelChunkEmissiveLights(THREE, key, mesh.userData?.emissiveSpots || []);
         }
         this.voxelDirtyChunkKeys.clear();
     }
@@ -6527,6 +8201,7 @@ export class Simple3D {
             prev_block_id: prev,
             next_block_id: 0,
         });
+        this.triggerInteractionAnimationPulse(0.20);
         this.updateVoxelPointerSelection();
         return true;
     }
@@ -6552,6 +8227,7 @@ export class Simple3D {
             prev_block_id: prev,
             next_block_id: placeId,
         });
+        this.triggerInteractionAnimationPulse(0.24);
         this.updateVoxelPointerSelection();
         return true;
     }

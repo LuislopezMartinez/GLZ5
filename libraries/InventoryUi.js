@@ -31,6 +31,8 @@ export class InventoryUi {
         this.onShiftClick = options.onShiftClick || null;
         this.onOpenChanged = options.onOpenChanged || null;
         this.onNoSplitTarget = options.onNoSplitTarget || null;
+        this.onHotbarSelectionChanged = options.onHotbarSelectionChanged || null;
+        this.onInventoryPayloadApplied = options.onInventoryPayloadApplied || null;
 
         this.inventoryBtn = null;
         this.inventoryModal = null;
@@ -202,8 +204,14 @@ export class InventoryUi {
         this.hotbarSlots = inv.hotbar;
         this.slots = inv.slots;
         this.items = inv.items;
+        const idx = Number(this.selectedSlotIndex);
+        if (!Number.isFinite(idx) || idx < 0 || idx >= this.hotbarSlots) {
+            this.selectedSlotIndex = 0;
+        }
         this.renderHotbarFromInventory();
         this.renderInventoryGrid();
+        this.onInventoryPayloadApplied?.(invRaw || null);
+        this.emitHotbarSelectionChanged();
     }
 
     getHotbarSlots() {
@@ -229,6 +237,7 @@ export class InventoryUi {
         this.selectedSlotIndex = idx;
         if (this.open) this.renderInventoryGrid();
         this.renderHotbarFromInventory();
+        this.emitHotbarSelectionChanged();
         return idx;
     }
 
@@ -252,6 +261,11 @@ export class InventoryUi {
         if (!itemCode) return '';
         const row = this.items[itemCode];
         return row?.name || itemCode;
+    }
+
+    getItemData(itemCode) {
+        if (!itemCode) return null;
+        return this.items[itemCode] || null;
     }
 
     getButtonEl() {
@@ -308,6 +322,14 @@ export class InventoryUi {
         this.selectedSlotIndex = null;
         this.renderInventoryGrid();
         this.renderHotbarFromInventory();
+        this.emitHotbarSelectionChanged();
+    }
+
+    emitHotbarSelectionChanged() {
+        const idx = this.getSelectedSlotIndex();
+        const slot = Number.isFinite(idx) ? this.getSlotData(idx) : null;
+        const item = slot?.item_code ? (this.items[slot.item_code] || null) : null;
+        this.onHotbarSelectionChanged?.(idx, slot, item);
     }
 
     async handleSlotPrimaryClick(idx, ev, opts = {}) {

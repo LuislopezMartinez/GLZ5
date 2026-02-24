@@ -1,0 +1,24 @@
+==================================================
+4) KIT FINAL DE BOXELS BASE (COMUNES)
+==================================================
+Kit recomendado (20):
+1. base_suelo_liso
+2. base_suelo_grano
+3. base_suelo_grietas_finas
+4. base_suelo_grietas_gruesas
+5. base_piedra_pequena
+6. base_piedra_media
+7. base_piedra_bloques
+8. base_roca_erosionada
+9. base_baldosa_lisa
+10. base_baldosa_rajada
+11. base_hormigon_liso
+12. base_hormigon_desgastado
+13. base_metal_panel
+14. base_metal_rayado
+15. base_rejilla_metal
+16. base_tierra_compacta
+17. base_grava
+18. base_arcilla
+19. base_transicion_suave
+20. base_detalle_micro

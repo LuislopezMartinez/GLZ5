@@ -51,6 +51,9 @@ class SimpleWsServer:
         self.inventory_total_slots = 32
         self.inventory_hotbar_slots = 8
         self.character_max_slots = 3
+        self.world_biome_top_blocks_cache: dict[int, dict] = {}
+        self.position_persist_min_interval_sec = 2.5
+        self.position_persist_min_distance = 0.9
 
     def _network_config_payload(self) -> dict:
         timeout_ms = self.network_settings.get("client_request_timeout_ms", 12000)
@@ -130,6 +133,10 @@ class SimpleWsServer:
         pos = sess.get("position") or {"x": 0.0, "y": 60.0, "z": 0.0}
         max_hp = max(1, int(sess.get("max_hp") or 1000))
         hp = max(0, min(max_hp, int(sess.get("hp") or max_hp)))
+        held_model_key = (sess.get("held_item_model_key") or "").strip()
+        held_transform = sess.get("held_item_transform")
+        if not isinstance(held_transform, dict):
+            held_transform = None
         return {
             "id": sess.get("user_id"),
             "username": sess.get("username"),
@@ -142,6 +149,8 @@ class SimpleWsServer:
             "animation_state": sess.get("animation_state") or "idle",
             "hp": int(hp),
             "max_hp": int(max_hp),
+            "held_item_model_key": held_model_key,
+            "held_item_transform": held_transform,
             "position": {
                 "x": float(pos.get("x", 0.0)),
                 "y": float(pos.get("y", 60.0)),
@@ -151,6 +160,57 @@ class SimpleWsServer:
 
     def _now_epoch(self) -> float:
         return datetime.now(timezone.utc).timestamp()
+
+    def _persist_session_position(self, session: dict, force: bool = False) -> bool:
+        if not isinstance(session, dict):
+            return False
+        user_id = int(session.get("user_id") or 0)
+        if user_id <= 0:
+            return False
+        pos = session.get("position")
+        if not isinstance(pos, dict):
+            return False
+        try:
+            x = float(pos.get("x") if pos.get("x") is not None else 0.0)
+            y = float(pos.get("y") if pos.get("y") is not None else 60.0)
+            z = float(pos.get("z") if pos.get("z") is not None else 0.0)
+        except Exception:
+            return False
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+            return False
+
+        x = max(-100000.0, min(100000.0, x))
+        y = max(-100000.0, min(100000.0, y))
+        z = max(-100000.0, min(100000.0, z))
+        now = self._now_epoch()
+
+        if not force:
+            last_pos = session.get("_last_persist_pos")
+            last_at = float(session.get("_last_persist_pos_at") or 0.0)
+            if isinstance(last_pos, dict):
+                try:
+                    lx = float(last_pos.get("x"))
+                    ly = float(last_pos.get("y"))
+                    lz = float(last_pos.get("z"))
+                    dx = x - lx
+                    dy = y - ly
+                    dz = z - lz
+                    moved = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+                except Exception:
+                    moved = 9999.0
+                if (
+                    moved < float(self.position_persist_min_distance)
+                    and (now - last_at) < float(self.position_persist_min_interval_sec)
+                ):
+                    return False
+        try:
+            self.db.admin_set_user_position(user_id, x, y, z)
+            session["_last_persist_pos"] = {"x": x, "y": y, "z": z}
+            session["_last_persist_pos_at"] = now
+            return True
+        except Exception as exc:
+            self.log(f"[WARN] No se pudo persistir posicion user_id={user_id}: {exc}")
+            return False
 
     def _normalize_removed_map(self, removed_raw) -> dict[str, float]:
         out: dict[str, float] = {}
@@ -541,6 +601,7 @@ class SimpleWsServer:
                 "rarity": row.get("rarity"),
                 "max_stack": int(row.get("max_stack") or 1),
                 "icon_key": row.get("icon_key"),
+                "model_key": row.get("model_key"),
                 "properties": props,
             }
         return {
@@ -826,6 +887,186 @@ class SimpleWsServer:
         v = self._lerp(ix0, ix1, sz)
         return (v * 2.0) - 1.0
 
+    def _random_from_int3d(self, x: int, y: int, z: int, seed_hash: int) -> float:
+        n = (
+            (int(x) * 374761393)
+            ^ (int(y) * 1442695041)
+            ^ (int(z) * 668265263)
+            ^ int(seed_hash)
+        ) & 0xFFFFFFFF
+        n = (n ^ (n >> 13)) & 0xFFFFFFFF
+        n = (n * 1274126177) & 0xFFFFFFFF
+        return float(n & 0x7FFFFFFF) / float(0x7FFFFFFF)
+
+    def _value_noise_3d(self, x: float, y: float, z: float, seed_hash: int) -> float:
+        x0 = math.floor(float(x))
+        y0 = math.floor(float(y))
+        z0 = math.floor(float(z))
+        x1 = x0 + 1
+        y1 = y0 + 1
+        z1 = z0 + 1
+        sx = self._smoothstep(float(x) - x0)
+        sy = self._smoothstep(float(y) - y0)
+        sz = self._smoothstep(float(z) - z0)
+        c000 = self._random_from_int3d(x0, y0, z0, seed_hash)
+        c100 = self._random_from_int3d(x1, y0, z0, seed_hash)
+        c010 = self._random_from_int3d(x0, y1, z0, seed_hash)
+        c110 = self._random_from_int3d(x1, y1, z0, seed_hash)
+        c001 = self._random_from_int3d(x0, y0, z1, seed_hash)
+        c101 = self._random_from_int3d(x1, y0, z1, seed_hash)
+        c011 = self._random_from_int3d(x0, y1, z1, seed_hash)
+        c111 = self._random_from_int3d(x1, y1, z1, seed_hash)
+        ix00 = self._lerp(c000, c100, sx)
+        ix10 = self._lerp(c010, c110, sx)
+        ix01 = self._lerp(c001, c101, sx)
+        ix11 = self._lerp(c011, c111, sx)
+        iy0 = self._lerp(ix00, ix10, sy)
+        iy1 = self._lerp(ix01, ix11, sy)
+        v = self._lerp(iy0, iy1, sz)
+        return (v * 2.0) - 1.0
+
+    def _should_carve_cave_at(self, world_seed: str, terrain_config: dict, biome: str, x: int, y: int, z: int, top_y: int, cave_seed_hash: int | None = None) -> bool:
+        if int(terrain_config.get("cave_enabled") if terrain_config.get("cave_enabled") is not None else 1) != 1:
+            return False
+        iy = int(y)
+        top = int(top_y)
+        min_y = max(1, min(64, int(terrain_config.get("cave_min_y") or 8)))
+        if iy < min_y:
+            return False
+        surface_buffer = max(2, min(12, int(terrain_config.get("cave_surface_buffer") or 4)))
+        if iy >= (top - surface_buffer):
+            return False
+        safe_r = max(0, min(64, int(terrain_config.get("cave_spawn_safe_radius") or 24)))
+        if safe_r > 0:
+            if ((int(x) * int(x)) + (int(z) * int(z))) <= (safe_r * safe_r):
+                return False
+
+        scale = max(0.010, min(0.120, float(terrain_config.get("cave_noise_scale") or 0.045)))
+        octaves = max(1, min(4, int(terrain_config.get("cave_noise_octaves") or 3)))
+        threshold = max(0.45, min(0.90, float(terrain_config.get("cave_density_threshold") or 0.62)))
+        b = (biome or "").strip().lower()
+        biome_adjust = {
+            "fire": -0.03,
+            "stone": -0.02,
+            "earth": 0.00,
+            "grass": +0.02,
+            "wind": +0.03,
+            "bridge": +0.04,
+        }.get(b, 0.0)
+        threshold = max(0.40, min(0.95, threshold + biome_adjust))
+
+        depth = max(0, top - iy)
+        if depth < (surface_buffer + 6):
+            threshold += 0.06
+        elif depth > 24:
+            threshold -= 0.03
+        threshold = max(0.40, min(0.95, threshold))
+
+        seed_h = int(cave_seed_hash) if cave_seed_hash is not None else self._seed_hash(f"{world_seed}:caves:v1")
+        noise = 0.0
+        weight = 0.0
+        freq = 1.0
+        amp = 1.0
+        for _ in range(octaves):
+            n = self._value_noise_3d(float(x) * scale * freq, float(iy) * scale * freq, float(z) * scale * freq, seed_h)
+            noise += n * amp
+            weight += amp
+            freq *= 2.03
+            amp *= 0.5
+        normalized = (noise / weight) if weight > 0 else 0.0
+        n01 = (normalized * 0.5) + 0.5
+        carve_noise = float(n01) > float(threshold)
+        carve_worm = self._should_carve_worm_at(world_seed, terrain_config, int(x), int(iy), int(z), int(top))
+        return bool(carve_noise or carve_worm)
+
+    def _dist2_point_segment_3d(self, px: float, py: float, pz: float, ax: float, ay: float, az: float, bx: float, by: float, bz: float) -> float:
+        abx = bx - ax
+        aby = by - ay
+        abz = bz - az
+        apx = px - ax
+        apy = py - ay
+        apz = pz - az
+        ab2 = (abx * abx) + (aby * aby) + (abz * abz)
+        if ab2 <= 1e-9:
+            return (apx * apx) + (apy * apy) + (apz * apz)
+        t = ((apx * abx) + (apy * aby) + (apz * abz)) / ab2
+        t = max(0.0, min(1.0, t))
+        qx = ax + (abx * t)
+        qy = ay + (aby * t)
+        qz = az + (abz * t)
+        dx = px - qx
+        dy = py - qy
+        dz = pz - qz
+        return (dx * dx) + (dy * dy) + (dz * dz)
+
+    def _should_carve_worm_at(self, world_seed: str, terrain_config: dict, x: int, y: int, z: int, top_y: int) -> bool:
+        if int(terrain_config.get("worm_enabled") if terrain_config.get("worm_enabled") is not None else 1) != 1:
+            return False
+        worm_count = max(0, min(8, int(terrain_config.get("worm_count") or 3)))
+        if worm_count <= 0:
+            return False
+        min_len = max(12.0, min(160.0, float(terrain_config.get("worm_length_min") or 48.0)))
+        max_len = max(min_len, min(220.0, float(terrain_config.get("worm_length_max") or 120.0)))
+        min_rad = max(0.8, min(6.0, float(terrain_config.get("worm_radius_min") or 2.2)))
+        max_rad = max(min_rad, min(9.0, float(terrain_config.get("worm_radius_max") or 4.8)))
+        region = 64
+        rx = math.floor(int(x) / region)
+        rz = math.floor(int(z) / region)
+        cave_min_y = max(1, min(64, int(terrain_config.get("cave_min_y") or 8)))
+        # Banda vertical razonable para iniciar worms (subterraneo, no profundo extremo).
+        band_top = max(cave_min_y + 6, int(top_y) - 8)
+        band_bot = max(cave_min_y + 2, int(top_y) - 44)
+        if band_top <= band_bot:
+            band_top = band_bot + 2
+
+        def rnd(seed_local: int, a: int, b: int) -> float:
+            return self._random_from_int2d(a, b, seed_local)
+
+        px = float(x)
+        py = float(y)
+        pz = float(z)
+        for rzz in range(rz - 1, rz + 2):
+            for rxx in range(rx - 1, rx + 2):
+                region_seed = self._seed_hash(f"{world_seed}:worms:v1:{rxx}:{rzz}")
+                base_x = rxx * region
+                base_z = rzz * region
+                for i in range(worm_count):
+                    sx = base_x + (rnd(region_seed, (rxx * 131) + (i * 17) + 11, (rzz * 193) - (i * 29) - 7) * region)
+                    sz = base_z + (rnd(region_seed, (rxx * 197) + (i * 23) + 5, (rzz * 149) - (i * 31) - 13) * region)
+                    sy = band_bot + (rnd(region_seed, (rxx * 167) + (i * 19) + 3, (rzz * 173) - (i * 37) - 9) * (band_top - band_bot))
+                    theta = rnd(region_seed, (rxx * 181) + (i * 41) + 1, (rzz * 211) - (i * 43) - 1) * (math.pi * 2.0)
+                    length = min_len + (rnd(region_seed, (rxx * 223) + (i * 47) + 2, (rzz * 227) - (i * 53) - 2) * (max_len - min_len))
+                    radius = min_rad + (rnd(region_seed, (rxx * 229) + (i * 59) + 4, (rzz * 233) - (i * 61) - 4) * (max_rad - min_rad))
+                    dy_slope = (rnd(region_seed, (rxx * 239) + (i * 67) + 6, (rzz * 241) - (i * 71) - 6) - 0.5) * (length * 0.18)
+                    curve_lat = (rnd(region_seed, (rxx * 251) + (i * 73) + 8, (rzz * 257) - (i * 79) - 8) - 0.5) * (length * 0.45)
+                    curve_y = (rnd(region_seed, (rxx * 263) + (i * 83) + 10, (rzz * 269) - (i * 89) - 10) - 0.5) * (length * 0.22)
+                    dx = math.cos(theta)
+                    dz = math.sin(theta)
+                    px_perp = -dz
+                    pz_perp = dx
+                    ex = sx + (dx * length)
+                    ey = sy + dy_slope
+                    ez = sz + (dz * length)
+                    mx = sx + (dx * (length * 0.5)) + (px_perp * curve_lat)
+                    my = sy + (dy_slope * 0.5) + curve_y
+                    mz = sz + (dz * (length * 0.5)) + (pz_perp * curve_lat)
+                    rad2 = radius * radius
+                    min_x = min(sx, mx, ex) - radius
+                    max_x = max(sx, mx, ex) + radius
+                    min_y = min(sy, my, ey) - radius
+                    max_y = max(sy, my, ey) + radius
+                    min_z = min(sz, mz, ez) - radius
+                    max_z = max(sz, mz, ez) + radius
+                    if px < min_x or px > max_x or py < min_y or py > max_y or pz < min_z or pz > max_z:
+                        continue
+                    d2a = self._dist2_point_segment_3d(px, py, pz, sx, sy, sz, mx, my, mz)
+                    if d2a <= rad2:
+                        return True
+                    d2b = self._dist2_point_segment_3d(px, py, pz, mx, my, mz, ex, ey, ez)
+                    if d2b <= rad2:
+                        return True
+        return False
+
     def _sample_fixed_column_height(self, world_seed: str, terrain_config: dict, terrain_cells: dict, wx: int, wz: int):
         layout = (terrain_config.get("biome_layout") or "").strip().lower()
         if layout == "quadrants":
@@ -886,28 +1127,348 @@ class SimpleWsServer:
         layout = (terrain_config.get("biome_layout") or "").strip().lower()
         return layout not in {"quadrants"}
 
-    def _biome_top_block_id(self, biome: str) -> int:
+    def _base_boxel_default_defs(self) -> dict[int, dict]:
+        # Kit base oficial (20 boxels), en orden fila-major dentro del atlas 6x4:
+        # id=1 -> [0,0], id=2 -> [1,0], ..., id=20 -> [1,3]
+        atlas = "assets/sprites/texturas/atlas_base_boxel.png"
+        out: dict[int, dict] = {}
+        cols = 6
+        for bid in range(1, 21):
+            idx = bid - 1
+            col = idx % cols
+            row = idx // cols
+            out[bid] = {
+                "block_id": int(bid),
+                "atlas": atlas,
+                "tile_col": int(col),
+                "tile_row": int(row),
+                "tile_cols": 6,
+                "tile_rows": 4,
+                "cell_inner_px": 256,
+                "cell_border_px": 1,
+            }
+        return out
+
+    def _pick_weighted_block(self, world_seed: str, x: int, z: int, salt: str, entries: list[tuple[int, float]], fallback_block_id: int = 1) -> int:
+        valid: list[tuple[int, float]] = []
+        total_w = 0.0
+        for block_id, weight in entries or []:
+            try:
+                bid = max(1, int(block_id))
+                w = float(weight)
+            except Exception:
+                continue
+            if w <= 0:
+                continue
+            valid.append((bid, w))
+            total_w += w
+        if total_w <= 0.0 or not valid:
+            return max(1, int(fallback_block_id or 1))
+        seed_h = self._seed_hash(f"{world_seed}:{salt}")
+        jitter = self._seed_hash(salt) & 0xFFFF
+        r = self._random_from_int2d(int(x) + jitter, int(z) - jitter, seed_h)
+        t = max(0.0, min(0.999999, float(r))) * total_w
+        acc = 0.0
+        for bid, w in valid:
+            acc += w
+            if t <= acc:
+                return int(bid)
+        return int(valid[-1][0])
+
+    def _default_surface_block_id(self, world_seed: str, biome: str, x: int, z: int, slope_hint: float) -> int:
         b = (biome or "").strip().lower()
-        if b in {"fire", "lava"}:
-            return 5
-        if b == "wind":
-            return 6
-        if b == "bridge":
-            return 7
-        if b == "stone":
-            return 4
-        if b == "earth":
-            return 3
-        return 2
+        slope = max(0.0, float(slope_hint or 0.0))
+        # slope_bin: 0 llano, 1 medio, 2 escarpado
+        slope_bin = 0 if slope < 1.0 else (1 if slope < 2.5 else 2)
+        by_biome: dict[str, list[tuple[int, float]]] = {
+            "grass": [(2, 3.0), (1, 2.2), (3, 1.6), (16, 1.0), (17, 0.8), (19, 0.6), (20, 0.35)],
+            "earth": [(16, 2.8), (18, 2.0), (17, 1.8), (3, 1.2), (1, 0.8), (19, 0.7), (20, 0.35)],
+            "stone": [(5, 2.6), (6, 2.2), (8, 1.5), (7, 1.2), (3, 0.8), (19, 0.45), (20, 0.3)],
+            "fire": [(4, 2.5), (3, 1.9), (8, 1.8), (6, 1.3), (14, 0.9), (19, 0.5), (20, 0.4)],
+            "wind": [(9, 2.1), (10, 1.8), (11, 1.5), (12, 1.2), (1, 0.7), (19, 0.55), (20, 0.35)],
+            "bridge": [(13, 2.5), (14, 2.2), (15, 1.7), (10, 1.0), (11, 0.8), (19, 0.45), (20, 0.35)],
+        }
+        base = by_biome.get(b) or by_biome["grass"]
+        adjusted: list[tuple[int, float]] = []
+        for bid, w in base:
+            ww = float(w)
+            # En pendientes altas, favorecer roca/estructura y transicion.
+            if slope_bin == 1:
+                if bid in {5, 6, 7, 8, 11, 12, 13, 14, 15}:
+                    ww *= 1.35
+                if bid in {2, 16, 18}:
+                    ww *= 0.78
+                if bid == 19:
+                    ww *= 1.20
+            elif slope_bin == 2:
+                if bid in {5, 6, 7, 8, 11, 12, 13, 14, 15}:
+                    ww *= 1.8
+                if bid in {1, 2, 16, 17, 18}:
+                    ww *= 0.5
+                if bid == 19:
+                    ww *= 1.45
+            adjusted.append((bid, ww))
+        return self._pick_weighted_block(
+            world_seed,
+            int(x),
+            int(z),
+            f"surface:{b}:s{slope_bin}",
+            adjusted,
+            fallback_block_id=2,
+        )
+
+    def _default_subsoil_block_id(self, world_seed: str, biome: str, x: int, y: int, z: int) -> int:
+        b = (biome or "").strip().lower()
+        by_biome: dict[str, list[tuple[int, float]]] = {
+            "grass": [(16, 2.6), (17, 1.8), (18, 1.6), (3, 1.1), (19, 0.5)],
+            "earth": [(16, 2.7), (18, 2.1), (17, 1.6), (3, 1.0), (19, 0.5)],
+            "stone": [(6, 2.2), (5, 1.7), (7, 1.5), (8, 1.2), (19, 0.4)],
+            "fire": [(6, 2.0), (8, 1.9), (4, 1.3), (3, 1.2), (19, 0.55)],
+            "wind": [(11, 1.8), (12, 1.7), (9, 1.4), (10, 1.2), (19, 0.5)],
+            "bridge": [(13, 2.1), (14, 1.9), (15, 1.4), (11, 1.0), (19, 0.5)],
+        }
+        base = by_biome.get(b) or by_biome["grass"]
+        return self._pick_weighted_block(
+            world_seed,
+            int(x) + (int(y) * 11),
+            int(z) - (int(y) * 7),
+            f"subsoil:{b}",
+            base,
+            fallback_block_id=16,
+        )
+
+    def _default_deep_block_id(self, world_seed: str, biome: str, x: int, y: int, z: int) -> int:
+        b = (biome or "").strip().lower()
+        by_biome: dict[str, list[tuple[int, float]]] = {
+            "grass": [(6, 2.8), (7, 2.1), (5, 1.8), (8, 1.2), (17, 0.6), (20, 0.25)],
+            "earth": [(6, 2.7), (7, 2.2), (5, 1.7), (8, 1.3), (18, 0.55), (20, 0.25)],
+            "stone": [(7, 2.9), (6, 2.3), (5, 1.7), (8, 1.3), (12, 0.45), (20, 0.25)],
+            "fire": [(8, 2.4), (6, 2.1), (7, 1.8), (4, 1.2), (14, 0.6), (20, 0.35)],
+            "wind": [(12, 2.1), (11, 2.0), (6, 1.5), (7, 1.2), (9, 0.8), (20, 0.25)],
+            "bridge": [(14, 2.2), (13, 2.0), (15, 1.5), (11, 1.0), (7, 0.8), (20, 0.25)],
+        }
+        base = by_biome.get(b) or by_biome["grass"]
+        return self._pick_weighted_block(
+            world_seed,
+            int(x) + (int(y) * 17),
+            int(z) - (int(y) * 13),
+            f"deep:{b}",
+            base,
+            fallback_block_id=6,
+        )
+
+    def _maybe_promote_emissive_block(self, world_seed: str, terrain_config: dict, block_id: int, x: int, y: int, z: int, top_y: int) -> int:
+        bid = max(0, int(block_id or 0))
+        if bid <= 0:
+            return 0
+        if int(terrain_config.get("cave_emissive_enabled") if terrain_config.get("cave_emissive_enabled") is not None else 1) != 1:
+            return bid
+        iy = int(y)
+        top = int(top_y)
+        surface_buffer = max(2, min(12, int(terrain_config.get("cave_surface_buffer") or 4)))
+        if iy >= (top - (surface_buffer + 2)):
+            return bid
+        density = max(0.0, min(0.08, float(terrain_config.get("cave_emissive_density") or 0.018)))
+        if density <= 0.0:
+            return bid
+        depth = max(0, top - iy)
+        depth_mul = 1.0 + min(0.9, max(0.0, (depth - 8) * 0.03))
+        chance = max(0.0, min(0.25, density * depth_mul))
+        seed_h = self._seed_hash(f"{world_seed}:cave-emissive:v1")
+        r = self._random_from_int3d(int(x), int(y), int(z), seed_h)
+        if r < chance:
+            return 20
+        return bid
+
+    def _column_slope_hint(self, world_seed: str, terrain_config: dict, terrain_cells: dict, x: int, z: int, top_y: int) -> float:
+        # Coste constante (4 muestras) solo para superficie.
+        y_px = int(top_y)
+        hpx = self._sample_fixed_column_height(world_seed, terrain_config, terrain_cells, int(x) + 1, int(z))[0]
+        hnx = self._sample_fixed_column_height(world_seed, terrain_config, terrain_cells, int(x) - 1, int(z))[0]
+        hpz = self._sample_fixed_column_height(world_seed, terrain_config, terrain_cells, int(x), int(z) + 1)[0]
+        hnz = self._sample_fixed_column_height(world_seed, terrain_config, terrain_cells, int(x), int(z) - 1)[0]
+        return float(max(abs(int(hpx) - y_px), abs(int(hnx) - y_px), abs(int(hpz) - y_px), abs(int(hnz) - y_px)))
+
+    def _load_world_biome_top_blocks(self, world_id: int) -> dict[str, list[int]]:
+        wid = int(world_id or 0)
+        if wid <= 0:
+            return {}
+        now = self._now_epoch()
+        cached = self.world_biome_top_blocks_cache.get(wid)
+        if isinstance(cached, dict):
+            age = now - float(cached.get("ts") or 0.0)
+            if age <= 10.0 and isinstance(cached.get("map"), dict):
+                return cached.get("map") or {}
+
+        out: dict[str, list[int]] = {}
+        try:
+            rows = self.db.list_items(limit=5000, active_only=True)
+        except Exception:
+            rows = []
+        valid_biomes = {"grass", "earth", "stone", "fire", "wind", "bridge"}
+        for row in rows or []:
+            item_type = str(row.get("item_type") or "").strip().lower()
+            if item_type not in {"boxel", "voxel", "bloque"}:
+                continue
+            code_raw = str(row.get("item_code") or "").strip()
+            try:
+                block_id = int(code_raw)
+            except Exception:
+                continue
+            if block_id <= 0:
+                continue
+            voxel = self._extract_voxel_cfg_from_item_props(row.get("properties_json"))
+            has_explicit_cell = any(k in voxel for k in ("tile_col", "tile_row", "cell_col", "cell_row", "col", "row", "tile_index", "cell_index"))
+            if not has_explicit_cell:
+                continue
+            biomes = voxel.get("biomes")
+            if not isinstance(biomes, list):
+                legacy = voxel.get("biome")
+                biomes = [legacy] if legacy else []
+            normalized = []
+            for b in biomes:
+                key = str(b or "").strip().lower()
+                if key in valid_biomes and key not in normalized:
+                    normalized.append(key)
+            for b in normalized:
+                arr = out.setdefault(b, [])
+                if block_id not in arr:
+                    arr.append(block_id)
+
+        self.world_biome_top_blocks_cache[wid] = {"ts": now, "map": out}
+        return out
+
+    def _extract_voxel_cfg_from_item_props(self, props_raw) -> dict:
+        props = props_raw
+        if isinstance(props, str):
+            try:
+                props = json.loads(props or "{}")
+            except Exception:
+                props = {}
+        if not isinstance(props, dict):
+            props = {}
+
+        voxel = props.get("voxel")
+        if isinstance(voxel, str):
+            try:
+                voxel = json.loads(voxel)
+            except Exception:
+                voxel = {}
+        if not isinstance(voxel, dict):
+            voxel = {}
+
+        # Compatibilidad legacy: claves voxel guardadas en raiz.
+        if not voxel and any(k in props for k in ("atlas", "atlas_path", "texture", "texture_atlas", "tile_col", "tile_row", "cell_col", "cell_row", "tile_index", "cell_index")):
+            voxel = dict(props)
+        return voxel
+
+    def _list_world_voxel_block_defs(self, world_id: int) -> list[dict]:
+        wid = int(world_id or 0)
+        out: dict[int, dict] = {}
+
+        # Definiciones base oficiales: kit 20 boxels en atlas_base_boxel.png
+        out.update(self._base_boxel_default_defs())
+
+        try:
+            rows = self.db.list_items(limit=10000, active_only=True)
+        except Exception:
+            rows = []
+
+        for row in rows or []:
+            item_type = str(row.get("item_type") or "").strip().lower()
+            if item_type not in {"boxel", "voxel", "bloque"}:
+                continue
+            code_raw = str(row.get("item_code") or "").strip()
+            try:
+                block_id = int(code_raw)
+            except Exception:
+                continue
+            if block_id <= 0:
+                continue
+
+            voxel = self._extract_voxel_cfg_from_item_props(row.get("properties_json"))
+
+            atlas = str(
+                voxel.get("atlas")
+                or voxel.get("atlas_path")
+                or voxel.get("texture")
+                or voxel.get("texture_atlas")
+                or "assets/sprites/texturas/atlas_base_boxel.png"
+            ).strip().replace("\\", "/")
+            if not atlas:
+                atlas = "assets/sprites/texturas/atlas_base_boxel.png"
+            if atlas.startswith("./"):
+                atlas = atlas[2:]
+
+            def _to_int(v, default):
+                try:
+                    return int(v)
+                except Exception:
+                    return int(default)
+
+            has_explicit_cell = any(k in voxel for k in ("tile_col", "tile_row", "cell_col", "cell_row", "col", "row", "tile_index", "cell_index"))
+            # Si no hay celda explicita, no sobreescribimos defaults legacy.
+            if not has_explicit_cell and int(block_id) in out:
+                continue
+
+            tile_col = _to_int(voxel.get("tile_col", voxel.get("cell_col", voxel.get("col", 0))), 0)
+            tile_row = _to_int(voxel.get("tile_row", voxel.get("cell_row", voxel.get("row", 0))), 0)
+            # Layout atlas definitivo: 6x4 (sin compat legacy 64/12x12).
+            tile_cols = 6
+            tile_rows = 4
+            cell_inner_px = 256
+            cell_border_px = 1
+            missing_col = ("tile_col" not in voxel and "cell_col" not in voxel and "col" not in voxel)
+            missing_row = ("tile_row" not in voxel and "cell_row" not in voxel and "row" not in voxel)
+            if ("tile_index" in voxel or "cell_index" in voxel) and missing_col and missing_row:
+                idx = _to_int(voxel.get("tile_index", voxel.get("cell_index", 0)), 0)
+                idx = max(0, idx)
+                tile_col = idx % tile_cols
+                tile_row = idx // tile_cols
+            tile_col = max(0, min(tile_cols - 1, tile_col))
+            tile_row = max(0, min(tile_rows - 1, tile_row))
+
+            out[int(block_id)] = {
+                "block_id": int(block_id),
+                "atlas": atlas,
+                "tile_col": int(tile_col),
+                "tile_row": int(tile_row),
+                "tile_cols": int(tile_cols),
+                "tile_rows": int(tile_rows),
+                "cell_inner_px": int(cell_inner_px),
+                "cell_border_px": int(cell_border_px),
+            }
+
+        return [out[k] for k in sorted(out.keys())]
+
+    def _biome_top_block_id(self, world_id: int, world_seed: str, biome: str, x: int, z: int, slope_hint: float = 0.0) -> int:
+        b = (biome or "").strip().lower()
+        custom_map = self._load_world_biome_top_blocks(int(world_id or 0))
+        candidates = custom_map.get(b) if isinstance(custom_map, dict) else None
+        if isinstance(candidates, list) and candidates:
+            if len(candidates) == 1:
+                return int(candidates[0])
+            weighted = [(int(bid), 1.0) for bid in candidates]
+            return self._pick_weighted_block(
+                world_seed,
+                int(x),
+                int(z),
+                f"custom-surface:{b}",
+                weighted,
+                fallback_block_id=int(candidates[0]),
+            )
+        return self._default_surface_block_id(world_seed, b, int(x), int(z), float(slope_hint or 0.0))
 
     def _base_block_id_at(self, world: dict, terrain_config: dict, terrain_cells: dict, x: int, y: int, z: int) -> int:
         iy = int(y)
         if iy < 0 or iy >= int(self.voxel_world_height):
             return 0
+        world_seed = str(world.get("seed") or "default-seed")
+        cave_seed_hash = self._seed_hash(f"{world_seed}:caves:v1")
         style = (terrain_config.get("world_style") or "fixed_biome_grid").strip().lower()
         if style == "fixed_biome_grid":
             top_y, biome = self._sample_fixed_column_height(
-                str(world.get("seed") or "default-seed"),
+                world_seed,
                 terrain_config or {},
                 terrain_cells or {},
                 int(x),
@@ -915,7 +1476,7 @@ class SimpleWsServer:
             )
         else:
             top_y, biome = self._sample_fixed_column_height(
-                str(world.get("seed") or "default-seed"),
+                world_seed,
                 terrain_config or {},
                 terrain_cells or {},
                 int(x),
@@ -925,11 +1486,44 @@ class SimpleWsServer:
             return 0
         if iy > int(top_y):
             return 0
+        block_id = 0
         if iy == int(top_y):
-            return self._biome_top_block_id(biome)
-        if iy >= (int(top_y) - 3):
-            return 3
-        return 1
+            slope_hint = self._column_slope_hint(
+                world_seed,
+                terrain_config or {},
+                terrain_cells or {},
+                int(x),
+                int(z),
+                int(top_y),
+            )
+            block_id = self._biome_top_block_id(
+                int(world.get("id") or 0),
+                world_seed,
+                biome,
+                int(x),
+                int(z),
+                slope_hint,
+            )
+        elif iy >= (int(top_y) - 3):
+            block_id = self._default_subsoil_block_id(
+                world_seed,
+                biome,
+                int(x),
+                int(y),
+                int(z),
+            )
+        else:
+            block_id = self._default_deep_block_id(
+                world_seed,
+                biome,
+                int(x),
+                int(y),
+                int(z),
+            )
+        block_id = self._maybe_promote_emissive_block(world_seed, terrain_config or {}, block_id, int(x), iy, int(z), int(top_y))
+        if block_id > 0 and self._should_carve_cave_at(world_seed, terrain_config or {}, biome, int(x), iy, int(z), int(top_y), cave_seed_hash):
+            return 0
+        return int(block_id)
 
     def _effective_block_id_at(self, world_id: int, world: dict, terrain_config: dict, terrain_cells: dict, x: int, y: int, z: int) -> int:
         key = self._voxel_key(x, y, z)
@@ -1312,6 +1906,7 @@ class SimpleWsServer:
                         exclude=websocket,
                     )
                     self._cleanup_world_loot_world(session.get("world_id"), session.get("world_name"))
+                self._persist_session_position(session, force=True)
                 try:
                     self.db.set_online_status(session["user_id"], False)
                 except Exception as exc:
@@ -1538,6 +2133,8 @@ class SimpleWsServer:
                     "in_world": False,
                     "world_name": None,
                     "position": {"x": 0.0, "y": 60.0, "z": 0.0},
+                    "held_item_model_key": "",
+                    "held_item_transform": None,
                 }
                 await self._send_response(
                     websocket,
@@ -1576,6 +2173,7 @@ class SimpleWsServer:
                         {"id": session.get("user_id"), "username": session.get("username")},
                         exclude=websocket,
                     )
+                self._persist_session_position(session, force=True)
                 self.db.set_online_status(session["user_id"], False)
                 await self._send_response(websocket, req_id, action, {"ok": True})
                 await self._broadcast_event(
@@ -2153,6 +2751,7 @@ class SimpleWsServer:
                 decor_removed = list((decor_removed_map or {}).keys())
                 world_loot = list(self._world_loot_bucket(int(world["id"])).values())
                 voxel_overrides = self._list_voxel_overrides_payload(int(world["id"]))
+                voxel_block_defs = self._list_world_voxel_block_defs(int(world["id"]))
 
                 spawn_hint = terrain_config.get("spawn_hint") or {"x": 0.0, "y": 60.0, "z": 0.0}
                 if user_row.get("last_pos_y") is None or float(spawn_y) > 200:
@@ -2172,6 +2771,7 @@ class SimpleWsServer:
                     session["spawn_hint"],
                 )
                 session["position"] = dict(session_pos)
+                self._persist_session_position(session, force=True)
                 session["void_height"] = float(terrain_config.get("void_height") or -90.0)
                 session["fall_death_enabled"] = self._as_bool_flag(world.get("fall_death_enabled"), True)
                 session["void_death_enabled"] = self._as_bool_flag(world.get("void_death_enabled"), True)
@@ -2179,6 +2779,8 @@ class SimpleWsServer:
                 session["fall_peak_y"] = float(session_pos["y"])
                 session["falling_active"] = False
                 session["spawn_protect_until"] = self._now_epoch() + 1.8
+                session["held_item_model_key"] = ""
+                session["held_item_transform"] = None
 
                 other_players = []
                 for ws, sess in self.sessions.items():
@@ -2240,6 +2842,7 @@ class SimpleWsServer:
                         },
                         "world_loot": world_loot,
                         "voxel_overrides": voxel_overrides,
+                        "voxel_block_defs": voxel_block_defs,
                         "spawn": session_pos,
                         "player": {
                             "id": user_row["id"],
@@ -2282,6 +2885,8 @@ class SimpleWsServer:
                         "animation_state": session.get("animation_state") or "idle",
                         "hp": int(session.get("hp") or 1000),
                         "max_hp": max(1, int(session.get("max_hp") or 1000)),
+                        "held_item_model_key": session.get("held_item_model_key") or "",
+                        "held_item_transform": session.get("held_item_transform"),
                         "position": session_pos,
                     },
                     exclude=websocket,
@@ -2471,8 +3076,25 @@ class SimpleWsServer:
                     if pos.get("z") is not None:
                         z = float(pos.get("z", z))
                 anim = (payload.get("animation_state") or session.get("animation_state") or "idle").strip().lower()
-                if anim not in {"idle", "walk", "gather"}:
+                if anim not in {"idle", "walk", "gather", "holding"}:
                     anim = "idle"
+                # Importante: si cliente envia '' o null, debe limpiar estado remoto.
+                if "held_item_model_key" in payload:
+                    held_item_model_key = (payload.get("held_item_model_key") or "").strip().replace("\\", "/")
+                else:
+                    held_item_model_key = (session.get("held_item_model_key") or "").strip().replace("\\", "/")
+                if len(held_item_model_key) > 260:
+                    held_item_model_key = held_item_model_key[:260]
+                if held_item_model_key and not held_item_model_key.lower().endswith((".obj", ".glb", ".gltf")):
+                    held_item_model_key = ""
+
+                if "held_item_transform" in payload:
+                    incoming_transform = payload.get("held_item_transform")
+                    held_item_transform = incoming_transform if isinstance(incoming_transform, dict) else None
+                else:
+                    held_item_transform = session.get("held_item_transform")
+                    if not isinstance(held_item_transform, dict):
+                        held_item_transform = None
                 prev_y = float(cur.get("y", 60.0))
                 fall_peak = float(session.get("fall_peak_y", prev_y))
                 falling_before = bool(session.get("falling_active", False))
@@ -2501,8 +3123,11 @@ class SimpleWsServer:
 
                 session["position"] = {"x": x, "y": y, "z": z}
                 session["animation_state"] = anim
+                session["held_item_model_key"] = held_item_model_key
+                session["held_item_transform"] = held_item_transform
                 session["fall_peak_y"] = float(fall_peak)
                 session["falling_active"] = bool(falling_now)
+                self._persist_session_position(session, force=False)
 
                 if resolve_fall_now and not spawn_protected:
                     max_hp = max(1, int(session.get("max_hp") or 1000))
@@ -2585,6 +3210,8 @@ class SimpleWsServer:
                         "animation_state": anim,
                         "hp": int(session.get("hp") or 1000),
                         "max_hp": max(1, int(session.get("max_hp") or 1000)),
+                        "held_item_model_key": session.get("held_item_model_key") or "",
+                        "held_item_transform": session.get("held_item_transform"),
                         "position": {"x": x, "y": y, "z": z},
                     },
                     exclude=websocket,
